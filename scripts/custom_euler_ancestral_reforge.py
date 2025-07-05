@@ -84,11 +84,18 @@ def patch_samplers_globally():
                             sigmas[0], sigmas[-2], len(sigmas) - 1, power, sigmas.device
                         )
                 elif current_sampler_settings.get('use_anime_schedule', False) and not current_sampler_settings.get('debug_reproducibility', False):
-                    print("🎨 Overriding sigma schedule with Anime-Optimized Schedule (AOS).")
-                    if len(sigmas) > 1:
-                        final_sigmas = script_instance.create_anime_optimized_sigmas(
-                            sigmas[0], sigmas[-2], len(sigmas) - 1, sigmas.device
-                        )
+                    if current_sampler_settings.get('use_anime_schedule_v', False):
+                        print("🎨 Overriding sigma schedule with Anime-Optimized Schedule (AOS-V).")
+                        if len(sigmas) > 1:
+                            final_sigmas = script_instance.create_aos_v_sigmas(
+                                sigmas[0], sigmas[-2], len(sigmas) - 1, sigmas.device
+                            )
+                    elif current_sampler_settings.get('use_anime_schedule_e', False):
+                        print("🎨 Overriding sigma schedule with Anime-Optimized Schedule (AOS-ε).")
+                        if len(sigmas) > 1:
+                            final_sigmas = script_instance.create_aos_e_sigmas(
+                                sigmas[0], sigmas[-2], len(sigmas) - 1, sigmas.device
+                            )
                 
                 return script_instance.sample_enhanced_euler_ancestral(
                     model, x, final_sigmas, extra_args=extra_args, callback=callback, disable=disable,
@@ -135,7 +142,7 @@ class AdeptSamplerForge(scripts.Script):
                         gr.Markdown("### Scheduler Override\nReplace the default time steps with a custom schedule.")
                         
                         self.scheduler_override = gr.Radio(
-                            ["None", "Anime-Optimized (AOS)", "Entropic"],
+                            ["None", "AOS-V (for v-prediction)", "AOS-ε (for ε-prediction)", "Entropic"],
                             label="Scheduler",
                             value="None"
                         )
@@ -149,8 +156,8 @@ class AdeptSamplerForge(scripts.Script):
                             )
                         
                         with gr.Group(visible=False) as aos_plus_options:
-                            gr.Markdown("⚠️ **Compatibility Warning:** AOS is heavily optimized for **v-prediction** models. Using it with **epsilon-prediction** models may break the generation.")
-                            self.use_content_aware_pacing = gr.Checkbox(label='Enable Content-Aware Pacing (AOS Only)', value=False, info="Dynamically adjusts pacing based on image coherence. May improve low-step-count results.")
+                            gr.Markdown("⚠️ **Compatibility Warning:** Use the correct AOS variant for your model type. **AOS-V** is for **v-prediction** models. **AOS-ε** is for **epsilon-prediction** models. Mismatching them may break the generation.")
+                            self.use_content_aware_pacing = gr.Checkbox(label='Enable Content-Aware Pacing (AOS Only)', value=False, info="Dynamically adjusts pacing based on image coherence. Requires higher step counts (model recommended step count * 1.5) for effective phasing.")
                             self.pacing_coherence_sensitivity = gr.Slider(
                                 label='Coherence Sensitivity',
                                 minimum=0.1, maximum=1.0, value=0.75, step=0.05,
@@ -159,8 +166,9 @@ class AdeptSamplerForge(scripts.Script):
                             self.debug_stop_after_coherence = gr.Checkbox(label='[Debug] Stop after coherence', value=False, info="Stops generation immediately after coherence is detected, skipping the detail phase.")
 
                         def on_scheduler_change(scheduler):
+                            is_aos = "AOS-V" in scheduler or "AOS-ε" in scheduler
                             return {
-                                aos_plus_options: gr.update(visible=scheduler == "Anime-Optimized (AOS)"),
+                                aos_plus_options: gr.update(visible=is_aos),
                                 entropic_options: gr.update(visible=scheduler == "Entropic")
                             }
 
@@ -220,8 +228,12 @@ class AdeptSamplerForge(scripts.Script):
             if 'adept_sampler_enabled' not in params:
                 return gr.update()
             
-            if str(params.get('anime_optimized_schedule')).lower() == 'true':
-                return "Anime-Optimized (AOS)"
+            aos_schedule = params.get('anime_optimized_schedule')
+            if aos_schedule == 'V':
+                return "AOS-V (for v-prediction)"
+            elif aos_schedule == 'Epsilon':
+                return "AOS-ε (for ε-prediction)"
+            
             if str(params.get('entropic_scheduler')).lower() == 'true':
                 return "Entropic"
             
@@ -251,7 +263,9 @@ class AdeptSamplerForge(scripts.Script):
         ) = script_args
 
         # Set scheduler flags based on the radio button choice
-        use_anime_schedule = (scheduler_override == "Anime-Optimized (AOS)")
+        use_anime_schedule_v = (scheduler_override == "AOS-V (for v-prediction)")
+        use_anime_schedule_e = (scheduler_override == "AOS-ε (for ε-prediction)")
+        use_anime_schedule = use_anime_schedule_v or use_anime_schedule_e
         use_entropic_scheduler = (scheduler_override == "Entropic")
 
         # Progressive enhancement is now tied to the detail enhancement checkbox
@@ -267,6 +281,8 @@ class AdeptSamplerForge(scripts.Script):
             'use_entropic_scheduler': use_entropic_scheduler,
             'entropic_scheduler_power': entropic_scheduler_power,
             'use_anime_schedule': use_anime_schedule,
+            'use_anime_schedule_v': use_anime_schedule_v,
+            'use_anime_schedule_e': use_anime_schedule_e,
             'use_content_aware_pacing': use_content_aware_pacing and use_anime_schedule, # Only works with AOS
             'pacing_coherence_sensitivity': pacing_coherence_sensitivity,
             'debug_stop_after_coherence': debug_stop_after_coherence and use_content_aware_pacing,
@@ -293,7 +309,7 @@ class AdeptSamplerForge(scripts.Script):
                 'debug_reproducibility': debug_reproducibility,
                 'entropic_scheduler': use_entropic_scheduler and not debug_reproducibility,
                 'entropic_power': entropic_scheduler_power if use_entropic_scheduler and not use_anime_schedule else 'N/A',
-                'anime_optimized_schedule': use_anime_schedule and not debug_reproducibility,
+                'anime_optimized_schedule': 'V' if use_anime_schedule_v else ('Epsilon' if use_anime_schedule_e else 'N/A'),
                 'content_aware_pacing': use_content_aware_pacing and use_anime_schedule,
                 'coherence_sensitivity': pacing_coherence_sensitivity if use_content_aware_pacing and use_anime_schedule else 'N/A',
                 'debug_stop_after_coherence': debug_stop_after_coherence and use_content_aware_pacing and use_anime_schedule,
@@ -482,8 +498,10 @@ class AdeptSamplerForge(scripts.Script):
 
     def create_detail_schedule(self, sigma_max, sigma_min, num_steps, device):
         """Creates a schedule for the detail phase, respecting the original scheduler choice."""
-        if current_sampler_settings.get('use_anime_schedule'):
-            return self.create_anime_optimized_sigmas(sigma_max, sigma_min, num_steps, device)
+        if current_sampler_settings.get('use_anime_schedule_v'):
+            return self.create_aos_v_sigmas(sigma_max, sigma_min, num_steps, device)
+        elif current_sampler_settings.get('use_anime_schedule_e'):
+            return self.create_aos_e_sigmas(sigma_max, sigma_min, num_steps, device)
         elif current_sampler_settings.get('use_entropic_scheduler'):
             power = current_sampler_settings.get('entropic_scheduler_power', 3.0)
             return self.create_entropic_sigmas(sigma_max, sigma_min, num_steps, power, device)
@@ -516,8 +534,8 @@ class AdeptSamplerForge(scripts.Script):
                 return torch.randn_like(x)
             return simple_noise_sampler
 
-    def create_anime_optimized_sigmas(self, sigma_max, sigma_min, num_steps, device='cpu'):
-        """Creates a three-phase noise schedule optimized for anime aesthetics."""
+    def create_aos_v_sigmas(self, sigma_max, sigma_min, num_steps, device='cpu'):
+        """Creates a three-phase noise schedule optimized for anime aesthetics on v-prediction models."""
         rho = 7.0  # karras-ve rho
         
         # Phase boundaries (as fractions of total steps)
@@ -540,6 +558,41 @@ class AdeptSamplerForge(scripts.Script):
         # Phase 3: Detail Refinement (slow, extended tail)
         # Power > 1 starts slow then speeds up at the very end.
         phase3_base = torch.linspace(0, 1, num_steps - p2_steps, device=device) ** 3
+        phase3_ramp = phase3_base * (1 - ramp_p2_val) + ramp_p2_val
+        
+        # Handle cases where phases have 0 steps
+        if p1_steps == 0: phase1_ramp = torch.empty(0, device=device)
+        if p2_steps - p1_steps == 0: phase2_ramp = torch.empty(0, device=device)
+        if num_steps - p2_steps == 0: phase3_ramp = torch.empty(0, device=device)
+
+        ramp = torch.cat([phase1_ramp, phase2_ramp, phase3_ramp])
+        
+        # Map to sigmas using karras formula
+        min_inv_rho = sigma_min ** (1 / rho)
+        max_inv_rho = sigma_max ** (1 / rho)
+        sigmas = (max_inv_rho + ramp * (min_inv_rho - max_inv_rho)) ** rho
+        
+        return torch.cat([sigmas, torch.zeros(1, device=device)])
+
+    def create_aos_e_sigmas(self, sigma_max, sigma_min, num_steps, device='cpu'):
+        """Creates a three-phase noise schedule optimized for anime aesthetics on epsilon-prediction models."""
+        rho = 7.0  # karras-ve rho, could be tuned (e.g., 6.0) for epsilon models
+        
+        # Epsilon model phases: longer foundation, gentler start
+        p1_frac, p2_frac = 0.35, 0.7  # 35% foundation, 35% structure, 30% refinement
+        ramp_p1_val, ramp_p2_val = 0.4, 0.75 # More gradual transitions
+
+        p1_steps = int(num_steps * p1_frac)
+        p2_steps = int(num_steps * p2_frac)
+
+        # Phase 1: Foundation (gentler start, power > 1)
+        phase1_ramp = torch.linspace(0, 1, p1_steps, device=device) ** 1.5 * ramp_p1_val
+
+        # Phase 2: Structure (linear)
+        phase2_ramp = torch.linspace(ramp_p1_val, ramp_p2_val, p2_steps - p1_steps, device=device)
+
+        # Phase 3: Refinement (more aggressive end, power < 1)
+        phase3_base = torch.linspace(0, 1, num_steps - p2_steps, device=device) ** 0.7
         phase3_ramp = phase3_base * (1 - ramp_p2_val) + ramp_p2_val
         
         # Handle cases where phases have 0 steps

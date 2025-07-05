@@ -11,10 +11,11 @@ This extension is developed and tested on **Stable Diffusion WebUI reForge**. Co
 - **Advanced Ancestral Sampler**: A custom implementation that patches the default Euler Ancestral sampler to provide advanced features.
 - **Detail Enhancement**: A unique method to enhance high-frequency details, which can be used with any scheduler. The **Detail Separation Radius** controls what is considered a 'detail,' with higher values sharpening larger features.
 - **Custom Schedulers**:
-    - **Anime-Optimized Schedule (AOS)**: A three-phase scheduler designed to improve composition and detail for anime-style images.
-      > ⚠️ **Compatibility Warning**: AOS is heavily optimized for **v-prediction** models. Using it with **epsilon-prediction** models may break the generation.
+    - **Anime-Optimized Schedule for V-Prediction (AOS-V)**: A three-phase scheduler designed to improve composition and detail for anime-style images on **v-prediction** models.
+    - **Anime-Optimized Schedule for Epsilon-Prediction (AOS-ε)**: A three-phase scheduler optimized for **epsilon-prediction** models, with adjusted phase boundaries and power curves.
+      > ⚠️ **Compatibility Warning**: Use the correct AOS variant for your model type. **AOS-V** is for **v-prediction** models, while **AOS-ε** is for **epsilon-prediction** models. Mismatching them may break the generation.
     - **Entropic Schedule**: A power-based schedule that clusters steps for fine-tuning detail generation. The **Entropic Power** setting controls this clustering, with values greater than 1.0 focusing more steps at the beginning of the sampling process.
-- **Content-Aware Pacing (AOS Only)**: Dynamically adjusts the sampling process, switching from composition to detail focus based on image coherence. The **Coherence Sensitivity** slider controls when this switch occurs.
+- **Content-Aware Pacing (AOS Only)**: Dynamically adjusts the sampling process, switching from composition to detail focus based on image coherence. The **Coherence Sensitivity** slider controls when this switch occurs. Works with both AOS-V and AOS-ε variants.
 - **Full UI Integration**: All features are configurable through a custom accordion panel in the WebUI or reForge interface.
 
 ## 🛠️ Installation
@@ -46,7 +47,7 @@ There are two ways to install the extension:
 2.  Select **"Adept Sampler"** from the script dropdown.
 3.  Enable the **"Enable Adept Sampler"** checkbox to activate the custom features.
 4.  Configure the settings as desired:
-    - **Scheduler**: Choose between the default, Anime-Optimized (AOS), or Entropic schedulers.
+    - **Scheduler**: Choose between the default, AOS-V (for v-prediction), AOS-ε (for epsilon-prediction), or Entropic schedulers.
       > ℹ️ **Note**: When using a custom scheduler, you may need to **lower your CFG Scale** (e.g., by 1-2 points) to prevent oversaturated or 'burnt' images.
     - **Detail Enhancement**: Toggle and adjust the strength of high-frequency detail enhancement.
     - **Advanced Noise Settings**: Fine-tune `Eta` and `Noise Scale` for different effects. 
