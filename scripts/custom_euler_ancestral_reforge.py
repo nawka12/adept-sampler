@@ -207,13 +207,13 @@ class AdeptSamplerForge(scripts.Script):
             (self.eta, lambda p: float(p['custom_eta']) if 'custom_eta' in p else gr.update()),
             (self.s_noise, lambda p: float(p['custom_s_noise']) if 'custom_s_noise' in p else gr.update()),
             (self.debug_reproducibility, lambda p: str(p.get('debug_reproducibility')).lower() == 'true' if 'debug_reproducibility' in p else gr.update()),
-            (self.entropic_scheduler_power, lambda p: float(p['entropic_power']) if 'entropic_power' in p else gr.update()),
+            (self.entropic_scheduler_power, lambda p: gr.update() if p.get('entropic_power') in (None, 'N/A') else float(p['entropic_power'])),
             (self.use_content_aware_pacing, lambda p: str(p.get('content_aware_pacing')).lower() == 'true' if 'content_aware_pacing' in p else gr.update()),
-            (self.pacing_coherence_sensitivity, lambda p: float(p['coherence_sensitivity']) if 'coherence_sensitivity' in p else gr.update()),
+            (self.pacing_coherence_sensitivity, lambda p: gr.update() if p.get('coherence_sensitivity') in (None, 'N/A') else float(p['coherence_sensitivity'])),
             (self.debug_stop_after_coherence, lambda p: str(p.get('debug_stop_after_coherence')).lower() == 'true' if 'debug_stop_after_coherence' in p else gr.update()),
             (self.use_enhanced_detail_phase, lambda p: str(p.get('enhanced_detail_phase')).lower() == 'true' if 'enhanced_detail_phase' in p else gr.update()),
-            (self.detail_enhancement_strength, lambda p: float(p['detail_enhancement_strength']) if 'detail_enhancement_strength' in p else gr.update()),
-            (self.detail_separation_radius, lambda p: float(p['detail_separation_radius']) if 'detail_separation_radius' in p else gr.update()),
+            (self.detail_enhancement_strength, lambda p: gr.update() if p.get('detail_enhancement_strength') in (None, 'N/A') else float(p['detail_enhancement_strength'])),
+            (self.detail_separation_radius, lambda p: gr.update() if p.get('detail_separation_radius') in (None, 'N/A') else float(p['detail_separation_radius'])),
         ]
 
         def scheduler_getter(params):
