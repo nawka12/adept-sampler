@@ -19,11 +19,26 @@ This extension is developed and tested on **Stable Diffusion WebUI reForge**. Co
 
 ## 🛠️ Installation
 
-1.  Clone this repository into your `extensions` directory in your Stable Diffusion WebUI installation.
+There are two ways to install the extension:
+
+**Method 1: Using the `Install from URL` Feature**
+
+1.  Navigate to the **Extensions** tab in your WebUI.
+2.  Click on the **Install from URL** sub-tab.
+3.  Paste the following URL into the **URL for extension's git repository** field:
+    ```
+    https://github.com/nawka12/adept-sampler
+    ```
+4.  Click **Install**.
+5.  Once installation is complete, navigate to the **Installed** tab and click **Apply and restart UI**.
+
+**Method 2: Manual Installation (git clone)**
+
+1.  Clone this repository into your `extensions` directory in your Stable Diffusion WebUI reForge installation.
     ```bash
     git clone https://github.com/nawka12/adept-sampler extensions/adept-sampler
     ```
-2.  Restart your Stable Diffusion WebUI.
+2.  Restart your Stable Diffusion WebUI reForge.
 
 ## 📖 Usage
 
