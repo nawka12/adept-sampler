@@ -41,17 +41,10 @@ current_sampler_settings = {
     'enabled': False,
     'eta': 1.0,
     's_noise': 1.0,
-    'use_dynamic_threshold': True,
-    'threshold_percentile': 0.995,
-    'use_adaptive_thresholding': False,
-    'adaptive_threshold_end': 0.95,
-    'solver_order': 2,
     'debug_reproducibility': False,
     'use_entropic_scheduler': False,
     'entropic_scheduler_power': 6.0,
     'use_anime_schedule': False,
-    'use_dynamic_ancestral_noise': False,
-    'use_heun_corrector': False,
     'use_enhanced_detail_phase': True,
     'detail_enhancement_strength': 0.1,
     'detail_separation_radius': 0.5,
@@ -79,7 +72,6 @@ def patch_samplers_globally():
                     model, x, sigmas, extra_args=extra_args, callback=callback, disable=disable,
                     eta=current_sampler_settings.get('eta', 1.0),
                     s_noise=current_sampler_settings.get('s_noise', 1.0),
-                    solver_order=current_sampler_settings.get('solver_order', 1),
                     generator=generator
                 )
             
@@ -139,7 +131,7 @@ class AdeptSamplerForge(scripts.Script):
                             self.pacing_coherence_sensitivity = gr.Slider(
                                 label='Coherence Sensitivity',
                                 minimum=0.1, maximum=1.0, value=0.75, step=0.05,
-                                info="Controls when to switch from composition to detail. Lower values switch sooner."
+                                info="Controls when to switch from composition to detail. Higher values switch sooner."
                             )
                             self.debug_stop_after_coherence = gr.Checkbox(label='[Debug] Stop after coherence', value=False, info="Stops generation immediately after coherence is detected, skipping the detail phase.")
 
@@ -246,15 +238,11 @@ class AdeptSamplerForge(scripts.Script):
         use_anime_schedule = use_anime_schedule_v or use_anime_schedule_e
         use_entropic_scheduler = (scheduler_override == "Entropic")
 
-        # Progressive enhancement is now tied to the detail enhancement checkbox
-        use_progressive_enhancement = use_enhanced_detail_phase
-
         # Update global settings (this happens immediately)
         current_sampler_settings.update({
             'enabled': enable_custom,
             'eta': eta,
             's_noise': s_noise,
-            'solver_order': 1, # Simplified to 1st order
             'debug_reproducibility': debug_reproducibility,
             'use_entropic_scheduler': use_entropic_scheduler,
             'entropic_scheduler_power': entropic_scheduler_power,
@@ -267,7 +255,6 @@ class AdeptSamplerForge(scripts.Script):
             'use_enhanced_detail_phase': use_enhanced_detail_phase,
             'detail_enhancement_strength': detail_enhancement_strength,
             'detail_separation_radius': detail_separation_radius,
-            'use_progressive_enhancement': use_progressive_enhancement,
         })
         
         if enable_custom:
@@ -282,7 +269,6 @@ class AdeptSamplerForge(scripts.Script):
                 'adept_sampler_type': 'Enhanced (AOS Focused)',
                 'custom_eta': eta,
                 'custom_s_noise': s_noise,
-                'solver_order': 1, # Simplified
                 'custom_sampler_deterministic': True,
                 'debug_reproducibility': debug_reproducibility,
                 'entropic_scheduler': use_entropic_scheduler and not debug_reproducibility,
@@ -291,7 +277,6 @@ class AdeptSamplerForge(scripts.Script):
                 'content_aware_pacing': use_content_aware_pacing and use_anime_schedule,
                 'coherence_sensitivity': pacing_coherence_sensitivity if use_content_aware_pacing and use_anime_schedule else 'N/A',
                 'debug_stop_after_coherence': debug_stop_after_coherence and use_content_aware_pacing and use_anime_schedule,
-                'use_progressive_enhancement': use_progressive_enhancement,
                 'enhanced_detail_phase': use_enhanced_detail_phase,
                 'detail_enhancement_strength': detail_enhancement_strength if use_enhanced_detail_phase else 'N/A',
                 'detail_separation_radius': detail_separation_radius if use_enhanced_detail_phase else 'N/A',
@@ -300,7 +285,7 @@ class AdeptSamplerForge(scripts.Script):
             print("🔄 Using standard Euler Ancestral sampler")
     
 
-    def sample_enhanced_euler_ancestral(self, model, x, sigmas, extra_args=None, callback=None, disable=None, eta=1., s_noise=1., solver_order=1, generator=None, use_dynamic_ancestral_noise=False, use_heun_corrector=False):
+    def sample_enhanced_euler_ancestral(self, model, x, sigmas, extra_args=None, callback=None, disable=None, eta=1., s_noise=1., generator=None):
         """Simplified custom Euler Ancestral with dynamic thresholding, focused on AOS."""
         # --- Read settings from global config to ensure they are always correct ---
         use_enhanced_detail_phase = current_sampler_settings.get('use_enhanced_detail_phase', True)
