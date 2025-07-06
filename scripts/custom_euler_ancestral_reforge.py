@@ -157,7 +157,7 @@ class AdeptSamplerForge(scripts.Script):
                         
                         with gr.Group(visible=False) as aos_plus_options:
                             gr.Markdown("⚠️ **Compatibility Warning:** Use the correct AOS variant for your model type. **AOS-V** is for **v-prediction** models. **AOS-ε** is for **epsilon-prediction** models. Mismatching them may break the generation.")
-                            self.use_content_aware_pacing = gr.Checkbox(label='Enable Content-Aware Pacing (AOS Only)', value=False, info="Dynamically adjusts pacing based on image coherence. Requires higher step counts (model recommended step count * 1.5) for effective phasing.")
+                            self.use_content_aware_pacing = gr.Checkbox(label='Enable Content-Aware Pacing (AOS Only)', value=False, info="Dynamically adjusts pacing based on image coherence. Requires higher step counts (at least model recommended step count * 1.5) for effective phasing.")
                             self.pacing_coherence_sensitivity = gr.Slider(
                                 label='Coherence Sensitivity',
                                 minimum=0.1, maximum=1.0, value=0.75, step=0.05,
