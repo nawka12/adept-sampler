@@ -60,12 +60,6 @@ There are two ways to install the extension:
 
 | **Method** | **Key Characteristics** | **Best For** | **Key Settings** | **Sample Image** | **Notes** |
 |------------|------------------------|--------------|------------------|------------------|-----------|
-| **Euler Ancestral** | Standard sampling with noise injection | General purpose, baseline comparison | CFG Scale: Standard values | *[Image placeholder]* | Default sampler, good baseline performance |
-| **Adept + AOS + Content-Aware Pacing** | Three-phase scheduler with dynamic composition-to-detail switching | Anime/illustration style, complex compositions | AOS-V/AOS-ε (match model type)<br/>Coherence Sensitivity<br/>CFG Scale: -1 to -2 from normal | *[Image placeholder]* | Automatically adapts focus from composition to details based on image coherence |
-| **Adept + Entropic** | Power-based clustering with concentrated early steps | Fine detail work, texture enhancement | Entropic Power: >1.0 for early focus<br/>Detail Enhancement<br/>CFG Scale: -1 to -2 from normal | *[Image placeholder]* | Clusters more steps at beginning for better detail control |
-
-### Comparison Notes:
-- **CFG Scale Adjustment**: When using Adept with custom schedulers, reduce CFG by 1-2 points to prevent oversaturation
-- **Model Compatibility**: AOS-V for v-prediction models, AOS-ε for epsilon-prediction models
-- **Detail Enhancement**: Available with all Adept configurations, controlled by Detail Separation Radius
-- **Content-Aware Pacing**: Only available with AOS schedulers, not with Entropic 
+| **Euler Ancestral** | Standard sampling with noise injection | General purpose, baseline comparison | CFG Scale: Standard values | ![image](https://github.com/user-attachments/assets/10f7087e-0b79-4b34-bd7b-73cd1263e24b) | Default sampler, good baseline performance |
+| **Adept + AOS + Content-Aware Pacing** | Three-phase scheduler with dynamic composition-to-detail switching | Anime/illustration style, complex compositions | AOS-V/AOS-ε (match model type)<br/>Coherence Sensitivity<br/>CFG Scale: -1 to -2 from normal | ![image](https://github.com/user-attachments/assets/f0a036e1-1fa6-4941-a08e-1e364979f05e) | Automatically adapts focus from composition to details based on image coherence |
+| **Adept + Entropic** | Power-based clustering with concentrated early steps | Fine detail work, texture enhancement | Entropic Power: >1.0 for early focus<br/>Detail Enhancement<br/>CFG Scale: -1 to -2 from normal | ![image](https://github.com/user-attachments/assets/0a62c159-43c9-4dd5-9579-78a231d1e5d6) | Clusters more steps at beginning for better detail control |
