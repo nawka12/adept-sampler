@@ -63,3 +63,37 @@ There are two ways to install the extension:
 | **Euler Ancestral** | Standard sampling with noise injection | General purpose, baseline comparison | CFG Scale: Standard values | ![image](https://github.com/user-attachments/assets/10f7087e-0b79-4b34-bd7b-73cd1263e24b) | Default sampler, good baseline performance |
 | **Adept + AOS + Content-Aware Pacing** | Three-phase scheduler with dynamic composition-to-detail switching | Anime/illustration style, complex compositions | AOS-V/AOS-ε (match model type)<br/>Coherence Sensitivity<br/>CFG Scale: -1 to -2 from normal | ![image](https://github.com/user-attachments/assets/f0a036e1-1fa6-4941-a08e-1e364979f05e) | Automatically adapts focus from composition to details based on image coherence |
 | **Adept + Entropic** | Power-based clustering with concentrated early steps | Fine detail work, texture enhancement | Entropic Power: >1.0 for early focus<br/>Detail Enhancement<br/>CFG Scale: -1 to -2 from normal | ![image](https://github.com/user-attachments/assets/0a62c159-43c9-4dd5-9579-78a231d1e5d6) | Clusters more steps at beginning for better detail control |
+
+## 📄 License
+
+This project is licensed under the **GNU General Public License v3.0 (GPL-3.0)**.
+
+### License Summary
+
+- ✅ **Commercial use** - You may use this software commercially
+- ✅ **Modification** - You may modify the software  
+- ✅ **Distribution** - You may distribute the software
+- ✅ **Patent use** - You may use any patents that contributors grant you
+- ✅ **Private use** - You may use the software privately
+
+**Requirements:**
+- 📋 **License and copyright notice** - Include the license and copyright notice with the software
+- 📋 **State changes** - Indicate significant changes made to the software
+- 📋 **Disclose source** - You must make the source code available when you distribute the software
+- 📋 **Same license** - You must license derivative works under the same license
+
+**Limitations:**
+- ❌ **Liability** - The software is provided without warranty
+- ❌ **Warranty** - No warranties are provided with the software
+
+### Why GPL-3.0?
+
+This license was chosen to ensure compatibility with **Stable Diffusion WebUI reForge** and its ecosystem, while protecting the open-source nature of the project. It ensures that improvements and modifications remain available to the community.
+
+### Full License Text
+
+The complete license text can be found at: https://www.gnu.org/licenses/gpl-3.0.html
+
+---
+
+Copyright (C) 2025 nawka12/KayfaHaarukku. This program comes with ABSOLUTELY NO WARRANTY. This is free software, and you are welcome to redistribute it under certain conditions as specified in the GPL-3.0 license.
