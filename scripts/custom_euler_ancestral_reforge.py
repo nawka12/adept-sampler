@@ -46,7 +46,7 @@ current_sampler_settings = {
     'entropic_scheduler_power': 6.0,
     'use_anime_schedule': False,
     'use_enhanced_detail_phase': True,
-    'detail_enhancement_strength': 0.1,
+    'detail_enhancement_strength': 0.05,
     'detail_separation_radius': 0.5,
 }
 
@@ -133,6 +133,11 @@ class AdeptSamplerForge(scripts.Script):
                                 minimum=0.1, maximum=1.0, value=0.75, step=0.05,
                                 info="Controls when to switch from composition to detail. Higher values switch sooner."
                             )
+                            self.manual_pacing_override = gr.Textbox(
+                                label="Manual Pacing Override (JSON)",
+                                info='Advanced: Manually set phase steps. e.g., {"composition": 0.4} or {"composition": 10}',
+                                placeholder='Disabled (uses automatic pacing)'
+                            )
                             self.debug_stop_after_coherence = gr.Checkbox(label='[Debug] Stop after coherence', value=False, info="Stops generation immediately after coherence is detected, skipping the detail phase.")
 
                         def on_scheduler_change(scheduler):
@@ -155,7 +160,7 @@ class AdeptSamplerForge(scripts.Script):
                         self.use_enhanced_detail_phase = gr.Checkbox(label="Enable Detail Enhancement", value=True, info="Separates and enhances high-frequency details during sampling. Works with all schedulers.")
 
                         with gr.Group(visible=True) as enhancer_settings:
-                            self.detail_enhancement_strength = gr.Slider(label="Detail Enhancement Strength", minimum=0.0, maximum=1.0, value=0.1, step=0.05)
+                            self.detail_enhancement_strength = gr.Slider(label="Detail Enhancement Strength", minimum=0.0, maximum=1.0, value=0.05, step=0.05)
                             self.detail_separation_radius = gr.Slider(label="Detail Separation Radius (Sigma)", minimum=0.1, maximum=2.0, value=0.5, step=0.05, info="Controls what is considered a 'detail'. Higher values sharpen larger features.")
                         
                         self.use_enhanced_detail_phase.change(
@@ -188,6 +193,7 @@ class AdeptSamplerForge(scripts.Script):
             (self.entropic_scheduler_power, lambda p: gr.update() if p.get('entropic_power') in (None, 'N/A') else float(p['entropic_power'])),
             (self.use_content_aware_pacing, lambda p: str(p.get('content_aware_pacing')).lower() == 'true' if 'content_aware_pacing' in p else gr.update()),
             (self.pacing_coherence_sensitivity, lambda p: gr.update() if p.get('coherence_sensitivity') in (None, 'N/A') else float(p['coherence_sensitivity'])),
+            (self.manual_pacing_override, lambda p: p.get('manual_pacing_override', gr.update())),
             (self.debug_stop_after_coherence, lambda p: str(p.get('debug_stop_after_coherence')).lower() == 'true' if 'debug_stop_after_coherence' in p else gr.update()),
             (self.use_enhanced_detail_phase, lambda p: str(p.get('enhanced_detail_phase')).lower() == 'true' if 'enhanced_detail_phase' in p else gr.update()),
             (self.detail_enhancement_strength, lambda p: gr.update() if p.get('detail_enhancement_strength') in (None, 'N/A') else float(p['detail_enhancement_strength'])),
@@ -216,6 +222,7 @@ class AdeptSamplerForge(scripts.Script):
             self.eta, self.s_noise, self.debug_reproducibility, 
             self.scheduler_override, self.entropic_scheduler_power,
             self.use_content_aware_pacing, self.pacing_coherence_sensitivity,
+            self.manual_pacing_override,
             self.debug_stop_after_coherence,
             self.use_enhanced_detail_phase,
             self.detail_enhancement_strength, self.detail_separation_radius,
@@ -227,6 +234,7 @@ class AdeptSamplerForge(scripts.Script):
             eta, s_noise, debug_reproducibility,
             scheduler_override, entropic_scheduler_power,
             use_content_aware_pacing, pacing_coherence_sensitivity,
+            manual_pacing_override,
             debug_stop_after_coherence,
             use_enhanced_detail_phase,
             detail_enhancement_strength, detail_separation_radius,
@@ -237,6 +245,17 @@ class AdeptSamplerForge(scripts.Script):
         use_anime_schedule_e = (scheduler_override == "AOS-ε (for ε-prediction)")
         use_anime_schedule = use_anime_schedule_v or use_anime_schedule_e
         use_entropic_scheduler = (scheduler_override == "Entropic")
+
+        manual_pacing_schedule = None
+        if manual_pacing_override and manual_pacing_override.strip():
+            try:
+                schedule = json.loads(manual_pacing_override)
+                if isinstance(schedule, dict):
+                    manual_pacing_schedule = schedule
+                else:
+                    print(f"⚠️ Manual Pacing Override: Not a valid JSON object. Ignoring.")
+            except json.JSONDecodeError:
+                print(f"⚠️ Manual Pacing Override: Invalid JSON. Ignoring.")
 
         # Update global settings (this happens immediately)
         current_sampler_settings.update({
@@ -251,6 +270,7 @@ class AdeptSamplerForge(scripts.Script):
             'use_anime_schedule_e': use_anime_schedule_e,
             'use_content_aware_pacing': use_content_aware_pacing and use_anime_schedule, # Only works with AOS
             'pacing_coherence_sensitivity': pacing_coherence_sensitivity,
+            'manual_pacing_schedule': manual_pacing_schedule,
             'debug_stop_after_coherence': debug_stop_after_coherence and use_content_aware_pacing,
             'use_enhanced_detail_phase': use_enhanced_detail_phase,
             'detail_enhancement_strength': detail_enhancement_strength,
@@ -275,7 +295,8 @@ class AdeptSamplerForge(scripts.Script):
                 'entropic_power': entropic_scheduler_power if use_entropic_scheduler and not use_anime_schedule else 'N/A',
                 'anime_optimized_schedule': 'V' if use_anime_schedule_v else ('Epsilon' if use_anime_schedule_e else 'N/A'),
                 'content_aware_pacing': use_content_aware_pacing and use_anime_schedule,
-                'coherence_sensitivity': pacing_coherence_sensitivity if use_content_aware_pacing and use_anime_schedule else 'N/A',
+                'coherence_sensitivity': pacing_coherence_sensitivity if use_content_aware_pacing and use_anime_schedule and not manual_pacing_schedule else 'N/A',
+                'manual_pacing_override': json.dumps(manual_pacing_schedule) if manual_pacing_schedule else 'N/A',
                 'debug_stop_after_coherence': debug_stop_after_coherence and use_content_aware_pacing and use_anime_schedule,
                 'enhanced_detail_phase': use_enhanced_detail_phase,
                 'detail_enhancement_strength': detail_enhancement_strength if use_enhanced_detail_phase else 'N/A',
@@ -323,79 +344,137 @@ class AdeptSamplerForge(scripts.Script):
         total_steps = len(final_sigmas) - 1
         original_sigmas = final_sigmas.clone() # Keep a copy for rescheduling
         use_pacing = current_sampler_settings.get('use_content_aware_pacing', False) and total_steps > 0
+        manual_pacing_schedule = current_sampler_settings.get('manual_pacing_schedule')
+        sigma_idx_at_switch = 0 # Initialize here to ensure it's available later
 
         if use_pacing:
-            # --- Simplified PACING ---
+            # --- Adaptive Pacing Strategy ---
+            if total_steps < 26:
+                print("🧠 Pacing: Disabled automatically for low step count (< 26) to ensure quality.")
+                use_pacing = False
+            elif total_steps <= 40:
+                print("🧠 Pacing: Using conservative single-step pacing for medium step count (<= 40).")
+                pacing_step_size = 1
+            else:
+                print("🧠 Pacing: Using aggressive double-step pacing for high step count (> 40).")
+                pacing_step_size = 2
+
+        if use_pacing:
             is_coherent = False
-            initial_variance = None
             last_composition_derivative = None
-            last_composition_dt = None
-            
-            # Safety fallback
-            fallback_step_pct = 0.7
-
-            # --- Composition Phase ---
-            print("🧠 Pacing: Starting composition phase...")
             composition_steps_taken = 0
-            i = 0
             last_composition_sigma_idx = 0
-            
-            # The composition loop runs at double speed
-            while i < (total_steps - 1) and composition_steps_taken < int(total_steps * fallback_step_pct):
-                composition_steps_taken += 1
-                last_composition_sigma_idx = i
-                
-                current_sigma = original_sigmas[i]
-                next_sigma_idx = min(i + 2, total_steps)
-                next_sigma = original_sigmas[next_sigma_idx]
 
-                if current_sigma < next_sigma: break
+            # --- Manual Pacing Override ---
+            if manual_pacing_schedule:
+                print("🧠 Pacing: Using manual override schedule.")
+                comp_setting = manual_pacing_schedule.get("composition", 0.5)
 
-                denoised = model(x, current_sigma * s_in, **extra_args)
+                if 0 < comp_setting < 1:
+                    composition_steps_taken = int(total_steps * comp_setting)
+                else:
+                    composition_steps_taken = int(comp_setting)
                 
-                derivative = (x - denoised) / current_sigma
-                last_composition_derivative = derivative
-                
-                # --- Coherence Calculation ---
-                variance = torch.var(derivative.flatten(1), dim=1).mean().item()
+                composition_steps_taken = max(0, min(total_steps, composition_steps_taken))
+                print(f"🧠 Pacing: Manual composition steps: {composition_steps_taken}")
+                is_coherent = True # Force switch to detail after manual steps
 
-                if composition_steps_taken == 2:
-                    # Establish a stable baseline variance after the initial large drop from pure noise.
-                    initial_variance = variance
-                elif composition_steps_taken > 2 and initial_variance is not None:
-                    # Start checking for coherence against the post-drop baseline.
-                    sensitivity = current_sampler_settings.get('pacing_coherence_sensitivity', 0.75)
-                    threshold_percentage = sensitivity * 0.4 + 0.5
-                    coherence_threshold = initial_variance * threshold_percentage
-                
-                    if variance < coherence_threshold:
-                        print(f"🧠 Pacing: Coherence achieved at iteration {composition_steps_taken} (Sigma Step {i}). Rescheduling detail phase.")
-                        is_coherent = True
-                        break
+                for i in range(composition_steps_taken):
+                    denoised = model(x, original_sigmas[i] * s_in, **extra_args)
+                    last_composition_derivative = (x - denoised) / original_sigmas[i]
+                    last_composition_sigma_idx = i
 
-                if callback is not None: callback({'x': x, 'i': i, 'sigma': original_sigmas[i], 'sigma_hat': original_sigmas[i], 'denoised': denoised})
-                
-                sigma_down, sigma_up = self.get_ancestral_step(current_sigma, next_sigma, eta)
-                dt = sigma_down - current_sigma
-                last_composition_dt = dt
-                x = x + derivative * dt
-                
-                # --- High-Frequency Detail Enhancement (Composition) ---
-                if use_enhanced_detail_phase and TORCHVISION_AVAILABLE:
-                    base_strength = current_sampler_settings.get('detail_enhancement_strength', 0.1)
-                    progress = composition_steps_taken / (total_steps * fallback_step_pct)
-                    strength = self.apply_progressive_enhancement(base_strength, 'composition', progress)
+                    if callback is not None: callback({'x': x, 'i': i, 'sigma': original_sigmas[i], 'sigma_hat': original_sigmas[i], 'denoised': denoised})
                     
-                    radius = current_sampler_settings.get('detail_separation_radius', 0.5)
-                    low_freq = gaussian_blur(denoised, kernel_size=3, sigma=radius)
-                    high_freq = denoised - low_freq
-                    
-                    enhancement_amount = dt.abs() / current_sigma.clamp(min=1e-6)
-                    x = x + high_freq * enhancement_amount * strength
+                    sigma_down, sigma_up = self.get_ancestral_step(original_sigmas[i], original_sigmas[i+1], eta)
+                    dt = sigma_down - original_sigmas[i]
+                    x = x + last_composition_derivative * dt
 
-                if next_sigma > 0: x = x + noise_sampler(current_sigma, next_sigma) * s_noise * sigma_up
+                    if use_enhanced_detail_phase and TORCHVISION_AVAILABLE:
+                        base_strength = current_sampler_settings.get('detail_enhancement_strength', 0.05)
+                        progress = i / composition_steps_taken if composition_steps_taken > 0 else 1.0
+                        strength = self.apply_progressive_enhancement(base_strength, 'composition', progress)
+                        
+                        radius = current_sampler_settings.get('detail_separation_radius', 0.5)
+                        low_freq = gaussian_blur(denoised, kernel_size=3, sigma=radius)
+                        high_freq = denoised - low_freq
+                        
+                        enhancement_amount = dt.abs() / original_sigmas[i].clamp(min=1e-6)
+                        x = x + high_freq * enhancement_amount * strength
+                    
+                    if original_sigmas[i+1] > 0: x = x + noise_sampler(original_sigmas[i], original_sigmas[i+1]) * s_noise * sigma_up
                 
-                i = next_sigma_idx
+                sigma_idx_at_switch = composition_steps_taken
+
+            # --- Automatic Pacing (Coherence Detection) ---
+            else:
+                initial_variance = None
+                
+                # --- Adaptive Fallback ---
+                # Lower fallback for fewer steps to prevent over-shooting.
+                fallback_step_pct = 0.4 + 0.3 * min(1.0, (total_steps - 20) / 40.0)
+
+                # --- Composition Phase ---
+                print("🧠 Pacing: Starting composition phase...")
+                i = 0
+                
+                while i < (total_steps - 1) and composition_steps_taken < int(total_steps * fallback_step_pct):
+                    composition_steps_taken += 1
+                    last_composition_sigma_idx = i
+                    
+                    current_sigma = original_sigmas[i]
+                    next_sigma_idx = min(i + pacing_step_size, total_steps)
+                    next_sigma = original_sigmas[next_sigma_idx]
+
+                    if current_sigma < next_sigma: break
+
+                    denoised = model(x, current_sigma * s_in, **extra_args)
+                    
+                    derivative = (x - denoised) / current_sigma
+                    last_composition_derivative = derivative
+                    
+                    # --- Coherence Calculation ---
+                    variance = torch.var(derivative.flatten(1), dim=1).mean().item()
+
+                    if composition_steps_taken == 2:
+                        # Establish a stable baseline variance after the initial large drop from pure noise.
+                        initial_variance = variance
+                    elif composition_steps_taken > 2 and initial_variance is not None:
+                        # Start checking for coherence against the post-drop baseline.
+                        sensitivity = current_sampler_settings.get('pacing_coherence_sensitivity', 0.75)
+                        threshold_percentage = sensitivity * 0.4 + 0.5
+                        coherence_threshold = initial_variance * threshold_percentage
+                    
+                        if variance < coherence_threshold:
+                            print(f"🧠 Pacing: Coherence achieved at iteration {composition_steps_taken} (Sigma Step {i}). Rescheduling detail phase.")
+                            is_coherent = True
+                            break
+
+                    if callback is not None: callback({'x': x, 'i': i, 'sigma': original_sigmas[i], 'sigma_hat': original_sigmas[i], 'denoised': denoised})
+                    
+                    sigma_down, sigma_up = self.get_ancestral_step(current_sigma, next_sigma, eta)
+                    dt = sigma_down - current_sigma
+                    last_composition_dt = dt
+                    x = x + derivative * dt
+                    
+                    # --- High-Frequency Detail Enhancement (Composition) ---
+                    if use_enhanced_detail_phase and TORCHVISION_AVAILABLE:
+                        base_strength = current_sampler_settings.get('detail_enhancement_strength', 0.05)
+                        progress = composition_steps_taken / (total_steps * fallback_step_pct)
+                        strength = self.apply_progressive_enhancement(base_strength, 'composition', progress)
+                        
+                        radius = current_sampler_settings.get('detail_separation_radius', 0.5)
+                        low_freq = gaussian_blur(denoised, kernel_size=3, sigma=radius)
+                        high_freq = denoised - low_freq
+                        
+                        enhancement_amount = dt.abs() / current_sigma.clamp(min=1e-6)
+                        x = x + high_freq * enhancement_amount * strength
+
+                    if next_sigma > 0: x = x + noise_sampler(current_sigma, next_sigma) * s_noise * sigma_up
+                    
+                    i = next_sigma_idx
+                
+                sigma_idx_at_switch = i
 
             # --- Detail Phase ---
             if is_coherent and current_sampler_settings.get('debug_stop_after_coherence', False):
@@ -405,7 +484,7 @@ class AdeptSamplerForge(scripts.Script):
             # The number of detail steps is the total steps minus how many composition steps we took.
             remaining_iterations = total_steps - composition_steps_taken
             
-            if not is_coherent:
+            if not is_coherent and not manual_pacing_schedule:
                 print("🧠 Pacing: Composition phase finished. Switching to detail phase for remaining steps.")
                 is_coherent = True # Enable detail-phase logic
 
@@ -414,10 +493,13 @@ class AdeptSamplerForge(scripts.Script):
                 # Ensure we still return the final image from the composition phase
                 return x
 
-            if remaining_iterations > 0:
+            if remaining_iterations > 0 and is_coherent:
                 print(f"🧠 Pacing: Starting detail phase with {remaining_iterations} steps.")
                 
-                sigma_at_switch = original_sigmas[last_composition_sigma_idx]
+                # BUG FIX: The logic to determine the switch index is now handled correctly inside the
+                # manual/auto pacing blocks above. This avoids the off-by-one error.
+                
+                sigma_at_switch = original_sigmas[min(sigma_idx_at_switch, total_steps)]
                 sigma_min = original_sigmas[-2] # The one before zero
 
                 detail_sigmas = self.create_detail_schedule(sigma_at_switch, sigma_min, remaining_iterations, x.device)
@@ -436,15 +518,13 @@ class AdeptSamplerForge(scripts.Script):
                     current_derivative = (x - denoised) / current_sigma
 
                     # --- Derivative Smoothing at the Seam ---
-                    if j == 0 and last_composition_derivative is not None:
-                        # On the first step of the detail phase, blend with the last derivative
-                        # from the composition phase to prevent a jarring directional shift.
-                        derivative = (current_derivative + last_composition_derivative) / 2.0
-                    else:
-                        derivative = current_derivative
+                    # BUG FIX: The blending of derivatives was causing numerical instability.
+                    # By removing it, we ensure the detail phase starts with a clean, stable derivative
+                    # that is correctly matched to its own step size.
+                    derivative = current_derivative
 
-                    progress = (last_composition_sigma_idx + j) / total_steps
-                    callback_step = last_composition_sigma_idx + j
+                    progress = (composition_steps_taken + j) / total_steps
+                    callback_step = composition_steps_taken + j
                     if callback is not None: callback({'x': x, 'i': callback_step, 'sigma': current_sigma, 'sigma_hat': current_sigma, 'denoised': denoised})
 
                     sigma_down, sigma_up = self.get_ancestral_step(current_sigma, next_sigma, eta)
@@ -454,7 +534,7 @@ class AdeptSamplerForge(scripts.Script):
                     
                     # --- High-Frequency Detail Enhancement ---
                     if use_enhanced_detail_phase and TORCHVISION_AVAILABLE:
-                        base_strength = current_sampler_settings.get('detail_enhancement_strength', 0.1)
+                        base_strength = current_sampler_settings.get('detail_enhancement_strength', 0.05)
                         progress = j / (remaining_iterations -1) if remaining_iterations > 1 else 1.0
                         strength = self.apply_progressive_enhancement(base_strength, 'detail', progress)
                         
@@ -468,7 +548,8 @@ class AdeptSamplerForge(scripts.Script):
                     if next_sigma > 0: x = x + noise_sampler(current_sigma, next_sigma) * s_noise * sigma_up
         else:
             # --- Pacing Disabled: Standard Single-Phase Sampling ---
-            print("Pacing disabled. Running in standard single-phase mode.")
+            if not manual_pacing_schedule: # Avoid double printing if pacing was auto-disabled
+                print("Pacing disabled. Running in standard single-phase mode.")
 
             for i in range(total_steps):
                 denoised = model(x, final_sigmas[i] * s_in, **extra_args)
@@ -484,7 +565,7 @@ class AdeptSamplerForge(scripts.Script):
                 
                 # --- High-Frequency Detail Enhancement ---
                 if use_enhanced_detail_phase and TORCHVISION_AVAILABLE:
-                    base_strength = current_sampler_settings.get('detail_enhancement_strength', 0.1)
+                    base_strength = current_sampler_settings.get('detail_enhancement_strength', 0.05)
                     strength = self.apply_progressive_enhancement(base_strength, 'single_phase', i/total_steps)
                     
                     radius = current_sampler_settings.get('detail_separation_radius', 0.5)
