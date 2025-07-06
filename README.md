@@ -55,3 +55,17 @@ There are two ways to install the extension:
       > ℹ️ **Note**: When using a custom scheduler, you may need to **lower your CFG Scale** (e.g., by 1-2 points) to prevent oversaturated or 'burnt' images.
     - **Detail Enhancement**: Toggle and adjust the strength of high-frequency detail enhancement.
     - **Advanced Noise Settings**: Fine-tune `Eta` and `Noise Scale` for different effects. 
+
+## 🔍 Sampling Method Comparison
+
+| **Method** | **Key Characteristics** | **Best For** | **Key Settings** | **Sample Image** | **Notes** |
+|------------|------------------------|--------------|------------------|------------------|-----------|
+| **Euler Ancestral** | Standard sampling with noise injection | General purpose, baseline comparison | CFG Scale: Standard values | *[Image placeholder]* | Default sampler, good baseline performance |
+| **Adept + AOS + Content-Aware Pacing** | Three-phase scheduler with dynamic composition-to-detail switching | Anime/illustration style, complex compositions | AOS-V/AOS-ε (match model type)<br/>Coherence Sensitivity<br/>CFG Scale: -1 to -2 from normal | *[Image placeholder]* | Automatically adapts focus from composition to details based on image coherence |
+| **Adept + Entropic** | Power-based clustering with concentrated early steps | Fine detail work, texture enhancement | Entropic Power: >1.0 for early focus<br/>Detail Enhancement<br/>CFG Scale: -1 to -2 from normal | *[Image placeholder]* | Clusters more steps at beginning for better detail control |
+
+### Comparison Notes:
+- **CFG Scale Adjustment**: When using Adept with custom schedulers, reduce CFG by 1-2 points to prevent oversaturation
+- **Model Compatibility**: AOS-V for v-prediction models, AOS-ε for epsilon-prediction models
+- **Detail Enhancement**: Available with all Adept configurations, controlled by Detail Separation Radius
+- **Content-Aware Pacing**: Only available with AOS schedulers, not with Entropic 
