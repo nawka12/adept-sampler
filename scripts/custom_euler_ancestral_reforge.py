@@ -394,6 +394,20 @@ class AdeptSamplerForge(scripts.Script):
                 dt = sigma_down - current_sigma
                 last_composition_dt = dt
                 x = x + derivative * dt
+                
+                # --- High-Frequency Detail Enhancement (Composition) ---
+                if use_enhanced_detail_phase and TORCHVISION_AVAILABLE:
+                    base_strength = current_sampler_settings.get('detail_enhancement_strength', 0.1)
+                    progress = composition_steps_taken / (total_steps * fallback_step_pct)
+                    strength = self.apply_progressive_enhancement(base_strength, 'composition', progress)
+                    
+                    radius = current_sampler_settings.get('detail_separation_radius', 0.5)
+                    low_freq = gaussian_blur(denoised, kernel_size=3, sigma=radius)
+                    high_freq = denoised - low_freq
+                    
+                    enhancement_amount = dt.abs() / current_sigma.clamp(min=1e-6)
+                    x = x + high_freq * enhancement_amount * strength
+
                 if next_sigma > 0: x = x + noise_sampler(current_sigma, next_sigma) * s_noise * sigma_up
                 
                 i = next_sigma_idx
@@ -423,14 +437,8 @@ class AdeptSamplerForge(scripts.Script):
 
                 detail_sigmas = self.create_detail_schedule(sigma_at_switch, sigma_min, remaining_iterations, x.device)
                 
-                # We don't need a derivative history for the simplified approach
-                derivatives = []
-                dts = []
-
-                if last_composition_derivative is not None:
-                    derivatives.append(last_composition_derivative)
-                    if last_composition_dt is not None:
-                        dts.append(last_composition_dt)
+                # The derivative from the composition phase is used to smooth the first step of the detail phase.
+                # A full derivative history is not needed for this simplified solver.
 
                 for j in range(len(detail_sigmas) - 1):
                     current_sigma = detail_sigmas[j]
@@ -440,7 +448,15 @@ class AdeptSamplerForge(scripts.Script):
                     
                     denoised = model(x, current_sigma * s_in, **extra_args)
 
-                    derivative = (x - denoised) / current_sigma
+                    current_derivative = (x - denoised) / current_sigma
+
+                    # --- Derivative Smoothing at the Seam ---
+                    if j == 0 and last_composition_derivative is not None:
+                        # On the first step of the detail phase, blend with the last derivative
+                        # from the composition phase to prevent a jarring directional shift.
+                        derivative = (current_derivative + last_composition_derivative) / 2.0
+                    else:
+                        derivative = current_derivative
 
                     progress = (last_composition_sigma_idx + j) / total_steps
                     callback_step = last_composition_sigma_idx + j
@@ -454,7 +470,7 @@ class AdeptSamplerForge(scripts.Script):
                     # --- High-Frequency Detail Enhancement ---
                     if use_enhanced_detail_phase and TORCHVISION_AVAILABLE:
                         base_strength = current_sampler_settings.get('detail_enhancement_strength', 0.1)
-                        progress = (last_composition_sigma_idx + j) / total_steps
+                        progress = j / (remaining_iterations -1) if remaining_iterations > 1 else 1.0
                         strength = self.apply_progressive_enhancement(base_strength, 'detail', progress)
                         
                         radius = current_sampler_settings.get('detail_separation_radius', 0.5)
@@ -513,9 +529,9 @@ class AdeptSamplerForge(scripts.Script):
     def apply_progressive_enhancement(self, base_strength, phase, progress):
         """Applies enhancement based on the current sampling phase."""
         if phase == 'composition':
-            return base_strength * 0.5  # Lighter enhancement
+            return base_strength * (0.25 + 0.5 * progress)  # Gently ramp up from 0.25x to 0.75x
         elif phase == 'detail':
-            return base_strength * 1.5  # Stronger enhancement
+            return base_strength * (0.75 + 0.75 * progress) # Ramp from 0.75x to 1.5x
         else:  # single_phase
             return base_strength * (0.5 + progress) # Gradual increase
 

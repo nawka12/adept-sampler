@@ -2,6 +2,10 @@
 
 This repository contains an advanced, highly customizable sampler for Stable Diffusion WebUI reForge. It integrates state-of-the-art techniques to provide enhanced detail, flexible scheduling, and improved image composition.
 
+## 📝 Disclaimer
+
+While this sampler implements advanced techniques to improve generation, the field of generative images is complex and results can be sensitive to settings. This tool is not guaranteed to work perfectly in all scenarios, and some experimentation with the parameters may be required to achieve your desired outcome.
+
 ## ⚠️ Compatibility
 
 This extension is developed and tested on **Stable Diffusion WebUI reForge**. Compatibility with other versions, such as the original WebUI or WebUI Forge, is not guaranteed.
