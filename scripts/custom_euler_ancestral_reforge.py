@@ -74,31 +74,9 @@ def patch_samplers_globally():
                 # Use Enhanced custom sampler with current settings
                 script_instance = AdeptSamplerForge()
                 
-                # Potentially override sigmas with entropic schedule
-                final_sigmas = sigmas
-                if current_sampler_settings.get('use_entropic_scheduler', False) and not current_sampler_settings.get('debug_reproducibility', False):
-                    print("🔄 Overriding sigma schedule with Entropic Time Scheduler.")
-                    power = current_sampler_settings.get('entropic_scheduler_power', 3.0)
-                    if len(sigmas) > 1:
-                        final_sigmas = script_instance.create_entropic_sigmas(
-                            sigmas[0], sigmas[-2], len(sigmas) - 1, power, sigmas.device
-                        )
-                elif current_sampler_settings.get('use_anime_schedule', False) and not current_sampler_settings.get('debug_reproducibility', False):
-                    if current_sampler_settings.get('use_anime_schedule_v', False):
-                        print("🎨 Overriding sigma schedule with Anime-Optimized Schedule (AOS-V).")
-                        if len(sigmas) > 1:
-                            final_sigmas = script_instance.create_aos_v_sigmas(
-                                sigmas[0], sigmas[-2], len(sigmas) - 1, sigmas.device
-                            )
-                    elif current_sampler_settings.get('use_anime_schedule_e', False):
-                        print("🎨 Overriding sigma schedule with Anime-Optimized Schedule (AOS-ε).")
-                        if len(sigmas) > 1:
-                            final_sigmas = script_instance.create_aos_e_sigmas(
-                                sigmas[0], sigmas[-2], len(sigmas) - 1, sigmas.device
-                            )
-                
+                # The sigma override logic has been moved inside sample_enhanced_euler_ancestral
                 return script_instance.sample_enhanced_euler_ancestral(
-                    model, x, final_sigmas, extra_args=extra_args, callback=callback, disable=disable,
+                    model, x, sigmas, extra_args=extra_args, callback=callback, disable=disable,
                     eta=current_sampler_settings.get('eta', 1.0),
                     s_noise=current_sampler_settings.get('s_noise', 1.0),
                     solver_order=current_sampler_settings.get('solver_order', 1),
@@ -327,6 +305,29 @@ class AdeptSamplerForge(scripts.Script):
         # --- Read settings from global config to ensure they are always correct ---
         use_enhanced_detail_phase = current_sampler_settings.get('use_enhanced_detail_phase', True)
 
+        # --- Sigma Schedule Override ---
+        final_sigmas = sigmas
+        if current_sampler_settings.get('use_entropic_scheduler', False) and not current_sampler_settings.get('debug_reproducibility', False):
+            print("🔄 Overriding sigma schedule with Entropic Time Scheduler.")
+            power = current_sampler_settings.get('entropic_scheduler_power', 3.0)
+            if len(sigmas) > 1:
+                final_sigmas = self.create_entropic_sigmas(
+                    sigmas[0], sigmas[-2], len(sigmas) - 1, power, sigmas.device
+                )
+        elif current_sampler_settings.get('use_anime_schedule', False) and not current_sampler_settings.get('debug_reproducibility', False):
+            if current_sampler_settings.get('use_anime_schedule_v', False):
+                print("🎨 Overriding sigma schedule with Anime-Optimized Schedule (AOS-V).")
+                if len(sigmas) > 1:
+                    final_sigmas = self.create_aos_v_sigmas(
+                        sigmas[0], sigmas[-2], len(sigmas) - 1, sigmas.device
+                    )
+            elif current_sampler_settings.get('use_anime_schedule_e', False):
+                print("🎨 Overriding sigma schedule with Anime-Optimized Schedule (AOS-ε).")
+                if len(sigmas) > 1:
+                    final_sigmas = self.create_aos_e_sigmas(
+                        sigmas[0], sigmas[-2], len(sigmas) - 1, sigmas.device
+                    )
+
         extra_args = {} if extra_args is None else extra_args
         s_in = x.new_ones([x.shape[0]])
         
@@ -334,8 +335,8 @@ class AdeptSamplerForge(scripts.Script):
         noise_sampler = self.get_noise_sampler(x)
         
         # --- Content-Aware Pacing Setup ---
-        total_steps = len(sigmas) - 1
-        original_sigmas = sigmas.clone() # Keep a copy for rescheduling
+        total_steps = len(final_sigmas) - 1
+        original_sigmas = final_sigmas.clone() # Keep a copy for rescheduling
         use_pacing = current_sampler_settings.get('use_content_aware_pacing', False) and total_steps > 0
 
         if use_pacing:
@@ -469,14 +470,14 @@ class AdeptSamplerForge(scripts.Script):
             print("Pacing disabled. Running in standard single-phase mode.")
 
             for i in range(total_steps):
-                denoised = model(x, sigmas[i] * s_in, **extra_args)
+                denoised = model(x, final_sigmas[i] * s_in, **extra_args)
 
-                derivative = (x - denoised) / sigmas[i]
+                derivative = (x - denoised) / final_sigmas[i]
 
-                if callback is not None: callback({'x': x, 'i': i, 'sigma': sigmas[i], 'sigma_hat': sigmas[i], 'denoised': denoised})
+                if callback is not None: callback({'x': x, 'i': i, 'sigma': final_sigmas[i], 'sigma_hat': final_sigmas[i], 'denoised': denoised})
 
-                sigma_down, sigma_up = self.get_ancestral_step(sigmas[i], sigmas[i+1], eta)
-                dt = sigma_down - sigmas[i]
+                sigma_down, sigma_up = self.get_ancestral_step(final_sigmas[i], final_sigmas[i+1], eta)
+                dt = sigma_down - final_sigmas[i]
 
                 x = x + derivative * dt
                 
@@ -489,10 +490,10 @@ class AdeptSamplerForge(scripts.Script):
                     low_freq = gaussian_blur(denoised, kernel_size=3, sigma=radius)
                     high_freq = denoised - low_freq
 
-                    enhancement_amount = dt.abs() / sigmas[i].clamp(min=1e-6)
+                    enhancement_amount = dt.abs() / final_sigmas[i].clamp(min=1e-6)
                     x = x + high_freq * enhancement_amount * strength
                 
-                if sigmas[i+1] > 0: x = x + noise_sampler(sigmas[i], sigmas[i+1]) * s_noise * sigma_up
+                if final_sigmas[i+1] > 0: x = x + noise_sampler(final_sigmas[i], final_sigmas[i+1]) * s_noise * sigma_up
         
         return x
 
