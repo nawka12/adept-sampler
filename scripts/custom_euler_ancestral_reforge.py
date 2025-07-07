@@ -112,9 +112,17 @@ class AdeptSamplerForge(scripts.Script):
                         gr.Markdown("### Scheduler Override\nReplace the default time steps with a custom schedule.")
                         
                         self.scheduler_override = gr.Radio(
-                            ["None", "AOS-V (for v-prediction)", "AOS-ε (for ε-prediction)", "Entropic", "SNR-Optimized", "Constant-Rate", "Adaptive-Optimized"],
                             label="Scheduler",
-                            value="None"
+                            value="None",
+                            choices=[
+                                "None",
+                                "Entropic",
+                                "Constant-Rate",
+                                "Adaptive-Optimized",
+                                "AOS-V (for v-prediction)",
+                                "SNR-Optimized",
+                                "AOS-ε (for ε-prediction)",
+                            ]
                         )
 
                         with gr.Group(visible=False) as entropic_options:
@@ -125,6 +133,13 @@ class AdeptSamplerForge(scripts.Script):
                                 info="Controls timestep clustering. >1 clusters steps at the start (high detail)."
                             )
                         
+                        gr.Markdown(
+                            "**Scheduler Categories:**<br>"
+                            "▻ **Universal**: `None`, `Entropic`, `Constant-Rate`, `Adaptive-Optimized`<br>"
+                            "▻ **V-Prediction**: `AOS-V`, `SNR-Optimized`<br>"
+                            "▻ **ε-Prediction**: `AOS-ε`"
+                        )
+
                         with gr.Group(visible=False) as aos_plus_options:
                             gr.Markdown("⚠️ **Compatibility Warning:** Use the correct AOS variant for your model type. **AOS-V** is for **v-prediction** models. **AOS-ε** is for **epsilon-prediction** models. Mismatching them may break the generation.")
                             self.use_content_aware_pacing = gr.Checkbox(label='Enable Content-Aware Pacing (AOS Only)', value=False, info="Dynamically adjusts pacing based on image coherence. Requires higher step counts (at least model recommended step count * 1.5) for effective phasing.")
