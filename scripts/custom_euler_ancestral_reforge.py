@@ -112,7 +112,7 @@ class AdeptSamplerForge(scripts.Script):
                         gr.Markdown("### Scheduler Override\nReplace the default time steps with a custom schedule.")
                         
                         self.scheduler_override = gr.Radio(
-                            ["None", "AOS-V (for v-prediction)", "AOS-ε (for ε-prediction)", "Entropic"],
+                            ["None", "AOS-V (for v-prediction)", "AOS-ε (for ε-prediction)", "Entropic", "SNR-Optimized", "Constant-Rate", "Adaptive-Optimized"],
                             label="Scheduler",
                             value="None"
                         )
@@ -204,6 +204,10 @@ class AdeptSamplerForge(scripts.Script):
             if 'adept_sampler_enabled' not in params:
                 return gr.update()
             
+            custom_scheduler = params.get('custom_scheduler_type')
+            if custom_scheduler and custom_scheduler != 'None':
+                return custom_scheduler
+
             aos_schedule = params.get('anime_optimized_schedule')
             if aos_schedule == 'V':
                 return "AOS-V (for v-prediction)"
@@ -246,6 +250,10 @@ class AdeptSamplerForge(scripts.Script):
         use_anime_schedule = use_anime_schedule_v or use_anime_schedule_e
         use_entropic_scheduler = (scheduler_override == "Entropic")
 
+        custom_scheduler_type = "None"
+        if scheduler_override in ["SNR-Optimized", "Constant-Rate", "Adaptive-Optimized"]:
+            custom_scheduler_type = scheduler_override
+
         manual_pacing_schedule = None
         if manual_pacing_override and manual_pacing_override.strip():
             try:
@@ -275,6 +283,7 @@ class AdeptSamplerForge(scripts.Script):
             'use_enhanced_detail_phase': use_enhanced_detail_phase,
             'detail_enhancement_strength': detail_enhancement_strength,
             'detail_separation_radius': detail_separation_radius,
+            'custom_scheduler_type': custom_scheduler_type,
         })
         
         if enable_custom:
@@ -301,6 +310,7 @@ class AdeptSamplerForge(scripts.Script):
                 'enhanced_detail_phase': use_enhanced_detail_phase,
                 'detail_enhancement_strength': detail_enhancement_strength if use_enhanced_detail_phase else 'N/A',
                 'detail_separation_radius': detail_separation_radius if use_enhanced_detail_phase else 'N/A',
+                'custom_scheduler_type': custom_scheduler_type,
             })
         else:
             print("🔄 Using standard Euler Ancestral sampler")
@@ -310,10 +320,24 @@ class AdeptSamplerForge(scripts.Script):
         """Simplified custom Euler Ancestral with dynamic thresholding, focused on AOS."""
         # --- Read settings from global config to ensure they are always correct ---
         use_enhanced_detail_phase = current_sampler_settings.get('use_enhanced_detail_phase', True)
+        custom_scheduler_type = current_sampler_settings.get('custom_scheduler_type', 'None')
 
         # --- Sigma Schedule Override ---
         final_sigmas = sigmas
-        if current_sampler_settings.get('use_entropic_scheduler', False) and not current_sampler_settings.get('debug_reproducibility', False):
+        is_custom_scheduler = custom_scheduler_type != 'None'
+
+        if is_custom_scheduler and not current_sampler_settings.get('debug_reproducibility', False):
+            print(f"🔬 Overriding sigma schedule with Custom Scheduler: {custom_scheduler_type}.")
+            if len(sigmas) > 1:
+                sigma_args = (sigmas[0], sigmas[-2], len(sigmas) - 1, sigmas.device)
+                scheduler_map = {
+                    "SNR-Optimized": self.create_snr_optimized_sigmas,
+                    "Constant-Rate": self.create_constant_rate_sigmas,
+                    "Adaptive-Optimized": self.create_adaptive_optimized_sigmas,
+                }
+                if custom_scheduler_type in scheduler_map:
+                    final_sigmas = scheduler_map[custom_scheduler_type](*sigma_args)
+        elif current_sampler_settings.get('use_entropic_scheduler', False) and not current_sampler_settings.get('debug_reproducibility', False):
             print("🔄 Overriding sigma schedule with Entropic Time Scheduler.")
             power = current_sampler_settings.get('entropic_scheduler_power', 3.0)
             if len(sigmas) > 1:
@@ -342,8 +366,11 @@ class AdeptSamplerForge(scripts.Script):
         
         # --- Content-Aware Pacing Setup ---
         total_steps = len(final_sigmas) - 1
-        original_sigmas = final_sigmas.clone() # Keep a copy for rescheduling
+        original_sigmas = final_sigmas.clone() # Keep a copy for rescheduling or as a master roadmap
+        
+        # NOTE: Pacing is now only used for the original AOS schedulers, not experimental ones.
         use_pacing = current_sampler_settings.get('use_content_aware_pacing', False) and total_steps > 0
+
         manual_pacing_schedule = current_sampler_settings.get('manual_pacing_schedule')
         sigma_idx_at_switch = 0 # Initialize here to ensure it's available later
 
@@ -496,56 +523,56 @@ class AdeptSamplerForge(scripts.Script):
             if remaining_iterations > 0 and is_coherent:
                 print(f"🧠 Pacing: Starting detail phase with {remaining_iterations} steps.")
                 
-                # BUG FIX: The logic to determine the switch index is now handled correctly inside the
-                # manual/auto pacing blocks above. This avoids the off-by-one error.
-                
+                # Regardless of the main scheduler, when pacing triggers a phase switch,
+                # we create a new detail-focused schedule for the remaining steps.
                 sigma_at_switch = original_sigmas[min(sigma_idx_at_switch, total_steps)]
                 sigma_min = original_sigmas[-2] # The one before zero
-
                 detail_sigmas = self.create_detail_schedule(sigma_at_switch, sigma_min, remaining_iterations, x.device)
                 
                 # The derivative from the composition phase is used to smooth the first step of the detail phase.
                 # A full derivative history is not needed for this simplified solver.
+                if len(detail_sigmas) > 1:
+                    for j in range(len(detail_sigmas) - 1):
+                        current_sigma = detail_sigmas[j]
+                        next_sigma = detail_sigmas[j+1]
 
-                for j in range(len(detail_sigmas) - 1):
-                    current_sigma = detail_sigmas[j]
-                    next_sigma = detail_sigmas[j+1]
-
-                    if current_sigma < next_sigma: break
-                    
-                    denoised = model(x, current_sigma * s_in, **extra_args)
-
-                    current_derivative = (x - denoised) / current_sigma
-
-                    # --- Derivative Smoothing at the Seam ---
-                    # BUG FIX: The blending of derivatives was causing numerical instability.
-                    # By removing it, we ensure the detail phase starts with a clean, stable derivative
-                    # that is correctly matched to its own step size.
-                    derivative = current_derivative
-
-                    progress = (composition_steps_taken + j) / total_steps
-                    callback_step = composition_steps_taken + j
-                    if callback is not None: callback({'x': x, 'i': callback_step, 'sigma': current_sigma, 'sigma_hat': current_sigma, 'denoised': denoised})
-
-                    sigma_down, sigma_up = self.get_ancestral_step(current_sigma, next_sigma, eta)
-                    dt = sigma_down - current_sigma
-
-                    x = x + derivative * dt
-                    
-                    # --- High-Frequency Detail Enhancement ---
-                    if use_enhanced_detail_phase and TORCHVISION_AVAILABLE:
-                        base_strength = current_sampler_settings.get('detail_enhancement_strength', 0.05)
-                        progress = j / (remaining_iterations -1) if remaining_iterations > 1 else 1.0
-                        strength = self.apply_progressive_enhancement(base_strength, 'detail', progress)
+                        if current_sigma < next_sigma: break
                         
-                        radius = current_sampler_settings.get('detail_separation_radius', 0.5)
-                        low_freq = gaussian_blur(denoised, kernel_size=3, sigma=radius)
-                        high_freq = denoised - low_freq
+                        denoised = model(x, current_sigma * s_in, **extra_args)
+
+                        current_derivative = (x - denoised) / current_sigma
+
+                        # --- Derivative Smoothing at the Seam ---
+                        # BUG FIX: The blending of derivatives was causing numerical instability.
+                        # By removing it, we ensure the detail phase starts with a clean, stable derivative
+                        # that is correctly matched to its own step size.
+                        derivative = current_derivative
+
+                        # The callback step should always be based on the number of composition steps taken.
+                        callback_step = composition_steps_taken + j
                         
-                        enhancement_amount = dt.abs() / current_sigma.clamp(min=1e-6)
-                        x = x + high_freq * enhancement_amount * strength
-                    
-                    if next_sigma > 0: x = x + noise_sampler(current_sigma, next_sigma) * s_noise * sigma_up
+                        progress = callback_step / total_steps
+                        if callback is not None: callback({'x': x, 'i': callback_step, 'sigma': current_sigma, 'sigma_hat': current_sigma, 'denoised': denoised})
+
+                        sigma_down, sigma_up = self.get_ancestral_step(current_sigma, next_sigma, eta)
+                        dt = sigma_down - current_sigma
+
+                        x = x + derivative * dt
+                        
+                        # --- High-Frequency Detail Enhancement ---
+                        if use_enhanced_detail_phase and TORCHVISION_AVAILABLE:
+                            base_strength = current_sampler_settings.get('detail_enhancement_strength', 0.05)
+                            progress_detail = (composition_steps_taken + j) / total_steps
+                            strength = self.apply_progressive_enhancement(base_strength, 'detail', progress_detail)
+                            
+                            radius = current_sampler_settings.get('detail_separation_radius', 0.5)
+                            low_freq = gaussian_blur(denoised, kernel_size=3, sigma=radius)
+                            high_freq = denoised - low_freq
+                            
+                            enhancement_amount = dt.abs() / current_sigma.clamp(min=1e-6)
+                            x = x + high_freq * enhancement_amount * strength
+                        
+                        if next_sigma > 0: x = x + noise_sampler(current_sigma, next_sigma) * s_noise * sigma_up
         else:
             # --- Pacing Disabled: Standard Single-Phase Sampling ---
             if not manual_pacing_schedule: # Avoid double printing if pacing was auto-disabled
@@ -575,7 +602,8 @@ class AdeptSamplerForge(scripts.Script):
                     enhancement_amount = dt.abs() / final_sigmas[i].clamp(min=1e-6)
                     x = x + high_freq * enhancement_amount * strength
                 
-                if final_sigmas[i+1] > 0: x = x + noise_sampler(final_sigmas[i], final_sigmas[i+1]) * s_noise * sigma_up
+                if final_sigmas[i+1] > 0:
+                    x = x + noise_sampler(final_sigmas[i], final_sigmas[i+1]) * s_noise * sigma_up
         
         return x
 
@@ -710,6 +738,81 @@ class AdeptSamplerForge(scripts.Script):
         sigmas = (max_inv_rho + ramp * (min_inv_rho - max_inv_rho)) ** rho
         
         return torch.cat([sigmas, torch.zeros(1, device=device)])
+
+    # --- Start of Experimental Schedulers and Methods ---
+
+    def create_snr_optimized_sigmas(self, sigma_max, sigma_min, num_steps, device='cpu'):
+        """
+        Creates a schedule optimized around log SNR = 0 region.
+        Based on "Improved Noise Schedule for Diffusion Training" (2024)
+        """
+        rho = 7.0
+        
+        log_snr_max = 2 * torch.log(sigma_max)
+        log_snr_min = 2 * torch.log(sigma_min)
+        
+        t = torch.linspace(0, 1, num_steps, device=device)
+        
+        concentration_power = 3.0
+        sigmoid_t = torch.sigmoid(concentration_power * (t - 0.5))
+        
+        linear_t = t
+        blend_factor = 0.7
+        combined_t = blend_factor * sigmoid_t + (1 - blend_factor) * linear_t
+        
+        log_snr = log_snr_max + combined_t * (log_snr_min - log_snr_max)
+        
+        sigmas = torch.exp(log_snr / 2)
+        
+        return torch.cat([sigmas, torch.zeros(1, device=device)])
+
+    def create_constant_rate_sigmas(self, sigma_max, sigma_min, num_steps, device='cpu'):
+        """
+        Ensures constant rate of distributional change throughout sampling.
+        Based on "Constant Rate Scheduling" (2024)
+        """
+        rho = 7.0
+        
+        t = torch.linspace(0, 1, num_steps, device=device)
+        
+        corrected_t = t + 0.3 * torch.sin(math.pi * t) * (1 - t)
+        
+        min_inv_rho = sigma_min ** (1 / rho)
+        max_inv_rho = sigma_max ** (1 / rho)
+        sigmas = (max_inv_rho + corrected_t * (min_inv_rho - max_inv_rho)) ** rho
+        
+        return torch.cat([sigmas, torch.zeros(1, device=device)])
+
+    def create_adaptive_optimized_sigmas(self, sigma_max, sigma_min, num_steps, device='cpu'):
+        """
+        Creates an adaptive schedule that optimizes itself based on the sampling progress.
+        Inspired by "Align Your Steps" methodology.
+        """
+        rho = 7.0
+        
+        base_t = torch.linspace(0, 1, num_steps, device=device)
+        
+        strategies = [
+            lambda t: t,
+            lambda t: t ** 0.8,
+            lambda t: t + 0.2 * torch.sin(2 * math.pi * t) * (1 - t),
+            lambda t: 1 / (1 + torch.exp(-3 * (t - 0.5))),
+        ]
+        
+        weights = [0.2, 0.3, 0.2, 0.3]
+        
+        combined_t = sum(w * s(base_t) for w, s in zip(weights, strategies))
+        
+        if (combined_t.max() - combined_t.min()) > 1e-6:
+            combined_t = (combined_t - combined_t.min()) / (combined_t.max() - combined_t.min())
+        
+        min_inv_rho = sigma_min ** (1 / rho)
+        max_inv_rho = sigma_max ** (1 / rho)
+        sigmas = (max_inv_rho + combined_t * (min_inv_rho - max_inv_rho)) ** rho
+        
+        return torch.cat([sigmas, torch.zeros(1, device=device)])
+
+    # --- End of Experimental Schedulers and Methods ---
 
 
 # Initialize the extension when script loads

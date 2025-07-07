@@ -19,6 +19,12 @@ This extension is developed and tested on **Stable Diffusion WebUI reForge**. Co
     - **Anime-Optimized Schedule for Epsilon-Prediction (AOS-ε)**: A three-phase scheduler optimized for **epsilon-prediction** models, with adjusted phase boundaries and power curves.
       > ⚠️ **Compatibility Warning**: Use the correct AOS variant for your model type. **AOS-V** is for **v-prediction** models, while **AOS-ε** is for **epsilon-prediction** models. Mismatching them may break the generation.
     - **Entropic Schedule**: A power-based schedule that clusters steps for fine-tuning detail generation. The **Entropic Power** setting controls this clustering, with values greater than 1.0 focusing more steps at the beginning of the sampling process.
+    - **SNR-Optimized**: Concentrates steps around the critical `logSNR = 0` point, where the model transitions from noise-dominant to signal-dominant.
+        - *Based on: [Hang, T., et al. (2024). Improved Noise Schedule for Diffusion Training.](https://arxiv.org/abs/2407.03297)*
+    - **Constant-Rate**: Aims to ensure a constant rate of change in the data's probability distribution, preventing large, unstable jumps in the sampling process.
+        - *Based on: [Okada, S., et al. (2024). Constant Rate Scheduling.](https://arxiv.org/abs/2411.12188)*
+    - **Adaptive-Optimized**: A hybrid approach inspired by data-driven methods, blending multiple strategies for a robust, general-purpose curve.
+        - *Inspired by: [Sabour, A., et al. (2024). Align Your Steps: Optimizing Sampling Schedules in Diffusion Models.](https://arxiv.org/abs/2404.14507)*
 - **Content-Aware Pacing (AOS Only)**: Dynamically adjusts the sampling process, switching from composition to detail focus based on image coherence. The **Coherence Sensitivity** slider controls when this switch occurs. Works with both AOS-V and AOS-ε variants.
 - **Full UI Integration**: All features are configurable through a custom accordion panel in the WebUI or reForge interface.
 
@@ -51,7 +57,7 @@ There are two ways to install the extension:
 2.  Select **"Adept Sampler"** from the script dropdown.
 3.  Enable the **"Enable Adept Sampler"** checkbox to activate the custom features.
 4.  Configure the settings as desired:
-    - **Scheduler**: Choose between the default, AOS-V (for v-prediction), AOS-ε (for epsilon-prediction), or Entropic schedulers.
+    - **Scheduler**: Choose from a wide range of schedulers, including the standard AOS and Entropic, or the newer research-based schedulers like SNR-Optimized, Constant-Rate, and Adaptive-Optimized.
       > ℹ️ **Note**: When using a custom scheduler, you may need to **lower your CFG Scale** (e.g., by 1-2 points) to prevent oversaturated or 'burnt' images.
     - **Detail Enhancement**: Toggle and adjust the strength of high-frequency detail enhancement.
     - **Advanced Noise Settings**: Fine-tune `Eta` and `Noise Scale` for different effects. 
