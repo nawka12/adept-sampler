@@ -10,7 +10,7 @@ import k_diffusion.sampling
 # Import shared for RNG state management
 try:
     from modules import shared
-    from modules.processing import StableDiffusionProcessing
+    from modules.processing import StableDiffusionProcessing, StableDiffusionProcessingTxt2Img, StableDiffusionProcessingImg2Img
     WEBUI_AVAILABLE = True
 except ImportError:
     WEBUI_AVAILABLE = False
@@ -190,6 +190,10 @@ class AdeptSamplerForge(scripts.Script):
                         self.s_noise = gr.Slider(label='Noise Scale', minimum=0.0, maximum=2.0, value=1.0, step=0.01)
                         
                         gr.Markdown("---")
+                        gr.Markdown("### Compatibility")
+                        self.disable_for_hr = gr.Checkbox(label="Disable for Hires. fix pass", value=True, info="Automatically turns off the Adept Sampler during the high-resolution pass.")
+
+                        gr.Markdown("---")
                         gr.Markdown("### Debugging")
                         self.debug_reproducibility = gr.Checkbox(label='Debug Reproducibility (disables advanced features)', value=False)
             
@@ -213,6 +217,7 @@ class AdeptSamplerForge(scripts.Script):
             (self.use_enhanced_detail_phase, lambda p: str(p.get('enhanced_detail_phase')).lower() == 'true' if 'enhanced_detail_phase' in p else gr.update()),
             (self.detail_enhancement_strength, lambda p: gr.update() if p.get('detail_enhancement_strength') in (None, 'N/A') else float(p['detail_enhancement_strength'])),
             (self.detail_separation_radius, lambda p: gr.update() if p.get('detail_separation_radius') in (None, 'N/A') else float(p['detail_separation_radius'])),
+            (self.disable_for_hr, lambda p: str(p.get('adept_disable_for_hr')).lower() == 'true' if 'adept_disable_for_hr' in p else gr.update()),
         ]
 
         def scheduler_getter(params):
@@ -245,6 +250,7 @@ class AdeptSamplerForge(scripts.Script):
             self.debug_stop_after_coherence,
             self.use_enhanced_detail_phase,
             self.detail_enhancement_strength, self.detail_separation_radius,
+            self.disable_for_hr,
         ]
 
     def process_before_every_sampling(self, p, *script_args, **kwargs):
@@ -257,6 +263,7 @@ class AdeptSamplerForge(scripts.Script):
             debug_stop_after_coherence,
             use_enhanced_detail_phase,
             detail_enhancement_strength, detail_separation_radius,
+            disable_for_hr,
         ) = script_args
 
         # Set scheduler flags based on the radio button choice
@@ -280,9 +287,19 @@ class AdeptSamplerForge(scripts.Script):
             except json.JSONDecodeError:
                 print(f"⚠️ Manual Pacing Override: Invalid JSON. Ignoring.")
 
-        # Update global settings (this happens immediately)
+        # --- Compatibility Checks ---
+        is_hires_pass = getattr(p, 'is_hr_pass', False)
+
+        should_be_enabled = enable_custom
+        disable_reason = None
+
+        if enable_custom:
+            if disable_for_hr and is_hires_pass:
+                should_be_enabled = False
+                disable_reason = "Hires. fix pass"
+
         current_sampler_settings.update({
-            'enabled': enable_custom,
+            'enabled': should_be_enabled,
             'eta': eta,
             's_noise': s_noise,
             'debug_reproducibility': debug_reproducibility,
@@ -294,7 +311,7 @@ class AdeptSamplerForge(scripts.Script):
             'use_content_aware_pacing': use_content_aware_pacing and use_anime_schedule, # Only works with AOS
             'pacing_coherence_sensitivity': pacing_coherence_sensitivity,
             'manual_pacing_schedule': manual_pacing_schedule,
-            'debug_stop_after_coherence': debug_stop_after_coherence and use_content_aware_pacing,
+            'debug_stop_after_coherence': debug_stop_after_coherence and use_content_aware_pacing and use_anime_schedule,
             'use_enhanced_detail_phase': use_enhanced_detail_phase,
             'detail_enhancement_strength': detail_enhancement_strength,
             'detail_separation_radius': detail_separation_radius,
@@ -302,7 +319,9 @@ class AdeptSamplerForge(scripts.Script):
         })
         
         if enable_custom:
-            if debug_reproducibility:
+            if disable_reason:
+                print(f"🔄 Adept Sampler disabled for {disable_reason}. Using standard Euler Ancestral.")
+            elif debug_reproducibility:
                 print(f"🔬 Debug mode: Adept Sampler - simplified for reproducibility testing")
             else:
                 print(f"✅ Adept Sampler is now active!")
@@ -326,11 +345,11 @@ class AdeptSamplerForge(scripts.Script):
                 'detail_enhancement_strength': detail_enhancement_strength if use_enhanced_detail_phase else 'N/A',
                 'detail_separation_radius': detail_separation_radius if use_enhanced_detail_phase else 'N/A',
                 'custom_scheduler_type': custom_scheduler_type,
+                'adept_disable_for_hr': disable_for_hr,
             })
         else:
             print("🔄 Using standard Euler Ancestral sampler")
     
-
     def sample_enhanced_euler_ancestral(self, model, x, sigmas, extra_args=None, callback=None, disable=None, eta=1., s_noise=1., generator=None):
         """Simplified custom Euler Ancestral with dynamic thresholding, focused on AOS."""
         # --- Read settings from global config to ensure they are always correct ---

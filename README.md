@@ -14,7 +14,12 @@ This extension is developed and tested on **Stable Diffusion WebUI reForge**. Co
 
 - **Advanced Ancestral Sampler**: A custom implementation that patches the default Euler Ancestral sampler to provide advanced features.
 - **Detail Enhancement**: A unique method to enhance high-frequency details, which can be used with any scheduler. The **Detail Separation Radius** controls what is considered a 'detail,' with higher values sharpening larger features.
-- **Custom Schedulers**:
+- **Custom Schedulers**: A suite of schedulers to control the denoising process.
+    > **Scheduler Categories:**
+    > - **Universal**: Recommended for all model types. Includes `Entropic`, `Constant-Rate`, and `Adaptive-Optimized`.
+    > - **V-Prediction**: Specialized for `v-prediction` models. Includes `AOS-V` and `SNR-Optimized`.
+    > - **ε-Prediction**: Specialized for `epsilon-prediction` models. Includes `AOS-ε`.
+
     - **Anime-Optimized Schedule for V-Prediction (AOS-V)**: A three-phase scheduler designed to improve composition and detail for anime-style images on **v-prediction** models.
     - **Anime-Optimized Schedule for Epsilon-Prediction (AOS-ε)**: A three-phase scheduler optimized for **epsilon-prediction** models, with adjusted phase boundaries and power curves.
       > ⚠️ **Compatibility Warning**: Use the correct AOS variant for your model type. **AOS-V** is for **v-prediction** models, while **AOS-ε** is for **epsilon-prediction** models. Mismatching them may break the generation.
@@ -56,10 +61,18 @@ There are two ways to install the extension:
 1.  Navigate to the "Scripts" section at the bottom of the `txt2img` or `img2img` tabs.
 2.  Select **"Adept Sampler"** from the script dropdown.
 3.  Enable the **"Enable Adept Sampler"** checkbox to activate the custom features.
-4.  Configure the settings as desired:
-    - **Scheduler**: Choose from a wide range of schedulers, including the standard AOS and Entropic, or the newer research-based schedulers like SNR-Optimized, Constant-Rate, and Adaptive-Optimized.
-      > ℹ️ **Note**: When using a custom scheduler, you may need to **lower your CFG Scale** (e.g., by 1-2 points) to prevent oversaturated or 'burnt' images.
-    - **Detail Enhancement**: Toggle and adjust the strength of high-frequency detail enhancement.
+4.  The settings are organized into tabs for easy configuration:
+    - **Scheduler**:
+        - Choose a scheduler from the dropdown. See the "Features" section for a description of each.
+        - **Entropic Power**: If using the `Entropic` scheduler, this slider controls timestep clustering. Higher values focus on detail earlier.
+        - **Content-Aware Pacing (AOS Only)**: For `AOS` schedulers, this enables dynamic adjustment from composition to detail focus. You can control its sensitivity.
+    - **Detail Enhancement**:
+        - Toggle the detail enhancer and adjust its `Strength`.
+        - Use the `Detail Separation Radius` to define what counts as a "detail." Higher values sharpen larger features.
+    - **Advanced**:
+        - Fine-tune `Eta` and `Noise Scale` for different ancestral noise effects.
+        - Option to automatically disable the sampler for the Hires. fix pass.
+      > ℹ️ **Note**: When using a custom scheduler, you may often need to **lower your CFG Scale** (e.g., by 1-2 points) to prevent oversaturated or 'burnt' images.
     - **Advanced Noise Settings**: Fine-tune `Eta` and `Noise Scale` for different effects. 
 
 ## 🔍 Sampling Method Comparison
@@ -69,6 +82,9 @@ There are two ways to install the extension:
 | **Euler Ancestral** | Standard sampling with noise injection | General purpose, baseline comparison | CFG Scale: Standard values | ![image](https://github.com/user-attachments/assets/10f7087e-0b79-4b34-bd7b-73cd1263e24b) | Default sampler, good baseline performance |
 | **Adept + AOS + Content-Aware Pacing** | Three-phase scheduler with dynamic composition-to-detail switching | Anime/illustration style, complex compositions | AOS-V/AOS-ε (match model type)<br/>Coherence Sensitivity<br/>CFG Scale: -1 to -2 from normal | ![image](https://github.com/user-attachments/assets/f0a036e1-1fa6-4941-a08e-1e364979f05e) | Automatically adapts focus from composition to details based on image coherence |
 | **Adept + Entropic** | Power-based clustering with concentrated early steps | Fine detail work, texture enhancement | Entropic Power: >1.0 for early focus<br/>Detail Enhancement<br/>CFG Scale: -1 to -2 from normal | ![image](https://github.com/user-attachments/assets/0a62c159-43c9-4dd5-9579-78a231d1e5d6) | Clusters more steps at beginning for better detail control |
+| **Adept + SNR-Optimized** | Concentrates steps around the critical `logSNR = 0` point for balanced sampling | Balanced compositions, preventing over/under-exposure | CFG Scale: -1 to -2 from normal | Image not available | Based on recent research to improve stability |
+| **Adept + Constant-Rate** | Ensures a constant rate of change, preventing unstable jumps in sampling | Smooth, stable, and predictable generations | CFG Scale: -1 to -2 from normal | Image not available | Ideal for preventing artifacts from sudden changes in sampling speed |
+| **Adept + Adaptive-Optimized** | Hybrid approach blending multiple strategies for a robust, general-purpose curve | General-purpose use across a wide variety of models | CFG Scale: -1 to -2 from normal | Image not available | A "best-of-all-worlds" approach inspired by data-driven methods |
 
 ## 📄 License
 
