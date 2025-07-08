@@ -349,6 +349,7 @@ class AdeptSamplerForge(scripts.Script):
             })
         else:
             print("🔄 Using standard Euler Ancestral sampler")
+            return
     
     def sample_enhanced_euler_ancestral(self, model, x, sigmas, extra_args=None, callback=None, disable=None, eta=1., s_noise=1., generator=None):
         """Simplified custom Euler Ancestral with dynamic thresholding, focused on AOS."""
