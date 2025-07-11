@@ -1,121 +1,167 @@
-# Adept Sampler
+# Adept Sampler for ComfyUI
 
-This repository contains an advanced, highly customizable sampler for Stable Diffusion WebUI reForge. It integrates state-of-the-art techniques to provide enhanced detail, flexible scheduling, and improved image composition.
+# THE SAMPLER DOESN'T WORK YET AND STILL ON DEVELOPMENT PROGRESS
 
-## 📝 Disclaimer
-
-While this sampler implements advanced techniques to improve generation, the field of generative images is complex and results can be sensitive to settings. This tool is not guaranteed to work perfectly in all scenarios, and some experimentation with the parameters may be required to achieve your desired outcome.
-
-## ⚠️ Compatibility
-
-This extension is developed and tested on **Stable Diffusion WebUI reForge**. Compatibility with other versions, such as the original WebUI or WebUI Forge, is not guaranteed.
+This is the ComfyUI implementation of the Adept Sampler, converted from the original Stable Diffusion WebUI reForge version. It provides advanced sampling techniques including custom schedulers, content-aware pacing, and detail enhancement for ComfyUI workflows.
 
 ## 🌟 Features
 
-- **Advanced Ancestral Sampler**: A custom implementation that patches the default Euler Ancestral sampler to provide advanced features.
-- **Detail Enhancement**: A unique method to enhance high-frequency details, which can be used with any scheduler. The **Detail Separation Radius** controls what is considered a 'detail,' with higher values sharpening larger features.
-- **Custom Schedulers**: A suite of schedulers to control the denoising process.
-    > **Scheduler Categories:**
-    > - **Universal**: Recommended for all model types. Includes `Entropic`, `Constant-Rate`, and `Adaptive-Optimized`.
-    > - **V-Prediction**: Specialized for `v-prediction` models. Includes `AOS-V` and `SNR-Optimized`.
-    > - **ε-Prediction**: Specialized for `epsilon-prediction` models. Includes `AOS-ε`.
+- **Advanced Schedulers**: Multiple custom scheduler types including AOS-V, AOS-ε, Entropic, SNR-Optimized, Constant-Rate, and Adaptive-Optimized
+- **Content-Aware Pacing**: Dynamic two-phase sampling that switches from composition to detail based on image coherence (AOS schedulers only)
+- **Detail Enhancement**: High-frequency detail separation and enhancement for improved image quality
+- **ComfyUI Integration**: Native ComfyUI nodes that work seamlessly with existing workflows
+- **Flexible Configuration**: Extensive parameters for fine-tuning the sampling process
 
-    - **Anime-Optimized Schedule for V-Prediction (AOS-V)**: A three-phase scheduler designed to improve composition and detail for anime-style images on **v-prediction** models.
-    - **Anime-Optimized Schedule for Epsilon-Prediction (AOS-ε)**: A three-phase scheduler optimized for **epsilon-prediction** models, with adjusted phase boundaries and power curves.
-      > ⚠️ **Compatibility Warning**: Use the correct AOS variant for your model type. **AOS-V** is for **v-prediction** models, while **AOS-ε** is for **epsilon-prediction** models. Mismatching them may break the generation.
-    - **Entropic Schedule**: A power-based schedule that clusters steps for fine-tuning detail generation. The **Entropic Power** setting controls this clustering, with values greater than 1.0 focusing more steps at the beginning of the sampling process.
-    - **SNR-Optimized**: Concentrates steps around the critical `logSNR = 0` point, where the model transitions from noise-dominant to signal-dominant.
-        - *Based on: [Hang, T., et al. (2024). Improved Noise Schedule for Diffusion Training.](https://arxiv.org/abs/2407.03297)*
-    - **Constant-Rate**: Aims to ensure a constant rate of change in the data's probability distribution, preventing large, unstable jumps in the sampling process.
-        - *Based on: [Okada, S., et al. (2024). Constant Rate Scheduling.](https://arxiv.org/abs/2411.12188)*
-    - **Adaptive-Optimized**: A hybrid approach inspired by data-driven methods, blending multiple strategies for a robust, general-purpose curve.
-        - *Inspired by: [Sabour, A., et al. (2024). Align Your Steps: Optimizing Sampling Schedules in Diffusion Models.](https://arxiv.org/abs/2404.14507)*
-- **Content-Aware Pacing (AOS Only)**: Dynamically adjusts the sampling process, switching from composition to detail focus based on image coherence. The **Coherence Sensitivity** slider controls when this switch occurs. Works with both AOS-V and AOS-ε variants.
-- **Full UI Integration**: All features are configurable through a custom accordion panel in the WebUI or reForge interface.
+## 📦 Installation
 
-## 🛠️ Installation
+1. Clone this repository into your ComfyUI `custom_nodes` directory:
+   ```bash
+   cd ComfyUI/custom_nodes
+   git clone https://github.com/your-repo/adept-sampler-comfy
+   ```
 
-There are two ways to install the extension:
+2. Restart ComfyUI
 
-**Method 1: Using the `Install from URL` Feature**
+3. The nodes will appear in the `sampling/custom_sampling` category
 
-1.  Navigate to the **Extensions** tab in your WebUI.
-2.  Click on the **Install from URL** sub-tab.
-3.  Paste the following URL into the **URL for extension's git repository** field:
-    ```
-    https://github.com/nawka12/adept-sampler
-    ```
-4.  Click **Install**.
-5.  Once installation is complete, navigate to the **Installed** tab and click **Apply and restart UI**.
+## 🛠️ Available Nodes
 
-**Method 2: Manual Installation (git clone)**
+### 1. Adept Scheduler
+- **Purpose**: Generates custom sigma schedules for advanced sampling
+- **Location**: `sampling/custom_sampling/schedulers`
+- **Inputs**:
+  - `scheduler`: Choose from various scheduler types
+  - `steps`: Number of sampling steps
+  - `denoise`: Denoising strength (0.01-1.0)
+  - `entropic_power`: Power setting for Entropic scheduler (1.0-8.0)
+  - `model`: (Optional) Model for device detection
+- **Output**: `SIGMAS` - Custom sigma schedule
 
-1.  Clone this repository into your `extensions` directory in your Stable Diffusion WebUI reForge installation.
-    ```bash
-    git clone https://github.com/nawka12/adept-sampler extensions/adept-sampler
-    ```
-2.  Restart your Stable Diffusion WebUI reForge.
+### 2. Adept Sampler (ComfyUI)
+- **Purpose**: Enhanced Euler Ancestral sampler with advanced features
+- **Location**: `sampling/custom_sampling`
+- **Inputs**:
+  - Standard ComfyUI sampling inputs (`model`, `noise`, `guider`, `sampler`, `sigmas`, `latent_image`)
+  - `scheduler_type`: Type of scheduler to use
+  - `eta`: Ancestral noise amount (0.0-2.0)
+  - `s_noise`: Noise scale (0.0-2.0)
+  - `entropic_power`: Power for Entropic scheduler
+  - Content-aware pacing settings
+  - Detail enhancement settings
+- **Output**: `LATENT` - Generated latent image
 
-## 📖 Usage
+### 3. Adept Sampler (Simple)
+- **Purpose**: Simplified all-in-one sampler node
+- **Location**: `sampling/custom_sampling`
+- **Inputs**: Similar to ComfyUI version but with simplified interface
 
-1.  Navigate to the "Scripts" section at the bottom of the `txt2img` or `img2img` tabs.
-2.  Select **"Adept Sampler"** from the script dropdown.
-3.  Enable the **"Enable Adept Sampler"** checkbox to activate the custom features.
-4.  The settings are organized into tabs for easy configuration:
-    - **Scheduler**:
-        - Choose a scheduler from the dropdown. See the "Features" section for a description of each.
-        - **Entropic Power**: If using the `Entropic` scheduler, this slider controls timestep clustering. Higher values focus on detail earlier.
-        - **Content-Aware Pacing (AOS Only)**: For `AOS` schedulers, this enables dynamic adjustment from composition to detail focus. You can control its sensitivity.
-    - **Detail Enhancement**:
-        - Toggle the detail enhancer and adjust its `Strength`.
-        - Use the `Detail Separation Radius` to define what counts as a "detail." Higher values sharpen larger features.
-    - **Advanced**:
-        - Fine-tune `Eta` and `Noise Scale` for different ancestral noise effects.
-        - Option to automatically disable the sampler for the Hires. fix pass.
-      > ℹ️ **Note**: When using a custom scheduler, you may often need to **lower your CFG Scale** (e.g., by 1-2 points) to prevent oversaturated or 'burnt' images.
-    - **Advanced Noise Settings**: Fine-tune `Eta` and `Noise Scale` for different effects. 
+## 📚 Scheduler Types
 
-## 🔍 Sampling Method Comparison
+### Universal Schedulers (Recommended for all models)
+- **karras**: Standard Karras schedule (baseline)
+- **Entropic**: Power-based clustering with configurable power
+- **Constant-Rate**: Ensures constant rate of distributional change
+- **Adaptive-Optimized**: Hybrid approach blending multiple strategies
 
-| **Method** | **Key Characteristics** | **Best For** | **Key Settings** | **Sample Image** | **Notes** |
-|------------|------------------------|--------------|------------------|------------------|-----------|
-| **Euler Ancestral** | Standard sampling with noise injection | General purpose, baseline comparison | CFG Scale: Standard values | ![image](https://github.com/user-attachments/assets/10f7087e-0b79-4b34-bd7b-73cd1263e24b) | Default sampler, good baseline performance |
-| **Adept + AOS + Content-Aware Pacing** | Three-phase scheduler with dynamic composition-to-detail switching | Anime/illustration style, complex compositions | AOS-V/AOS-ε (match model type)<br/>Coherence Sensitivity<br/>CFG Scale: -1 to -2 from normal | ![image](https://github.com/user-attachments/assets/f0a036e1-1fa6-4941-a08e-1e364979f05e) | Automatically adapts focus from composition to details based on image coherence |
-| **Adept + Entropic** | Power-based clustering with concentrated early steps | Fine detail work, texture enhancement | Entropic Power: >1.0 for early focus<br/>Detail Enhancement<br/>CFG Scale: -1 to -2 from normal | ![image](https://github.com/user-attachments/assets/0a62c159-43c9-4dd5-9579-78a231d1e5d6) | Clusters more steps at beginning for better detail control |
-| **Adept + SNR-Optimized** | Concentrates steps around the critical `logSNR = 0` point for balanced sampling | Balanced compositions, preventing over/under-exposure | CFG Scale: -1 to -2 from normal | Image not available | Based on recent research to improve stability |
-| **Adept + Constant-Rate** | Ensures a constant rate of change, preventing unstable jumps in sampling | Smooth, stable, and predictable generations | CFG Scale: -1 to -2 from normal | Image not available | Ideal for preventing artifacts from sudden changes in sampling speed |
-| **Adept + Adaptive-Optimized** | Hybrid approach blending multiple strategies for a robust, general-purpose curve | General-purpose use across a wide variety of models | CFG Scale: -1 to -2 from normal | Image not available | A "best-of-all-worlds" approach inspired by data-driven methods |
+### Specialized Schedulers
+- **AOS-V**: Anime-Optimized Schedule for v-prediction models
+- **AOS-ε**: Anime-Optimized Schedule for epsilon-prediction models
+- **SNR-Optimized**: Concentrates steps around critical logSNR = 0 point
+
+## 🎛️ Key Parameters
+
+### Scheduler Settings
+- **scheduler_type**: Choose the scheduling algorithm
+- **entropic_power**: Controls timestep clustering (higher = more detail focus early)
+
+### Content-Aware Pacing (AOS only)
+- **enable_content_aware_pacing**: Enable dynamic two-phase sampling
+- **coherence_sensitivity**: Controls when to switch from composition to detail (0.1-1.0)
+- **manual_pacing_override**: JSON string for manual phase control
+- **debug_stop_after_coherence**: Stop after composition phase for debugging
+
+### Detail Enhancement
+- **enable_detail_enhancement**: Enable high-frequency detail enhancement
+- **detail_enhancement_strength**: Strength of detail enhancement (0.0-1.0)
+- **detail_separation_radius**: Sigma for detail separation (0.1-2.0)
+
+### Noise Control
+- **eta**: Ancestral noise amount (1.0 = standard Euler Ancestral)
+- **s_noise**: Additional noise scaling
+
+## 🔧 Usage Examples
+
+### Basic Usage
+1. Add an **Adept Scheduler** node
+2. Set scheduler type (e.g., "Entropic")
+3. Connect to **Adept Sampler (ComfyUI)** node
+4. Configure your model, conditioning, and other standard inputs
+5. Adjust parameters as needed
+
+### Advanced Content-Aware Pacing
+1. Use **AOS-V** or **AOS-ε** scheduler (match your model type)
+2. Enable **Content-Aware Pacing**
+3. Set **coherence_sensitivity** (0.75 is a good starting point)
+4. Use higher step counts (at least 30+ for effective phasing)
+5. Consider lowering CFG scale by 1-2 points
+
+### Manual Pacing Control
+Use the **manual_pacing_override** with JSON format:
+```json
+{"composition": 0.4}
+```
+This allocates 40% of steps to composition phase.
+
+## ⚠️ Important Notes
+
+### Model Compatibility
+- **AOS-V**: Use with v-prediction models only
+- **AOS-ε**: Use with epsilon-prediction models only
+- **Universal schedulers**: Work with any model type
+
+### CFG Scale Adjustment
+When using custom schedulers, you may need to **lower your CFG Scale** by 1-2 points to prevent oversaturated images.
+
+### Step Count Recommendations
+- **Content-Aware Pacing**: Use at least 26 steps, ideally 30+
+- **Standard sampling**: Works with any step count
+- **Detail enhancement**: More effective with higher step counts
+
+## 🔍 Comparison with Original
+
+This ComfyUI version maintains full feature parity with the original reForge implementation:
+
+| Feature | reForge | ComfyUI |
+|---------|---------|---------|
+| Custom Schedulers | ✅ | ✅ |
+| Content-Aware Pacing | ✅ | ✅ |
+| Detail Enhancement | ✅ | ✅ |
+| Manual Pacing Override | ✅ | ✅ |
+| All Scheduler Types | ✅ | ✅ |
+| Debug Features | ✅ | ✅ |
+
+## 🐛 Troubleshooting
+
+### Common Issues
+1. **No visible improvement**: Try lowering CFG scale and using higher step counts
+2. **Oversaturated images**: Lower CFG scale by 1-2 points
+3. **Pacing not working**: Ensure you're using AOS schedulers and sufficient steps
+4. **Detail enhancement not working**: Check that torchvision is installed
+
+### Performance Tips
+- Start with **Entropic** scheduler for general use
+- Use **AOS** schedulers for anime/illustration style content
+- Experiment with **coherence_sensitivity** between 0.5-0.9
+- **Detail enhancement strength** of 0.05-0.1 works well for most cases
 
 ## 📄 License
 
-This project is licensed under the **GNU General Public License v3.0 (GPL-3.0)**.
+This project maintains the same **GNU General Public License v3.0 (GPL-3.0)** as the original implementation.
 
-### License Summary
+## 🙏 Credits
 
-- ✅ **Commercial use** - You may use this software commercially
-- ✅ **Modification** - You may modify the software  
-- ✅ **Distribution** - You may distribute the software
-- ✅ **Patent use** - You may use any patents that contributors grant you
-- ✅ **Private use** - You may use the software privately
-
-**Requirements:**
-- 📋 **License and copyright notice** - Include the license and copyright notice with the software
-- 📋 **State changes** - Indicate significant changes made to the software
-- 📋 **Disclose source** - You must make the source code available when you distribute the software
-- 📋 **Same license** - You must license derivative works under the same license
-
-**Limitations:**
-- ❌ **Liability** - The software is provided without warranty
-- ❌ **Warranty** - No warranties are provided with the software
-
-### Why GPL-3.0?
-
-This license was chosen to ensure compatibility with **Stable Diffusion WebUI reForge** and its ecosystem, while protecting the open-source nature of the project. It ensures that improvements and modifications remain available to the community.
-
-### Full License Text
-
-The complete license text can be found at: https://www.gnu.org/licenses/gpl-3.0.html
+This ComfyUI version is adapted from the original [Adept Sampler for Stable Diffusion WebUI reForge](https://github.com/nawka12/adept-sampler) by nawka12/KayfaHaarukku.
 
 ---
 
-Copyright (C) 2025 nawka12/KayfaHaarukku. This program comes with ABSOLUTELY NO WARRANTY. This is free software, and you are welcome to redistribute it under certain conditions as specified in the GPL-3.0 license.
+For more detailed information about the sampling techniques and research behind this implementation, please refer to the original project's README.

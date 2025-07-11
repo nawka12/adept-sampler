@@ -109,7 +109,8 @@ def _sample_with_pacing(model, x, sigmas, extra_args, callback, disable, eta, s_
     sigma_idx_at_switch = 0
     
     s_in = x.new_ones([x.shape[0]])
-    
+    noise_sampler = extra_args.get('noise_sampler', lambda: torch.randn_like(x))
+
     if manual_pacing_schedule:
         # Manual pacing override
         print("🧠 Pacing: Using manual override schedule.")
@@ -139,16 +140,18 @@ def _sample_with_pacing(model, x, sigmas, extra_args, callback, disable, eta, s_
                 progress = i / composition_steps_taken if composition_steps_taken > 0 else 1.0
                 strength = _apply_progressive_enhancement(detail_enhancement_strength, 'composition', progress)
                 x = _apply_detail_enhancement(x, denoised, dt, sigmas[i], strength, detail_separation_radius)
+            x = torch.clamp(x, min=-10.0, max=10.0)
             
             if sigmas[i+1] > 0:
-                x = x + torch.randn_like(x) * s_noise * sigma_up
+                x = x + noise_sampler() * s_noise * sigma_up
+                x = torch.clamp(x, min=-10.0, max=10.0)
         
         sigma_idx_at_switch = composition_steps_taken
     else:
         # Automatic pacing (coherence detection)
         initial_variance = None
-        fallback_step_pct = 0.4 + 0.3 * min(1.0, (total_steps - 20) / 40.0)
-        
+        fallback_step_pct = 0.4 + 0.3 * torch.clamp(torch.tensor((total_steps - 20) / 40.0), 0.0, 1.0).item()
+
         print("🧠 Pacing: Starting composition phase...")
         i = 0
         
@@ -159,7 +162,7 @@ def _sample_with_pacing(model, x, sigmas, extra_args, callback, disable, eta, s_
             next_sigma_idx = min(i + pacing_step_size, total_steps)
             next_sigma = sigmas[next_sigma_idx]
             
-            if current_sigma < next_sigma:
+            if current_sigma <= next_sigma:
                 break
             
             denoised = model(x, current_sigma * s_in, **extra_args)
@@ -191,28 +194,30 @@ def _sample_with_pacing(model, x, sigmas, extra_args, callback, disable, eta, s_
                 progress = composition_steps_taken / (total_steps * fallback_step_pct)
                 strength = _apply_progressive_enhancement(detail_enhancement_strength, 'composition', progress)
                 x = _apply_detail_enhancement(x, denoised, dt, current_sigma, strength, detail_separation_radius)
+            x = torch.clamp(x, min=-10.0, max=10.0)
             
             if next_sigma > 0:
-                x = x + torch.randn_like(x) * s_noise * sigma_up
+                x = x + noise_sampler() * s_noise * sigma_up
+                x = torch.clamp(x, min=-10.0, max=10.0)
             
             i = next_sigma_idx
         
         sigma_idx_at_switch = i
-    
+        if not is_coherent:
+            print("🧠 Pacing: Composition phase finished without reaching coherence. Proceeding to detail phase.")
+            is_coherent = True
+
     # Debug stop after coherence
-    if is_coherent and debug_stop_after_coherence:
+    if is_coherent and debug_stop_after_coherence and not manual_pacing_schedule:
         print("🛑 [Debug] Coherence achieved. Stopping generation before detail phase as requested.")
         return x
     
     # Detail phase
-    remaining_iterations = total_steps - composition_steps_taken
-    
-    if not is_coherent and not manual_pacing_schedule:
-        print("🧠 Pacing: Composition phase finished. Switching to detail phase for remaining steps.")
-        is_coherent = True
+    remaining_iterations = total_steps - sigma_idx_at_switch
     
     if remaining_iterations <= 0 and total_steps > 0:
-        print(f"⚠️ Warning: No steps remaining for detail phase. Composition took all {composition_steps_taken} steps.")
+        if composition_steps_taken > 0:
+            print(f"⚠️ Warning: No steps remaining for detail phase. Composition took all {sigma_idx_at_switch} sigma steps.")
         return x
     
     if remaining_iterations > 0 and is_coherent:
@@ -233,7 +238,7 @@ def _sample_with_pacing(model, x, sigmas, extra_args, callback, disable, eta, s_
                 denoised = model(x, current_sigma * s_in, **extra_args)
                 derivative = (x - denoised) / current_sigma
                 
-                callback_step = composition_steps_taken + j
+                callback_step = sigma_idx_at_switch + j
                 if callback is not None and not disable:
                     callback({'x': x, 'i': callback_step, 'sigma': current_sigma, 'sigma_hat': current_sigma, 'denoised': denoised})
                 
@@ -245,9 +250,11 @@ def _sample_with_pacing(model, x, sigmas, extra_args, callback, disable, eta, s_
                     progress_detail = callback_step / total_steps
                     strength = _apply_progressive_enhancement(detail_enhancement_strength, 'detail', progress_detail)
                     x = _apply_detail_enhancement(x, denoised, dt, current_sigma, strength, detail_separation_radius)
+                x = torch.clamp(x, min=-10.0, max=10.0)
                 
                 if next_sigma > 0:
-                    x = x + torch.randn_like(x) * s_noise * sigma_up
+                    x = x + noise_sampler() * s_noise * sigma_up
+                    x = torch.clamp(x, min=-10.0, max=10.0)
     
     return x
 
@@ -259,7 +266,8 @@ def _sample_single_phase(model, x, sigmas, extra_args, callback, disable, eta, s
     
     total_steps = len(sigmas) - 1
     s_in = x.new_ones([x.shape[0]])
-    
+    noise_sampler = extra_args.get('noise_sampler', lambda: torch.randn_like(x))
+
     for i in range(total_steps):
         denoised = model(x, sigmas[i] * s_in, **extra_args)
         derivative = (x - denoised) / sigmas[i]
@@ -274,10 +282,12 @@ def _sample_single_phase(model, x, sigmas, extra_args, callback, disable, eta, s
         if enable_detail_enhancement and TORCHVISION_AVAILABLE:
             strength = _apply_progressive_enhancement(detail_enhancement_strength, 'single_phase', i/total_steps)
             x = _apply_detail_enhancement(x, denoised, dt, sigmas[i], strength, detail_separation_radius)
-        
+        x = torch.clamp(x, min=-10.0, max=10.0)
+
         if sigmas[i+1] > 0:
-            x = x + torch.randn_like(x) * s_noise * sigma_up
-    
+            x = x + noise_sampler() * s_noise * sigma_up
+            x = torch.clamp(x, min=-10.0, max=10.0)
+
     return x
 
 

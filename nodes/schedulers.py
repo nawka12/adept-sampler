@@ -113,23 +113,18 @@ class AdeptSchedulers:
         Creates a schedule optimized around log SNR = 0 region.
         Based on "Improved Noise Schedule for Diffusion Training" (2024)
         """
-        rho = 7.0
         
-        log_snr_max = 2 * torch.log(sigma_max)
-        log_snr_min = 2 * torch.log(sigma_min)
+        log_snr_max = -2 * torch.log(torch.tensor(sigma_max, device=device) + 1e-8)
+        log_snr_min = -2 * torch.log(torch.tensor(sigma_min, device=device) + 1e-8)
         
         t = torch.linspace(0, 1, num_steps, device=device)
         
-        concentration_power = 3.0
-        sigmoid_t = torch.sigmoid(concentration_power * (t - 0.5))
-        
-        linear_t = t
-        blend_factor = 0.7
-        combined_t = blend_factor * sigmoid_t + (1 - blend_factor) * linear_t
+        power = 2.0
+        combined_t = t ** power
         
         log_snr = log_snr_max + combined_t * (log_snr_min - log_snr_max)
         
-        sigmas = torch.exp(log_snr / 2)
+        sigmas = torch.exp(-0.5 * log_snr)
         
         return torch.cat([sigmas, torch.zeros(1, device=device)])
 

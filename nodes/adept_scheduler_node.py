@@ -5,6 +5,7 @@ Generates custom sigma schedules for advanced sampling.
 
 import torch
 from .schedulers import AdeptSchedulers
+import comfy.model_management
 
 
 class AdeptSchedulerNode:
@@ -31,14 +32,7 @@ class AdeptSchedulerNode:
     def get_sigmas(self, scheduler, steps, denoise, entropic_power=6.0, model=None):
         """Generate custom sigma schedule."""
         
-        # Get device (prefer model device if available)
-        device = "cpu"
-        if model is not None:
-            try:
-                # Try to get device from model
-                device = next(model.parameters()).device
-            except:
-                device = "cpu"
+        device = comfy.model_management.get_torch_device()
         
         # Use default karras schedule as fallback or when explicitly selected
         if scheduler == "karras" or scheduler not in ["AOS-V", "AOS-ε", "Entropic", "SNR-Optimized", "Constant-Rate", "Adaptive-Optimized"]:
