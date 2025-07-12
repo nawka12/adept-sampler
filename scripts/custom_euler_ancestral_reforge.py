@@ -197,11 +197,32 @@ class AdeptSamplerForge(scripts.Script):
                         gr.Markdown("### Debugging")
                         self.debug_reproducibility = gr.Checkbox(label='Debug Reproducibility (disables advanced features)', value=False)
             
+            with gr.TabItem("Experimental"):
+                gr.Markdown("### Experimental Features")
+                self.experimental_pacing_for_snr = gr.Checkbox(label="Enable Content-Aware Pacing for SNR-Optimized", value=False, info="Experimental: Applies pacing to SNR-Optimized scheduler. May improve adaptivity but could cause instability.")
+                with gr.Group(visible=False) as experimental_pacing_options:
+                    self.experimental_pacing_sensitivity = gr.Slider(
+                        label='Experimental Coherence Sensitivity',
+                        minimum=0.1, maximum=1.0, value=0.75, step=0.05,
+                        info="Controls when to switch from composition to detail for SNR pacing. Higher values switch sooner."
+                    )
+                    self.experimental_manual_pacing = gr.Textbox(
+                        label="Experimental Manual Pacing Override (JSON)",
+                        info='Advanced: Manually set phase steps for SNR pacing. e.g., {"composition": 0.4} or {"composition": 10}',
+                        placeholder='Disabled (uses automatic pacing)'
+                    )
+
             # Visibility logic for the main group of options
             self.enable_custom.change(
                 fn=lambda x: gr.update(visible=x),
                 inputs=[self.enable_custom],
                 outputs=[main_options]
+            )
+
+            self.experimental_pacing_for_snr.change(
+                fn=lambda x: gr.update(visible=x),
+                inputs=[self.experimental_pacing_for_snr],
+                outputs=[experimental_pacing_options]
             )
 
         self.infotext_fields = [
@@ -218,6 +239,9 @@ class AdeptSamplerForge(scripts.Script):
             (self.detail_enhancement_strength, lambda p: gr.update() if p.get('detail_enhancement_strength') in (None, 'N/A') else float(p['detail_enhancement_strength'])),
             (self.detail_separation_radius, lambda p: gr.update() if p.get('detail_separation_radius') in (None, 'N/A') else float(p['detail_separation_radius'])),
             (self.disable_for_hr, lambda p: str(p.get('adept_disable_for_hr')).lower() == 'true' if 'adept_disable_for_hr' in p else gr.update()),
+            (self.experimental_pacing_for_snr, lambda p: str(p.get('experimental_pacing_for_snr')).lower() == 'true' if 'experimental_pacing_for_snr' in p else gr.update()),
+            (self.experimental_pacing_sensitivity, lambda p: gr.update() if p.get('experimental_coherence_sensitivity') in (None, 'N/A') else float(p['experimental_coherence_sensitivity'])),
+            (self.experimental_manual_pacing, lambda p: p.get('experimental_manual_pacing_override', gr.update())),
         ]
 
         def scheduler_getter(params):
@@ -251,6 +275,9 @@ class AdeptSamplerForge(scripts.Script):
             self.use_enhanced_detail_phase,
             self.detail_enhancement_strength, self.detail_separation_radius,
             self.disable_for_hr,
+            self.experimental_pacing_for_snr,
+            self.experimental_pacing_sensitivity,
+            self.experimental_manual_pacing,
         ]
 
     def process_before_every_sampling(self, p, *script_args, **kwargs):
@@ -264,6 +291,9 @@ class AdeptSamplerForge(scripts.Script):
             use_enhanced_detail_phase,
             detail_enhancement_strength, detail_separation_radius,
             disable_for_hr,
+            experimental_pacing_for_snr,  # New arg
+            experimental_pacing_sensitivity,  # New
+            experimental_manual_pacing,  # New
         ) = script_args
 
         # Set scheduler flags based on the radio button choice
@@ -287,6 +317,16 @@ class AdeptSamplerForge(scripts.Script):
             except json.JSONDecodeError:
                 print(f"⚠️ Manual Pacing Override: Invalid JSON. Ignoring.")
 
+        if experimental_manual_pacing and experimental_manual_pacing.strip():
+            try:
+                schedule = json.loads(experimental_manual_pacing)
+                if isinstance(schedule, dict):
+                    manual_pacing_schedule = schedule
+                else:
+                    print(f"⚠️ Experimental Manual Pacing: Not a valid JSON object. Ignoring.")
+            except json.JSONDecodeError:
+                print(f"⚠️ Experimental Manual Pacing: Invalid JSON. Ignoring.")
+
         # --- Compatibility Checks ---
         is_hires_pass = getattr(p, 'is_hr_pass', False)
 
@@ -308,8 +348,8 @@ class AdeptSamplerForge(scripts.Script):
             'use_anime_schedule': use_anime_schedule,
             'use_anime_schedule_v': use_anime_schedule_v,
             'use_anime_schedule_e': use_anime_schedule_e,
-            'use_content_aware_pacing': use_content_aware_pacing and use_anime_schedule, # Only works with AOS
-            'pacing_coherence_sensitivity': pacing_coherence_sensitivity,
+            'use_content_aware_pacing': (use_content_aware_pacing and use_anime_schedule) or (experimental_pacing_for_snr and custom_scheduler_type == "SNR-Optimized"),
+            'pacing_coherence_sensitivity': experimental_pacing_sensitivity if experimental_pacing_for_snr else pacing_coherence_sensitivity,
             'manual_pacing_schedule': manual_pacing_schedule,
             'debug_stop_after_coherence': debug_stop_after_coherence and use_content_aware_pacing and use_anime_schedule,
             'use_enhanced_detail_phase': use_enhanced_detail_phase,
@@ -346,6 +386,9 @@ class AdeptSamplerForge(scripts.Script):
                 'detail_separation_radius': detail_separation_radius if use_enhanced_detail_phase else 'N/A',
                 'custom_scheduler_type': custom_scheduler_type,
                 'adept_disable_for_hr': disable_for_hr,
+                'experimental_pacing_for_snr': experimental_pacing_for_snr,
+                'experimental_coherence_sensitivity': experimental_pacing_sensitivity if experimental_pacing_for_snr else 'N/A',
+                'experimental_manual_pacing_override': json.dumps(manual_pacing_schedule) if manual_pacing_schedule and experimental_pacing_for_snr else 'N/A',
             })
         else:
             print("🔄 Using standard Euler Ancestral sampler")
@@ -651,6 +694,8 @@ class AdeptSamplerForge(scripts.Script):
         elif current_sampler_settings.get('use_entropic_scheduler'):
             power = current_sampler_settings.get('entropic_scheduler_power', 3.0)
             return self.create_entropic_sigmas(sigma_max, sigma_min, num_steps, power, device)
+        elif current_sampler_settings.get('custom_scheduler_type') == 'SNR-Optimized':
+            return self.create_snr_optimized_sigmas(sigma_max, sigma_min, num_steps, device)
         else:
             # Fallback to entropic with neutral power, as it's self-contained.
             return self.create_entropic_sigmas(sigma_max, sigma_min, num_steps, 1.0, device)
