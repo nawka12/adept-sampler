@@ -32,7 +32,6 @@ This extension is developed and tested on **Stable Diffusion WebUI reForge**. Co
         - *Inspired by: [Sabour, A., et al. (2024). Align Your Steps: Optimizing Sampling Schedules in Diffusion Models.](https://arxiv.org/abs/2404.14507)*
 - **Content-Aware Pacing (AOS Only)**: Dynamically adjusts the sampling process, switching from composition to detail focus based on image coherence. The **Coherence Sensitivity** slider controls when this switch occurs. Works with both AOS-V and AOS-ε variants.
 - **Full UI Integration**: All features are configurable through a custom accordion panel in the WebUI or reForge interface.
-- **Experimental Features**: Optional settings in a dedicated tab, including experimental support for Content-Aware Pacing with the SNR-Optimized scheduler. Includes custom sensitivity and manual override controls.
 
 ## 🛠️ Installation
 
@@ -75,11 +74,6 @@ There are two ways to install the extension:
         - Option to automatically disable the sampler for the Hires. fix pass.
       > ℹ️ **Note**: When using a custom scheduler, you may often need to **lower your CFG Scale** (e.g., by 1-2 points) to prevent oversaturated or 'burnt' images.
     - **Advanced Noise Settings**: Fine-tune `Eta` and `Noise Scale` for different effects. 
-    - **Experimental**:
-        - Toggle experimental features like enabling Content-Aware Pacing for the SNR-Optimized scheduler.
-        - Adjust **Experimental Coherence Sensitivity** to control phase switching timing.
-        - Use **Experimental Manual Pacing Override** for manual phase control via JSON (e.g., {"composition": 0.4}).
-      > ⚠️ **Warning**: These features are experimental and may cause instability or unexpected results. Use with caution and test thoroughly.
 
 ## 🔍 Sampling Method Comparison
 
