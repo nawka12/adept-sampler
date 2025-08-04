@@ -197,6 +197,15 @@ class AdeptSamplerForge(scripts.Script):
                         gr.Markdown("### Debugging")
                         self.debug_reproducibility = gr.Checkbox(label='Debug Reproducibility (disables advanced features)', value=False)
             
+                    with gr.TabItem("Experimental"):
+                        gr.Markdown("### Experimental Features\n⚠️ Use with caution. These features may be unstable or have unintended effects.")
+                        self.exp_cfg_to_zero = gr.Checkbox(
+                            label="CFG to Zero after 40% Steps",
+                            value=False,
+                            info="Sets CFG guidance to zero after 40% of the total steps are completed. Can help with coherence but may reduce prompt adherence."
+                        )
+
+            
             # Visibility logic for the main group of options
             self.enable_custom.change(
                 fn=lambda x: gr.update(visible=x),
@@ -218,6 +227,7 @@ class AdeptSamplerForge(scripts.Script):
             (self.detail_enhancement_strength, lambda p: gr.update() if p.get('detail_enhancement_strength') in (None, 'N/A') else float(p['detail_enhancement_strength'])),
             (self.detail_separation_radius, lambda p: gr.update() if p.get('detail_separation_radius') in (None, 'N/A') else float(p['detail_separation_radius'])),
             (self.disable_for_hr, lambda p: str(p.get('adept_disable_for_hr')).lower() == 'true' if 'adept_disable_for_hr' in p else gr.update()),
+            (self.exp_cfg_to_zero, lambda p: str(p.get('exp_cfg_to_zero')).lower() == 'true' if 'exp_cfg_to_zero' in p else gr.update()),
         ]
 
         def scheduler_getter(params):
@@ -251,6 +261,7 @@ class AdeptSamplerForge(scripts.Script):
             self.use_enhanced_detail_phase,
             self.detail_enhancement_strength, self.detail_separation_radius,
             self.disable_for_hr,
+            self.exp_cfg_to_zero,
         ]
 
     def process_before_every_sampling(self, p, *script_args, **kwargs):
@@ -264,6 +275,7 @@ class AdeptSamplerForge(scripts.Script):
             use_enhanced_detail_phase,
             detail_enhancement_strength, detail_separation_radius,
             disable_for_hr,
+            exp_cfg_to_zero,
         ) = script_args
 
         # Set scheduler flags based on the radio button choice
@@ -316,6 +328,7 @@ class AdeptSamplerForge(scripts.Script):
             'detail_enhancement_strength': detail_enhancement_strength,
             'detail_separation_radius': detail_separation_radius,
             'custom_scheduler_type': custom_scheduler_type,
+            'exp_cfg_to_zero': exp_cfg_to_zero,
         })
         
         if enable_custom:
@@ -346,6 +359,7 @@ class AdeptSamplerForge(scripts.Script):
                 'detail_separation_radius': detail_separation_radius if use_enhanced_detail_phase else 'N/A',
                 'custom_scheduler_type': custom_scheduler_type,
                 'adept_disable_for_hr': disable_for_hr,
+                'exp_cfg_to_zero': exp_cfg_to_zero,
             })
         else:
             print("🔄 Using standard Euler Ancestral sampler")
@@ -356,6 +370,8 @@ class AdeptSamplerForge(scripts.Script):
         # --- Read settings from global config to ensure they are always correct ---
         use_enhanced_detail_phase = current_sampler_settings.get('use_enhanced_detail_phase', True)
         custom_scheduler_type = current_sampler_settings.get('custom_scheduler_type', 'None')
+        exp_cfg_to_zero = current_sampler_settings.get('exp_cfg_to_zero', False)
+        cfg_zeroed_reported = False
 
         # --- Sigma Schedule Override ---
         final_sigmas = sigmas
@@ -442,7 +458,15 @@ class AdeptSamplerForge(scripts.Script):
                 is_coherent = True # Force switch to detail after manual steps
 
                 for i in range(composition_steps_taken):
-                    denoised = model(x, original_sigmas[i] * s_in, **extra_args)
+                    current_extra_args = extra_args.copy()
+                    if exp_cfg_to_zero and (i / total_steps) >= 0.4:
+                        if 'cond_scale' in current_extra_args and current_extra_args['cond_scale'] != 0.0:
+                            if not cfg_zeroed_reported:
+                                print(f"⚡ Experimental: CFG to Zero active at step {i+1}/{total_steps}. Overriding CFG from {current_extra_args['cond_scale']} to 0.0.")
+                                cfg_zeroed_reported = True
+                            current_extra_args['cond_scale'] = 0.0
+                    
+                    denoised = model(x, original_sigmas[i] * s_in, **current_extra_args)
                     last_composition_derivative = (x - denoised) / original_sigmas[i]
                     last_composition_sigma_idx = i
 
@@ -490,7 +514,15 @@ class AdeptSamplerForge(scripts.Script):
 
                     if current_sigma < next_sigma: break
 
-                    denoised = model(x, current_sigma * s_in, **extra_args)
+                    current_extra_args = extra_args.copy()
+                    if exp_cfg_to_zero and (i / total_steps) >= 0.4:
+                        if 'cond_scale' in current_extra_args and current_extra_args['cond_scale'] != 0.0:
+                            if not cfg_zeroed_reported:
+                                print(f"⚡ Experimental: CFG to Zero active at step {i+1}/{total_steps}. Overriding CFG from {current_extra_args['cond_scale']} to 0.0.")
+                                cfg_zeroed_reported = True
+                            current_extra_args['cond_scale'] = 0.0
+
+                    denoised = model(x, current_sigma * s_in, **current_extra_args)
                     
                     derivative = (x - denoised) / current_sigma
                     last_composition_derivative = derivative
@@ -574,7 +606,16 @@ class AdeptSamplerForge(scripts.Script):
 
                         if current_sigma < next_sigma: break
                         
-                        denoised = model(x, current_sigma * s_in, **extra_args)
+                        callback_step = composition_steps_taken + j
+                        current_extra_args = extra_args.copy()
+                        if exp_cfg_to_zero and (callback_step / total_steps) >= 0.4:
+                            if 'cond_scale' in current_extra_args and current_extra_args['cond_scale'] != 0.0:
+                                if not cfg_zeroed_reported:
+                                    print(f"⚡ Experimental: CFG to Zero active at step {callback_step+1}/{total_steps}. Overriding CFG from {current_extra_args['cond_scale']} to 0.0.")
+                                    cfg_zeroed_reported = True
+                                current_extra_args['cond_scale'] = 0.0
+
+                        denoised = model(x, current_sigma * s_in, **current_extra_args)
 
                         current_derivative = (x - denoised) / current_sigma
 
@@ -615,7 +656,14 @@ class AdeptSamplerForge(scripts.Script):
                 print("Pacing disabled. Running in standard single-phase mode.")
 
             for i in range(total_steps):
-                denoised = model(x, final_sigmas[i] * s_in, **extra_args)
+                current_extra_args = extra_args.copy()
+                if exp_cfg_to_zero and (i / total_steps) >= 0.4:
+                    if 'cond_scale' in current_extra_args:
+                        if current_extra_args['cond_scale'] != 1.0:
+                            print(f"⚡ Experimental: CFG to Zero active at step {i+1}/{total_steps}. Overriding CFG from {current_extra_args['cond_scale']} to 0.0.")
+                        current_extra_args['cond_scale'] = 0.0
+
+                denoised = model(x, final_sigmas[i] * s_in, **current_extra_args)
 
                 derivative = (x - denoised) / final_sigmas[i]
 
