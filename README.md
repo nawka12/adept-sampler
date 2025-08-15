@@ -16,7 +16,7 @@ This extension is developed and tested on **Stable Diffusion WebUI reForge**. Co
 - **Detail Enhancement**: A unique method to enhance high-frequency details, which can be used with any scheduler. The **Detail Separation Radius** controls what is considered a 'detail,' with higher values sharpening larger features.
 - **Custom Schedulers**: A suite of schedulers to control the denoising process.
     > **Scheduler Categories:**
-    > - **Universal**: Recommended for all model types. Includes `Entropic`, `Constant-Rate`, and `Adaptive-Optimized`.
+    > - **Universal**: Recommended for all model types. Includes `Entropic`, `Constant-Rate`, `Adaptive-Optimized`, `Cosine-Annealed`, `LogSNR-Uniform`, `Tanh Mid-Boost`, `Exponential Tail`, `Jittered-Karras`.
     > - **V-Prediction**: Specialized for `v-prediction` models. Includes `AOS-V` and `SNR-Optimized`.
     > - **ε-Prediction**: Specialized for `epsilon-prediction` models. Includes `AOS-ε`.
 
@@ -30,6 +30,11 @@ This extension is developed and tested on **Stable Diffusion WebUI reForge**. Co
         - *Based on: [Okada, S., et al. (2024). Constant Rate Scheduling.](https://arxiv.org/abs/2411.12188)*
     - **Adaptive-Optimized**: A hybrid approach inspired by data-driven methods, blending multiple strategies for a robust, general-purpose curve.
         - *Inspired by: [Sabour, A., et al. (2024). Align Your Steps: Optimizing Sampling Schedules in Diffusion Models.](https://arxiv.org/abs/2404.14507)*
+    - **Cosine-Annealed**: Smooth start with a strong early drop and gentle tail; a great general default.
+    - **LogSNR-Uniform**: Uniform in log-SNR space; neutral, theory-aligned schedule.
+    - **Tanh Mid-Boost**: Concentrates steps around mid-range sigmas to refine structure before detail.
+    - **Exponential Tail**: Faster early lock-in with extra resolution in the last steps for detail polish.
+    - **Jittered-Karras**: Karras-style spacing with stratified jitter to reduce resonance/banding and improve stability.
 - **Content-Aware Pacing (AOS Only)**: Dynamically adjusts the sampling process, switching from composition to detail focus based on image coherence. The **Coherence Sensitivity** slider controls when this switch occurs. Works with both AOS-V and AOS-ε variants.
 - **Full UI Integration**: All features are configurable through a custom accordion panel in the WebUI or reForge interface.
 
@@ -63,7 +68,7 @@ There are two ways to install the extension:
 3.  Enable the **"Enable Adept Sampler"** checkbox to activate the custom features.
 4.  The settings are organized into tabs for easy configuration:
     - **Scheduler**:
-        - Choose a scheduler from the dropdown. See the "Features" section for a description of each.
+        - First choose a **Scheduler Category** (Universal / V-Prediction / ε-Prediction), then pick a **Scheduler** from the filtered dropdown. See the "Features" section for descriptions.
         - **Entropic Power**: If using the `Entropic` scheduler, this slider controls timestep clustering. Higher values focus on detail earlier.
         - **Content-Aware Pacing (AOS Only)**: For `AOS` schedulers, this enables dynamic adjustment from composition to detail focus. You can control its sensitivity.
     - **Detail Enhancement**:
@@ -85,6 +90,11 @@ There are two ways to install the extension:
 | **Adept + SNR-Optimized** | Concentrates steps around the critical `logSNR = 0` point for balanced sampling | Balanced compositions, preventing over/under-exposure | CFG Scale: -1 to -2 from normal | Image not available | Based on recent research to improve stability. Now supports experimental Content-Aware Pacing for dynamic phase switching. |
 | **Adept + Constant-Rate** | Ensures a constant rate of change, preventing unstable jumps in sampling | Smooth, stable, and predictable generations | CFG Scale: -1 to -2 from normal | Image not available | Ideal for preventing artifacts from sudden changes in sampling speed |
 | **Adept + Adaptive-Optimized** | Hybrid approach blending multiple strategies for a robust, general-purpose curve | General-purpose use across a wide variety of models | CFG Scale: -1 to -2 from normal | Image not available | A "best-of-all-worlds" approach inspired by data-driven methods |
+| **Adept + Cosine-Annealed** | Smooth start, strong early drop, gentle tail | General default across many prompts | CFG Scale: -1 to -2 from normal | Image not available | Good all-rounder; often a safe first choice |
+| **Adept + LogSNR-Uniform** | Uniform spacing in log-SNR domain | Neutral, theory-aligned behavior | CFG Scale: -1 to -2 from normal | Image not available | Balanced transitions; predictable dynamics |
+| **Adept + Tanh Mid-Boost** | Concentrates steps near mid-range sigmas | Refining structure before high-frequency detail | CFG Scale: -1 to -2 from normal | Image not available | Emphasizes composition/structure consolidation |
+| **Adept + Exponential Tail** | Faster early lock-in, extra late-step resolution | Polishing fine detail and textures | CFG Scale: -1 to -2 from normal | Image not available | Stronger tail for late-stage refinement |
+| **Adept + Jittered-Karras** | Karras spacing with stratified jitter | Reducing resonance/banding on repetitive patterns | CFG Scale: -1 to -2 from normal | Image not available | Adds robustness via blue-noise-like jitter |
 
 ## 📄 License
 

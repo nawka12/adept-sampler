@@ -110,19 +110,37 @@ class AdeptSamplerForge(scripts.Script):
                 with gr.Tabs():
                     with gr.TabItem("Scheduler"):
                         gr.Markdown("### Scheduler Override\nReplace the default time steps with a custom schedule.")
-                        
-                        self.scheduler_override = gr.Radio(
+
+                        # Category dropdown controls the visible scheduler list
+                        universal_choices = [
+                            "None",
+                            "Entropic",
+                            "Constant-Rate",
+                            "Adaptive-Optimized",
+                            "Cosine-Annealed",
+                            "LogSNR-Uniform",
+                            "Tanh Mid-Boost",
+                            "Exponential Tail",
+                            "Jittered-Karras",
+                        ]
+                        vpred_choices = [
+                            "AOS-V (for v-prediction)",
+                            "SNR-Optimized",
+                        ]
+                        eps_choices = [
+                            "AOS-ε (for ε-prediction)",
+                        ]
+
+                        self.scheduler_category = gr.Dropdown(
+                            label="Scheduler Category",
+                            value="Universal",
+                            choices=["Universal", "V-Prediction", "ε-Prediction"],
+                        )
+
+                        self.scheduler_override = gr.Dropdown(
                             label="Scheduler",
                             value="None",
-                            choices=[
-                                "None",
-                                "Entropic",
-                                "Constant-Rate",
-                                "Adaptive-Optimized",
-                                "AOS-V (for v-prediction)",
-                                "SNR-Optimized",
-                                "AOS-ε (for ε-prediction)",
-                            ]
+                            choices=universal_choices,
                         )
 
                         with gr.Group(visible=False) as entropic_options:
@@ -135,7 +153,7 @@ class AdeptSamplerForge(scripts.Script):
                         
                         gr.Markdown(
                             "**Scheduler Categories:**<br>"
-                            "▻ **Universal**: `None`, `Entropic`, `Constant-Rate`, `Adaptive-Optimized`<br>"
+                            "▻ **Universal**: `None`, `Entropic`, `Constant-Rate`, `Adaptive-Optimized`, `Cosine-Annealed`, `LogSNR-Uniform`, `Tanh Mid-Boost`, `Exponential Tail`, `Jittered-Karras`<br>"
                             "▻ **V-Prediction**: `AOS-V`, `SNR-Optimized`<br>"
                             "▻ **ε-Prediction**: `AOS-ε`"
                         )
@@ -162,10 +180,36 @@ class AdeptSamplerForge(scripts.Script):
                                 entropic_options: gr.update(visible=scheduler == "Entropic")
                             }
 
+                        def on_category_change(category):
+                            if category == "Universal":
+                                return {
+                                    self.scheduler_override: gr.update(choices=universal_choices, value="None"),
+                                    aos_plus_options: gr.update(visible=False),
+                                    entropic_options: gr.update(visible=False),
+                                }
+                            elif category == "V-Prediction":
+                                return {
+                                    self.scheduler_override: gr.update(choices=vpred_choices, value="AOS-V (for v-prediction)"),
+                                    aos_plus_options: gr.update(visible=True),
+                                    entropic_options: gr.update(visible=False),
+                                }
+                            else:
+                                return {
+                                    self.scheduler_override: gr.update(choices=eps_choices, value="AOS-ε (for ε-prediction)"),
+                                    aos_plus_options: gr.update(visible=True),
+                                    entropic_options: gr.update(visible=False),
+                                }
+
                         self.scheduler_override.change(
                             on_scheduler_change,
                             inputs=[self.scheduler_override],
                             outputs=[aos_plus_options, entropic_options]
+                        )
+
+                        self.scheduler_category.change(
+                            on_category_change,
+                            inputs=[self.scheduler_category],
+                            outputs=[self.scheduler_override, aos_plus_options, entropic_options]
                         )
 
                         gr.Markdown("ℹ️ **Note:** When using a custom scheduler, you may need to **lower your CFG Scale** (e.g., by 1-2 points) to prevent oversaturated or 'burnt' images.")
@@ -285,7 +329,16 @@ class AdeptSamplerForge(scripts.Script):
         use_entropic_scheduler = (scheduler_override == "Entropic")
 
         custom_scheduler_type = "None"
-        if scheduler_override in ["SNR-Optimized", "Constant-Rate", "Adaptive-Optimized"]:
+        if scheduler_override in [
+            "SNR-Optimized",
+            "Constant-Rate",
+            "Adaptive-Optimized",
+            "Cosine-Annealed",
+            "LogSNR-Uniform",
+            "Tanh Mid-Boost",
+            "Exponential Tail",
+            "Jittered-Karras",
+        ]:
             custom_scheduler_type = scheduler_override
 
         manual_pacing_schedule = None
@@ -385,6 +438,11 @@ class AdeptSamplerForge(scripts.Script):
                     "SNR-Optimized": self.create_snr_optimized_sigmas,
                     "Constant-Rate": self.create_constant_rate_sigmas,
                     "Adaptive-Optimized": self.create_adaptive_optimized_sigmas,
+                    "Cosine-Annealed": self.create_cosine_sigmas,
+                    "LogSNR-Uniform": self.create_logsnr_uniform_sigmas,
+                    "Tanh Mid-Boost": self.create_tanh_midboost_sigmas,
+                    "Exponential Tail": self.create_exponential_tail_sigmas,
+                    "Jittered-Karras": self.create_jittered_karras_sigmas,
                 }
                 if custom_scheduler_type in scheduler_map:
                     final_sigmas = scheduler_map[custom_scheduler_type](*sigma_args)
@@ -702,6 +760,20 @@ class AdeptSamplerForge(scripts.Script):
             return self.create_entropic_sigmas(sigma_max, sigma_min, num_steps, power, device)
         elif current_sampler_settings.get('custom_scheduler_type') == 'SNR-Optimized':
             return self.create_snr_optimized_sigmas(sigma_max, sigma_min, num_steps, device)
+        elif current_sampler_settings.get('custom_scheduler_type') == 'Constant-Rate':
+            return self.create_constant_rate_sigmas(sigma_max, sigma_min, num_steps, device)
+        elif current_sampler_settings.get('custom_scheduler_type') == 'Adaptive-Optimized':
+            return self.create_adaptive_optimized_sigmas(sigma_max, sigma_min, num_steps, device)
+        elif current_sampler_settings.get('custom_scheduler_type') == 'Cosine-Annealed':
+            return self.create_cosine_sigmas(sigma_max, sigma_min, num_steps, device)
+        elif current_sampler_settings.get('custom_scheduler_type') == 'LogSNR-Uniform':
+            return self.create_logsnr_uniform_sigmas(sigma_max, sigma_min, num_steps, device)
+        elif current_sampler_settings.get('custom_scheduler_type') == 'Tanh Mid-Boost':
+            return self.create_tanh_midboost_sigmas(sigma_max, sigma_min, num_steps, device)
+        elif current_sampler_settings.get('custom_scheduler_type') == 'Exponential Tail':
+            return self.create_exponential_tail_sigmas(sigma_max, sigma_min, num_steps, device)
+        elif current_sampler_settings.get('custom_scheduler_type') == 'Jittered-Karras':
+            return self.create_jittered_karras_sigmas(sigma_max, sigma_min, num_steps, device)
         else:
             # Fallback to entropic with neutral power, as it's self-contained.
             return self.create_entropic_sigmas(sigma_max, sigma_min, num_steps, 1.0, device)
@@ -896,6 +968,69 @@ class AdeptSamplerForge(scripts.Script):
         max_inv_rho = sigma_max ** (1 / rho)
         sigmas = (max_inv_rho + combined_t * (min_inv_rho - max_inv_rho)) ** rho
         
+        return torch.cat([sigmas, torch.zeros(1, device=device)])
+
+    def create_cosine_sigmas(self, sigma_max, sigma_min, num_steps, device='cpu'):
+        """Cosine-annealed schedule: smooth start, strong early drop, gentle tail."""
+        rho = 7.0
+        u = torch.linspace(0, 1, num_steps, device=device)
+        t = (1 - torch.cos(math.pi * u)) / 2
+        min_inv_rho = sigma_min ** (1 / rho)
+        max_inv_rho = sigma_max ** (1 / rho)
+        sigmas = (max_inv_rho + t * (min_inv_rho - max_inv_rho)) ** rho
+        return torch.cat([sigmas, torch.zeros(1, device=device)])
+
+    def create_logsnr_uniform_sigmas(self, sigma_max, sigma_min, num_steps, device='cpu'):
+        """Uniform in log-SNR space for a neutral, theory-aligned schedule."""
+        u = torch.linspace(0, 1, num_steps, device=device)
+        log_snr_max = 2 * torch.log(sigma_max)
+        log_snr_min = 2 * torch.log(sigma_min)
+        log_snr = log_snr_max + u * (log_snr_min - log_snr_max)
+        sigmas = torch.exp(log_snr / 2)
+        return torch.cat([sigmas, torch.zeros(1, device=device)])
+
+    def create_tanh_midboost_sigmas(self, sigma_max, sigma_min, num_steps, device='cpu', k: float = 4.0):
+        """Concentrate steps near mid-range sigmas using a tanh shaping."""
+        rho = 7.0
+        u = torch.linspace(0, 1, num_steps, device=device)
+        k_tensor = torch.tensor(k, device=device, dtype=u.dtype)
+        t = 0.5 * (torch.tanh(k_tensor * (u - 0.5)) / torch.tanh(k_tensor / 2) + 1.0)
+        min_inv_rho = sigma_min ** (1 / rho)
+        max_inv_rho = sigma_max ** (1 / rho)
+        sigmas = (max_inv_rho + t * (min_inv_rho - max_inv_rho)) ** rho
+        return torch.cat([sigmas, torch.zeros(1, device=device)])
+
+    def create_exponential_tail_sigmas(self, sigma_max, sigma_min, num_steps, device='cpu', pivot: float = 0.7, gamma: float = 0.8, beta: float = 5.0):
+        """Faster early lock-in with extra resolution in the final steps."""
+        rho = 7.0
+        u = torch.linspace(0, 1, num_steps, device=device)
+        pivot_tensor = torch.tensor(pivot, device=device, dtype=u.dtype)
+        gamma_tensor = torch.tensor(gamma, device=device, dtype=u.dtype)
+        beta_tensor = torch.tensor(beta, device=device, dtype=u.dtype)
+
+        front = (u / pivot_tensor).clamp(0, 1) ** gamma_tensor * pivot_tensor
+        tail_raw = 1 - torch.exp(-beta_tensor * (u - pivot_tensor)).clamp(min=0)
+        tail = pivot_tensor + (1 - pivot_tensor) * (tail_raw / (1 - torch.exp(-beta_tensor)))
+        t = torch.where(u < pivot_tensor, front, tail)
+
+        min_inv_rho = sigma_min ** (1 / rho)
+        max_inv_rho = sigma_max ** (1 / rho)
+        sigmas = (max_inv_rho + t * (min_inv_rho - max_inv_rho)) ** rho
+        return torch.cat([sigmas, torch.zeros(1, device=device)])
+
+    def create_jittered_karras_sigmas(self, sigma_max, sigma_min, num_steps, device='cpu', jitter_strength: float = 0.5):
+        """Karras baseline with stratified jitter to reduce resonance/banding."""
+        rho = 7.0
+        indices = torch.arange(num_steps, device=device, dtype=torch.float32)
+        rand = (torch.rand(num_steps, device=device) - 0.5) * jitter_strength
+        denom = max(1, num_steps - 1)
+        u = (indices + 0.5 + rand).clamp_(0, num_steps - 1) / denom
+
+        min_inv_rho = sigma_min ** (1 / rho)
+        max_inv_rho = sigma_max ** (1 / rho)
+        sigmas = (max_inv_rho + u * (min_inv_rho - max_inv_rho)) ** rho
+
+        sigmas, _ = torch.sort(sigmas, descending=True)
         return torch.cat([sigmas, torch.zeros(1, device=device)])
 
     # --- End of Experimental Schedulers and Methods ---
