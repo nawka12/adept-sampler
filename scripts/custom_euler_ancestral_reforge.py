@@ -53,39 +53,48 @@ current_sampler_settings = {
 
 
 def patch_samplers_globally():
-    """Patch sampling functions once at startup"""
-    if 'euler_ancestral' not in original_samplers:
-        if hasattr(k_diffusion.sampling, 'sample_euler_ancestral'):
-            original_samplers['euler_ancestral'] = k_diffusion.sampling.sample_euler_ancestral
-            
-            def smart_euler_ancestral_wrapper(model, x, sigmas, extra_args=None, callback=None, disable=None, generator=None, **kwargs):
-                """Smart wrapper that checks global settings"""
+    """Patch all k-diffusion sampling functions once at startup."""
+    patched_count = 0
+
+    # Iterate over all functions named like sample_* in k_diffusion.sampling
+    for attr_name in dir(k_diffusion.sampling):
+        if not attr_name.startswith('sample_'):
+            continue
+
+        # Skip if already patched
+        if attr_name in original_samplers:
+            continue
+
+        func = getattr(k_diffusion.sampling, attr_name)
+        if not callable(func):
+            continue
+
+        # Store original
+        original_samplers[attr_name] = func
+
+        def make_wrapper(name):
+            def smart_wrapper(model, x, sigmas, extra_args=None, callback=None, disable=None, generator=None, **kwargs):
+                """Smart wrapper: when enabled, override sigma schedule but preserve the original sampler's solver."""
                 if not current_sampler_settings['enabled']:
-                    # Use original sampler if disabled
-                    return original_samplers['euler_ancestral'](model, x, sigmas, extra_args, callback, disable, **kwargs)
-                
-                # Use Enhanced custom sampler with current settings
-                script_instance = AdeptSamplerForge()
-                
-                # The sigma override logic has been moved inside sample_enhanced_euler_ancestral
-                return script_instance.sample_enhanced_euler_ancestral(
-                    model, x, sigmas, extra_args=extra_args, callback=callback, disable=disable,
-                    eta=current_sampler_settings.get('eta', 1.0),
-                    s_noise=current_sampler_settings.get('s_noise', 1.0),
-                    generator=generator
-                )
-            
-            # Apply the patch
-            k_diffusion.sampling.sample_euler_ancestral = smart_euler_ancestral_wrapper
-            
-            # Also patch other common names
-            for attr_name in ['sample_euler_a', 'sample_euler_ancestral_discrete']:
-                if hasattr(k_diffusion.sampling, attr_name):
-                    if attr_name not in original_samplers:
-                        original_samplers[attr_name] = getattr(k_diffusion.sampling, attr_name)
-                        setattr(k_diffusion.sampling, attr_name, smart_euler_ancestral_wrapper)
-            
-            print("🔧 Custom Euler Ancestral samplers patched globally")
+                    return original_samplers[name](model, x, sigmas, extra_args, callback, disable, **kwargs)
+
+                # Compute replacement schedule based on current settings
+                try:
+                    final_sigmas = compute_sigma_schedule_from_settings(sigmas, current_sampler_settings)
+                except Exception as e:
+                    print(f"⚠️ Sigma override failed for {name}: {e}. Using original schedule.")
+                    final_sigmas = sigmas
+
+                # Call the original sampler with the (possibly) overridden schedule
+                return original_samplers[name](model, x, final_sigmas, extra_args, callback, disable, **kwargs)
+
+            return smart_wrapper
+
+        setattr(k_diffusion.sampling, attr_name, make_wrapper(attr_name))
+        patched_count += 1
+
+    if patched_count > 0:
+        print(f"🔧 Adept Sampler: patched {patched_count} k-diffusion samplers globally")
 
 
 class AdeptSamplerForge(scripts.Script):
@@ -415,7 +424,7 @@ class AdeptSamplerForge(scripts.Script):
                 'exp_cfg_to_zero': exp_cfg_to_zero,
             })
         else:
-            print("🔄 Using standard Euler Ancestral sampler")
+            print("🔄 Using standard sampler")
             return
     
     def sample_enhanced_euler_ancestral(self, model, x, sigmas, extra_args=None, callback=None, disable=None, eta=1., s_noise=1., generator=None):
@@ -1034,6 +1043,115 @@ class AdeptSamplerForge(scripts.Script):
         return torch.cat([sigmas, torch.zeros(1, device=device)])
 
     # --- End of Experimental Schedulers and Methods ---
+
+
+# --- Public helper APIs for external samplers ---
+
+def list_supported_schedulers():
+    """Return the list of scheduler names supported by compute_custom_sigma_schedule."""
+    return [
+        # Universal
+        "None",
+        "Entropic",
+        "SNR-Optimized",
+        "Constant-Rate",
+        "Adaptive-Optimized",
+        "Cosine-Annealed",
+        "LogSNR-Uniform",
+        "Tanh Mid-Boost",
+        "Exponential Tail",
+        "Jittered-Karras",
+        # AOS variants
+        "AOS-V (for v-prediction)",
+        "AOS-ε (for ε-prediction)",
+    ]
+
+
+def compute_custom_sigma_schedule(sigmas: torch.Tensor, scheduler_name: str, *, entropic_power: float | None = None) -> torch.Tensor:
+    """
+    Compute a replacement sigma schedule using one of the supported schedulers without invoking the Adept sampler loop.
+
+    Parameters:
+    - sigmas: original sigma tensor (length = steps + 1, usually ends with 0)
+    - scheduler_name: name from list_supported_schedulers()
+    - entropic_power: optional power for the Entropic scheduler (defaults to current global setting or 6.0)
+
+    Returns a tensor of sigmas with the same shape (steps + 1), suitable to pass into any k-diffusion sampler.
+    """
+    if sigmas is None or not torch.is_tensor(sigmas) or sigmas.numel() <= 1:
+        return sigmas
+
+    scheduler_name = scheduler_name or "None"
+    device = sigmas.device
+
+    # Use endpoints from the provided schedule
+    sigma_max = sigmas[0]
+    sigma_min = sigmas[-2]
+    num_steps = len(sigmas) - 1
+
+    if scheduler_name == "None":
+        return sigmas
+
+    # Fallback power
+    if entropic_power is None:
+        entropic_power = float(current_sampler_settings.get('entropic_scheduler_power', 6.0))
+
+    # Reuse the robust scheduler implementations defined on AdeptSamplerForge
+    forge = AdeptSamplerForge()
+
+    mapping = {
+        "Entropic": lambda: forge.create_entropic_sigmas(sigma_max, sigma_min, num_steps, entropic_power, device),
+        "SNR-Optimized": lambda: forge.create_snr_optimized_sigmas(sigma_max, sigma_min, num_steps, device),
+        "Constant-Rate": lambda: forge.create_constant_rate_sigmas(sigma_max, sigma_min, num_steps, device),
+        "Adaptive-Optimized": lambda: forge.create_adaptive_optimized_sigmas(sigma_max, sigma_min, num_steps, device),
+        "Cosine-Annealed": lambda: forge.create_cosine_sigmas(sigma_max, sigma_min, num_steps, device),
+        "LogSNR-Uniform": lambda: forge.create_logsnr_uniform_sigmas(sigma_max, sigma_min, num_steps, device),
+        "Tanh Mid-Boost": lambda: forge.create_tanh_midboost_sigmas(sigma_max, sigma_min, num_steps, device),
+        "Exponential Tail": lambda: forge.create_exponential_tail_sigmas(sigma_max, sigma_min, num_steps, device),
+        "Jittered-Karras": lambda: forge.create_jittered_karras_sigmas(sigma_max, sigma_min, num_steps, device),
+        "AOS-V (for v-prediction)": lambda: forge.create_aos_v_sigmas(sigma_max, sigma_min, num_steps, device),
+        "AOS-ε (for ε-prediction)": lambda: forge.create_aos_e_sigmas(sigma_max, sigma_min, num_steps, device),
+    }
+
+    if scheduler_name not in mapping:
+        print(f"⚠️ Unknown scheduler '{scheduler_name}'. Returning original sigmas.")
+        return sigmas
+
+    return mapping[scheduler_name]()
+
+
+def compute_sigma_schedule_from_settings(sigmas: torch.Tensor, settings: dict | None = None) -> torch.Tensor:
+    """
+    Compute a replacement sigma schedule from provided settings or the extension's global settings.
+    This does not depend on Adept being enabled and can be used by any sampler.
+
+    Supported setting keys:
+    - custom_scheduler_type: one of list_supported_schedulers() (except "None")
+    - use_entropic_scheduler: bool
+    - entropic_scheduler_power: float
+    - use_anime_schedule_v: bool
+    - use_anime_schedule_e: bool
+    """
+    if sigmas is None or not torch.is_tensor(sigmas) or sigmas.numel() <= 1:
+        return sigmas
+
+    settings = settings or current_sampler_settings
+
+    # Priority: explicit custom type > entropic flag > AOS flags > None
+    custom_type = settings.get('custom_scheduler_type', 'None')
+    if custom_type and custom_type != 'None':
+        return compute_custom_sigma_schedule(sigmas, custom_type, entropic_power=settings.get('entropic_scheduler_power'))
+
+    if settings.get('use_entropic_scheduler', False):
+        return compute_custom_sigma_schedule(sigmas, 'Entropic', entropic_power=settings.get('entropic_scheduler_power'))
+
+    if settings.get('use_anime_schedule_v', False):
+        return compute_custom_sigma_schedule(sigmas, 'AOS-V (for v-prediction)')
+
+    if settings.get('use_anime_schedule_e', False):
+        return compute_custom_sigma_schedule(sigmas, 'AOS-ε (for ε-prediction)')
+
+    return sigmas
 
 
 # Initialize the extension when script loads

@@ -10,9 +10,15 @@ While this sampler implements advanced techniques to improve generation, the fie
 
 This extension is developed and tested on **Stable Diffusion WebUI reForge**. Compatibility with other versions, such as the original WebUI or WebUI Forge, is not guaranteed.
 
+### Sampler/Scheduler compatibility
+
+- Adept now works with all k-diffusion samplers by overriding only the sigma schedule; the sampler's solver is preserved.
+- Not all schedulers are compatible or equally stable with every sampler choice.
+- Euler a remains the most stable sampler across schedules. If you encounter artifacts or instability, switch to Euler a or try another scheduler.
+
 ## 🌟 Features
 
-- **Advanced Ancestral Sampler**: A custom implementation that patches the default Euler Ancestral sampler to provide advanced features.
+- **Global Sampler Support**: Adept applies to all k-diffusion samplers by overriding the sigma schedule while preserving each sampler's native solver.
 - **Detail Enhancement**: A unique method to enhance high-frequency details, which can be used with any scheduler. The **Detail Separation Radius** controls what is considered a 'detail,' with higher values sharpening larger features.
 - **Custom Schedulers**: A suite of schedulers to control the denoising process.
     > **Scheduler Categories:**
