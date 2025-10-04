@@ -22,7 +22,7 @@ This extension is developed and tested on **Stable Diffusion WebUI reForge**. Co
 - **Detail Enhancement**: A unique method to enhance high-frequency details, which can be used with any scheduler. The **Detail Separation Radius** controls what is considered a 'detail,' with higher values sharpening larger features.
 - **Custom Schedulers**: A suite of schedulers to control the denoising process.
     > **Scheduler Categories:**
-    > - **Universal**: Recommended for all model types. Includes `Entropic`, `Constant-Rate`, `Adaptive-Optimized`, `Cosine-Annealed`, `LogSNR-Uniform`, `Tanh Mid-Boost`, `Exponential Tail`, `Jittered-Karras`.
+    > - **Universal**: Recommended for all model types. Includes `Entropic`, `Constant-Rate`, `Adaptive-Optimized`, `Cosine-Annealed`, `LogSNR-Uniform`, `Tanh Mid-Boost`, `Exponential Tail`, `Jittered-Karras`, `Stochastic`.
     > - **V-Prediction**: Specialized for `v-prediction` models. Includes `AOS-V` and `SNR-Optimized`.
     > - **ε-Prediction**: Specialized for `epsilon-prediction` models. Includes `AOS-ε`.
 
@@ -41,6 +41,8 @@ This extension is developed and tested on **Stable Diffusion WebUI reForge**. Co
     - **Tanh Mid-Boost**: Concentrates steps around mid-range sigmas to refine structure before detail.
     - **Exponential Tail**: Faster early lock-in with extra resolution in the last steps for detail polish.
     - **Jittered-Karras**: Karras-style spacing with stratified jitter to reduce resonance/banding and improve stability.
+    - **Stochastic**: Adds controlled randomness to timestep selection to reduce repetitive patterns and improve sample diversity. Configurable noise type (Brownian, Uniform, Normal) and scale.
+    - **JYS (Jump Your Steps)**: A non-uniform sampling scheduler that enables skipping redundant timesteps ("jumps") to reduce inference steps while preserving sample quality. Uses precomputed jump sequences discovered via loss-minimization optimization on validation sets. Can reduce the number of denoising calls by up to 60%.
 - **Content-Aware Pacing (AOS Only)**: Dynamically adjusts the sampling process, switching from composition to detail focus based on image coherence. The **Coherence Sensitivity** slider controls when this switch occurs. Works with both AOS-V and AOS-ε variants.
 - **Full UI Integration**: All features are configurable through a custom accordion panel in the WebUI or reForge interface.
 
@@ -101,6 +103,8 @@ There are two ways to install the extension:
 | **Adept + Tanh Mid-Boost** | Concentrates steps near mid-range sigmas | Refining structure before high-frequency detail | CFG Scale: -1 to -2 from normal | Image not available | Emphasizes composition/structure consolidation |
 | **Adept + Exponential Tail** | Faster early lock-in, extra late-step resolution | Polishing fine detail and textures | CFG Scale: -1 to -2 from normal | Image not available | Stronger tail for late-stage refinement |
 | **Adept + Jittered-Karras** | Karras spacing with stratified jitter | Reducing resonance/banding on repetitive patterns | CFG Scale: -1 to -2 from normal | Image not available | Adds robustness via blue-noise-like jitter |
+| **Adept + Stochastic** | Controlled randomness in timestep selection | Reducing repetitive patterns, improving diversity | CFG Scale: -1 to -2 from normal<br/>Noise Type: Brownian/Uniform/Normal<br/>Noise Scale: 0.1-0.5 | Image not available | Adds strategic randomness for better sample variety |
+| **Adept + JYS** | Non-uniform timestep skipping with precomputed jump sequences | Faster inference with maintained quality, efficiency optimization | CFG Scale: -1 to -2 from normal<br/>Steps: 20/50/100 (precomputed schedules) | Image not available | Reduces denoising calls by up to 60% while preserving sample quality through optimized timestep selection |
 
 ## 📄 License
 

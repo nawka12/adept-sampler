@@ -36,6 +36,11 @@ except ImportError:
 # Store original sampling functions to restore later
 original_samplers = {}
 
+# JYS (Jump Your Steps) Dynamic Schedule Computation
+# Computes optimized timestep sequences dynamically based on user-specified step count
+# Strategy: Large jumps early (composition), dense clustering in detail formation region (200-400), fine steps at end
+
+
 # Global settings that control sampler behavior
 current_sampler_settings = {
     'enabled': False,
@@ -131,6 +136,8 @@ class AdeptSamplerForge(scripts.Script):
                             "Tanh Mid-Boost",
                             "Exponential Tail",
                             "Jittered-Karras",
+                            "Stochastic",
+                            "JYS (Dynamic)",
                         ]
                         vpred_choices = [
                             "AOS-V (for v-prediction)",
@@ -154,17 +161,39 @@ class AdeptSamplerForge(scripts.Script):
 
                         with gr.Group(visible=False) as entropic_options:
                             self.entropic_scheduler_power = gr.Slider(
-                                label='Entropic Power', 
-                                minimum=1.0, maximum=8.0, 
+                                label='Entropic Power',
+                                minimum=1.0, maximum=8.0,
                                 value=6.0, step=0.1,
                                 info="Controls timestep clustering. >1 clusters steps at the start (high detail)."
+                            )
+
+                        with gr.Group(visible=False) as stochastic_options:
+                            self.stochastic_noise_type = gr.Dropdown(
+                                label='Noise Type',
+                                value='brownian',
+                                choices=['brownian', 'uniform', 'normal'],
+                                info="Type of randomness to inject into timestep selection."
+                            )
+                            self.stochastic_noise_scale = gr.Slider(
+                                label='Noise Scale',
+                                minimum=0.0, maximum=1.0,
+                                value=0.3, step=0.05,
+                                info="Amount of randomness (0.0 = deterministic, higher = more random)."
+                            )
+                            self.stochastic_base_schedule = gr.Dropdown(
+                                label='Base Schedule',
+                                value='karras',
+                                choices=['karras', 'uniform', 'cosine'],
+                                info="Base timestep distribution before adding randomness."
                             )
                         
                         gr.Markdown(
                             "**Scheduler Categories:**<br>"
-                            "▻ **Universal**: `None`, `Entropic`, `Constant-Rate`, `Adaptive-Optimized`, `Cosine-Annealed`, `LogSNR-Uniform`, `Tanh Mid-Boost`, `Exponential Tail`, `Jittered-Karras`<br>"
+                            "▻ **Universal**: `None`, `Entropic`, `Constant-Rate`, `Adaptive-Optimized`, `Cosine-Annealed`, `LogSNR-Uniform`, `Tanh Mid-Boost`, `Exponential Tail`, `Jittered-Karras`, `Stochastic`, `JYS (Dynamic)`<br>"
                             "▻ **V-Prediction**: `AOS-V`, `SNR-Optimized`<br>"
-                            "▻ **ε-Prediction**: `AOS-ε`"
+                            "▻ **ε-Prediction**: `AOS-ε`<br><br>"
+                            "**JYS (Jump Your Steps)**: Dynamic schedules that automatically optimize timestep spacing for your chosen step count. Uses large jumps early for composition, dense clustering in detail formation regions, and fine steps for refinement.<br><br>"
+                            "**Stochastic**: Adds controlled randomness to timestep selection to reduce repetitive patterns and improve sample diversity."
                         )
 
                         with gr.Group(visible=False) as aos_plus_options:
@@ -186,7 +215,8 @@ class AdeptSamplerForge(scripts.Script):
                             is_aos = "AOS-V" in scheduler or "AOS-ε" in scheduler
                             return {
                                 aos_plus_options: gr.update(visible=is_aos),
-                                entropic_options: gr.update(visible=scheduler == "Entropic")
+                                entropic_options: gr.update(visible=scheduler == "Entropic"),
+                                stochastic_options: gr.update(visible=scheduler == "Stochastic")
                             }
 
                         def on_category_change(category):
@@ -195,30 +225,33 @@ class AdeptSamplerForge(scripts.Script):
                                     self.scheduler_override: gr.update(choices=universal_choices, value="None"),
                                     aos_plus_options: gr.update(visible=False),
                                     entropic_options: gr.update(visible=False),
+                                    stochastic_options: gr.update(visible=False),
                                 }
                             elif category == "V-Prediction":
                                 return {
                                     self.scheduler_override: gr.update(choices=vpred_choices, value="AOS-V (for v-prediction)"),
                                     aos_plus_options: gr.update(visible=True),
                                     entropic_options: gr.update(visible=False),
+                                    stochastic_options: gr.update(visible=False),
                                 }
                             else:
                                 return {
                                     self.scheduler_override: gr.update(choices=eps_choices, value="AOS-ε (for ε-prediction)"),
                                     aos_plus_options: gr.update(visible=True),
                                     entropic_options: gr.update(visible=False),
+                                    stochastic_options: gr.update(visible=False),
                                 }
 
                         self.scheduler_override.change(
                             on_scheduler_change,
                             inputs=[self.scheduler_override],
-                            outputs=[aos_plus_options, entropic_options]
+                            outputs=[aos_plus_options, entropic_options, stochastic_options]
                         )
 
                         self.scheduler_category.change(
                             on_category_change,
                             inputs=[self.scheduler_category],
-                            outputs=[self.scheduler_override, aos_plus_options, entropic_options]
+                            outputs=[self.scheduler_override, aos_plus_options, entropic_options, stochastic_options]
                         )
 
                         gr.Markdown("ℹ️ **Note:** When using a custom scheduler, you may need to **lower your CFG Scale** (e.g., by 1-2 points) to prevent oversaturated or 'burnt' images.")
@@ -306,8 +339,9 @@ class AdeptSamplerForge(scripts.Script):
 
         return [
             self.enable_custom,
-            self.eta, self.s_noise, self.debug_reproducibility, 
+            self.eta, self.s_noise, self.debug_reproducibility,
             self.scheduler_override, self.entropic_scheduler_power,
+            self.stochastic_noise_type, self.stochastic_noise_scale, self.stochastic_base_schedule,
             self.use_content_aware_pacing, self.pacing_coherence_sensitivity,
             self.manual_pacing_override,
             self.debug_stop_after_coherence,
@@ -322,6 +356,7 @@ class AdeptSamplerForge(scripts.Script):
             enable_custom,
             eta, s_noise, debug_reproducibility,
             scheduler_override, entropic_scheduler_power,
+            stochastic_noise_type, stochastic_noise_scale, stochastic_base_schedule,
             use_content_aware_pacing, pacing_coherence_sensitivity,
             manual_pacing_override,
             debug_stop_after_coherence,
@@ -347,6 +382,8 @@ class AdeptSamplerForge(scripts.Script):
             "Tanh Mid-Boost",
             "Exponential Tail",
             "Jittered-Karras",
+            "Stochastic",
+            "JYS (Dynamic)",
         ]:
             custom_scheduler_type = scheduler_override
 
@@ -379,6 +416,9 @@ class AdeptSamplerForge(scripts.Script):
             'debug_reproducibility': debug_reproducibility,
             'use_entropic_scheduler': use_entropic_scheduler,
             'entropic_scheduler_power': entropic_scheduler_power,
+            'stochastic_noise_type': stochastic_noise_type,
+            'stochastic_noise_scale': stochastic_noise_scale,
+            'stochastic_base_schedule': stochastic_base_schedule,
             'use_anime_schedule': use_anime_schedule,
             'use_anime_schedule_v': use_anime_schedule_v,
             'use_anime_schedule_e': use_anime_schedule_e,
@@ -443,18 +483,33 @@ class AdeptSamplerForge(scripts.Script):
             print(f"🔬 Overriding sigma schedule with Custom Scheduler: {custom_scheduler_type}.")
             if len(sigmas) > 1:
                 sigma_args = (sigmas[0], sigmas[-2], len(sigmas) - 1, sigmas.device)
-                scheduler_map = {
-                    "SNR-Optimized": self.create_snr_optimized_sigmas,
-                    "Constant-Rate": self.create_constant_rate_sigmas,
-                    "Adaptive-Optimized": self.create_adaptive_optimized_sigmas,
-                    "Cosine-Annealed": self.create_cosine_sigmas,
-                    "LogSNR-Uniform": self.create_logsnr_uniform_sigmas,
-                    "Tanh Mid-Boost": self.create_tanh_midboost_sigmas,
-                    "Exponential Tail": self.create_exponential_tail_sigmas,
-                    "Jittered-Karras": self.create_jittered_karras_sigmas,
-                }
-                if custom_scheduler_type in scheduler_map:
-                    final_sigmas = scheduler_map[custom_scheduler_type](*sigma_args)
+
+                # Handle JYS scheduler with dynamic computation
+                if custom_scheduler_type == "JYS (Dynamic)":
+                    final_sigmas = self.create_jys_sigmas(sigmas[0], sigmas[-2], len(sigmas) - 1, sigmas.device)
+                else:
+                    scheduler_map = {
+                        "SNR-Optimized": self.create_snr_optimized_sigmas,
+                        "Constant-Rate": self.create_constant_rate_sigmas,
+                        "Adaptive-Optimized": self.create_adaptive_optimized_sigmas,
+                        "Cosine-Annealed": self.create_cosine_sigmas,
+                        "LogSNR-Uniform": self.create_logsnr_uniform_sigmas,
+                        "Tanh Mid-Boost": self.create_tanh_midboost_sigmas,
+                        "Exponential Tail": self.create_exponential_tail_sigmas,
+                        "Jittered-Karras": self.create_jittered_karras_sigmas,
+                        "Stochastic": self.create_stochastic_sigmas,
+                    }
+                    if custom_scheduler_type in scheduler_map:
+                        if custom_scheduler_type == "Stochastic":
+                            # Pass stochastic parameters
+                            final_sigmas = self.create_stochastic_sigmas(
+                                sigma_args[0], sigma_args[1], sigma_args[2], sigma_args[3],
+                                current_sampler_settings.get('stochastic_noise_type', 'brownian'),
+                                current_sampler_settings.get('stochastic_noise_scale', 0.3),
+                                current_sampler_settings.get('stochastic_base_schedule', 'karras')
+                            )
+                        else:
+                            final_sigmas = scheduler_map[custom_scheduler_type](*sigma_args)
         elif current_sampler_settings.get('use_entropic_scheduler', False) and not current_sampler_settings.get('debug_reproducibility', False):
             print("🔄 Overriding sigma schedule with Entropic Time Scheduler.")
             power = current_sampler_settings.get('entropic_scheduler_power', 3.0)
@@ -783,6 +838,10 @@ class AdeptSamplerForge(scripts.Script):
             return self.create_exponential_tail_sigmas(sigma_max, sigma_min, num_steps, device)
         elif current_sampler_settings.get('custom_scheduler_type') == 'Jittered-Karras':
             return self.create_jittered_karras_sigmas(sigma_max, sigma_min, num_steps, device)
+        elif current_sampler_settings.get('custom_scheduler_type') == 'Stochastic':
+            return self.create_stochastic_sigmas(sigma_max, sigma_min, num_steps, device)
+        elif current_sampler_settings.get('custom_scheduler_type') == 'JYS (Dynamic)':
+            return self.create_jys_sigmas(sigma_max, sigma_min, num_steps, device)
         else:
             # Fallback to entropic with neutral power, as it's self-contained.
             return self.create_entropic_sigmas(sigma_max, sigma_min, num_steps, 1.0, device)
@@ -1042,6 +1101,188 @@ class AdeptSamplerForge(scripts.Script):
         sigmas, _ = torch.sort(sigmas, descending=True)
         return torch.cat([sigmas, torch.zeros(1, device=device)])
 
+    def create_stochastic_sigmas(self, sigma_max, sigma_min, num_steps, device='cpu', noise_type: str = 'brownian', noise_scale: float = 0.3, base_schedule: str = 'karras'):
+        """
+        Stochastic scheduler with controlled randomness in timestep selection.
+        Reduces repetitive patterns and improves sample diversity through strategic noise injection.
+
+        Args:
+            sigma_max: Maximum sigma value
+            sigma_min: Minimum sigma value
+            num_steps: Number of steps
+            device: Device for tensors
+            noise_type: Type of noise ('brownian', 'uniform', 'normal')
+            noise_scale: Scale of the stochastic perturbation (0.0 = deterministic)
+            base_schedule: Base schedule to add noise to ('karras', 'uniform', 'cosine')
+        """
+        rho = 7.0
+
+        # Generate base timestep positions
+        if base_schedule == 'uniform':
+            # Uniform spacing in sigma space
+            u_base = torch.linspace(0, 1, num_steps, device=device)
+        elif base_schedule == 'cosine':
+            # Cosine-annealed spacing
+            u_base = (1 - torch.cos(torch.pi * torch.linspace(0, 1, num_steps, device=device))) / 2
+        else:  # 'karras' (default)
+            # Karras-style spacing (default)
+            u_base = torch.linspace(0, 1, num_steps, device=device)
+
+        # Add stochastic perturbation
+        if noise_type == 'brownian':
+            # Brownian motion: cumulative sum of random steps
+            noise = torch.randn(num_steps, device=device)
+            # Integrate to get brownian motion
+            brownian_noise = torch.cumsum(noise, dim=0)
+            # Normalize to [0,1] range and scale
+            brownian_noise = (brownian_noise - brownian_noise.min()) / (brownian_noise.max() - brownian_noise.min() + 1e-8)
+            perturbation = (brownian_noise - 0.5) * noise_scale
+        elif noise_type == 'normal':
+            # Gaussian noise
+            perturbation = torch.randn(num_steps, device=device) * noise_scale
+        else:  # 'uniform'
+            # Uniform noise
+            perturbation = (torch.rand(num_steps, device=device) - 0.5) * 2 * noise_scale
+
+        # Apply perturbation while keeping values in [0,1]
+        u_stochastic = torch.clamp(u_base + perturbation, 0.0, 1.0)
+
+        # Map to sigma space using karras formula
+        min_inv_rho = sigma_min ** (1 / rho)
+        max_inv_rho = sigma_max ** (1 / rho)
+        sigmas = (max_inv_rho + u_stochastic * (min_inv_rho - max_inv_rho)) ** rho
+
+        # Ensure descending order (important for k-diffusion samplers)
+        sigmas, _ = torch.sort(sigmas, descending=True)
+
+        return torch.cat([sigmas, torch.zeros(1, device=device)])
+
+    def create_jys_sigmas(self, sigma_max, sigma_min, num_steps, device='cpu', jys_steps=None):
+        """
+        Creates JYS (Jump Your Steps) schedule using dynamically computed timestep sequences.
+        Optimized to skip redundant timesteps while preserving sample quality.
+        Strategy: Large jumps early (composition), dense clustering in detail formation region (200-400), fine steps at end
+        """
+        # Use the actual number of steps requested by the user, not a fixed schedule
+        target_steps = num_steps if jys_steps is None else jys_steps
+
+        # Generate optimized timestep sequence for the requested step count
+        jys_timesteps = self._compute_jys_timesteps(target_steps)
+
+        # Convert timesteps to sigmas using the karras-ve formula
+        # JYS timesteps are in the range [0, 1000], we need to map them to sigma space
+        rho = 7.0
+
+        # Normalize JYS timesteps to [0, 1] range (inverse of timestep space)
+        normalized_timesteps = []
+        for timestep in jys_timesteps:
+            # Convert from timestep space to normalized space
+            # timestep 1000 -> 0, timestep 0 -> 1
+            normalized = (1000 - timestep) / 1000.0
+            normalized_timesteps.append(normalized)
+
+        # Convert to tensor and map to sigma space
+        t_tensor = torch.tensor(normalized_timesteps, device=device, dtype=torch.float32)
+
+        # Map to sigmas using karras formula
+        min_inv_rho = sigma_min ** (1 / rho)
+        max_inv_rho = sigma_max ** (1 / rho)
+        sigmas = (max_inv_rho + t_tensor * (min_inv_rho - max_inv_rho)) ** rho
+
+        # Ensure descending order (required for k-diffusion samplers)
+        sigmas, _ = torch.sort(sigmas, descending=True)
+
+        # Add final zero
+        return torch.cat([sigmas, torch.zeros(1, device=device)])
+
+    def _compute_jys_timesteps(self, num_steps):
+        """
+        Dynamically computes optimized JYS timestep sequence for any number of steps.
+        Uses a multi-phase strategy: large jumps early, dense clustering in detail region, fine steps at end.
+        """
+        if num_steps <= 0:
+            return [0]
+
+        # Define phase boundaries based on step count
+        # Early phase: 20% of steps for composition (large jumps)
+        # Middle phase: 60% of steps for structure and detail formation (medium jumps + clustering)
+        # Final phase: 20% of steps for refinement (fine steps)
+
+        early_steps = max(1, int(num_steps * 0.2))  # 20% for early composition
+        final_steps = max(1, int(num_steps * 0.2))  # 20% for final refinement
+        middle_steps = max(1, num_steps - early_steps - final_steps)  # 60% for middle phases
+
+        # Early phase: large jumps from 1000 towards 600
+        early_jump_size = max(50, (1000 - 600) // early_steps)
+        early_timesteps = []
+        current_t = 1000
+        for i in range(early_steps):
+            early_timesteps.append(int(current_t))
+            current_t = max(600, current_t - early_jump_size)
+
+        # Middle phase: structure formation (600-300) and detail clustering (300-200)
+        middle_timesteps = []
+
+        # Structure phase (600-300): medium jumps
+        structure_steps = max(1, middle_steps // 2)
+        structure_jump_size = max(10, (600 - 300) // structure_steps)
+        current_t = 600
+        for i in range(structure_steps):
+            middle_timesteps.append(int(current_t))
+            current_t = max(300, current_t - structure_jump_size)
+
+        # Detail phase (300-200): dense clustering around detail formation region
+        detail_steps = middle_steps - structure_steps
+        if detail_steps > 0:
+            # Create dense clustering around 250-300 where details typically form
+            detail_start = 300
+            detail_end = 200
+            detail_jump_size = max(5, (detail_start - detail_end) // detail_steps)
+            current_t = detail_start
+            for i in range(detail_steps):
+                middle_timesteps.append(int(current_t))
+                current_t = max(detail_end, current_t - detail_jump_size)
+
+        # Final phase: fine refinement from lowest middle timestep to 0
+        final_timesteps = []
+        final_start = min(middle_timesteps) if middle_timesteps else 200
+        final_jump_size = max(5, final_start // final_steps)
+        current_t = final_start
+        for i in range(final_steps):
+            final_timesteps.append(int(current_t))
+            current_t = max(0, current_t - final_jump_size)
+
+        # Combine all phases and ensure we have exactly the right number of steps
+        all_timesteps = early_timesteps + middle_timesteps + final_timesteps
+
+        # Remove duplicates and ensure proper ordering
+        unique_timesteps = list(dict.fromkeys(all_timesteps))  # Preserve order, remove duplicates
+        unique_timesteps.sort(reverse=True)  # Sort descending
+
+        # If we don't have enough timesteps, add some in the middle
+        while len(unique_timesteps) < num_steps:
+            # Add intermediate timesteps in the detail region
+            for i in range(len(unique_timesteps) - 1):
+                mid_point = (unique_timesteps[i] + unique_timesteps[i + 1]) // 2
+                if mid_point not in unique_timesteps:
+                    unique_timesteps.insert(i + 1, mid_point)
+                    if len(unique_timesteps) >= num_steps:
+                        break
+
+        # Trim to exact count if needed
+        if len(unique_timesteps) > num_steps:
+            unique_timesteps = unique_timesteps[:num_steps]
+
+        # Always end with 0
+        if unique_timesteps[-1] != 0:
+            unique_timesteps.append(0)
+
+        # Ensure we have the right number of timesteps
+        if len(unique_timesteps) != num_steps + 1:  # +1 for the final 0
+            print(f"⚠️ JYS: Generated {len(unique_timesteps)} timesteps, expected {num_steps + 1}")
+
+        return unique_timesteps
+
     # --- End of Experimental Schedulers and Methods ---
 
 
@@ -1061,6 +1302,9 @@ def list_supported_schedulers():
         "Tanh Mid-Boost",
         "Exponential Tail",
         "Jittered-Karras",
+        "Stochastic",
+        # JYS (Jump Your Steps) - Dynamic
+        "JYS (Dynamic)",
         # AOS variants
         "AOS-V (for v-prediction)",
         "AOS-ε (for ε-prediction)",
@@ -1109,6 +1353,13 @@ def compute_custom_sigma_schedule(sigmas: torch.Tensor, scheduler_name: str, *, 
         "Tanh Mid-Boost": lambda: forge.create_tanh_midboost_sigmas(sigma_max, sigma_min, num_steps, device),
         "Exponential Tail": lambda: forge.create_exponential_tail_sigmas(sigma_max, sigma_min, num_steps, device),
         "Jittered-Karras": lambda: forge.create_jittered_karras_sigmas(sigma_max, sigma_min, num_steps, device),
+        "Stochastic": lambda: forge.create_stochastic_sigmas(
+            sigma_max, sigma_min, num_steps, device,
+            current_sampler_settings.get('stochastic_noise_type', 'brownian'),
+            current_sampler_settings.get('stochastic_noise_scale', 0.3),
+            current_sampler_settings.get('stochastic_base_schedule', 'karras')
+        ),
+        "JYS (Dynamic)": lambda: forge.create_jys_sigmas(sigma_max, sigma_min, num_steps, device),
         "AOS-V (for v-prediction)": lambda: forge.create_aos_v_sigmas(sigma_max, sigma_min, num_steps, device),
         "AOS-ε (for ε-prediction)": lambda: forge.create_aos_e_sigmas(sigma_max, sigma_min, num_steps, device),
     }
