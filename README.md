@@ -42,7 +42,7 @@ This extension is developed and tested on **Stable Diffusion WebUI reForge**. Co
     - **Exponential Tail**: Faster early lock-in with extra resolution in the last steps for detail polish.
     - **Jittered-Karras**: Karras-style spacing with stratified jitter to reduce resonance/banding and improve stability.
     - **Stochastic**: Adds controlled randomness to timestep selection to reduce repetitive patterns and improve sample diversity. Configurable noise type (Brownian, Uniform, Normal) and scale.
-    - **JYS (Jump Your Steps)**: A non-uniform sampling scheduler that enables skipping redundant timesteps ("jumps") to reduce inference steps while preserving sample quality. Uses precomputed jump sequences discovered via loss-minimization optimization on validation sets. Can reduce the number of denoising calls by up to 60%.
+    - **JYS (Jump Your Steps)**: A non-uniform sampling scheduler that enables skipping redundant timesteps ("jumps") to reduce inference steps while preserving sample quality. Uses dynamic jump sequence calculation to optimize timestep selection during sampling. Can reduce the number of denoising calls by up to 60%.
 - **Content-Aware Pacing (AOS Only)**: Dynamically adjusts the sampling process, switching from composition to detail focus based on image coherence. The **Coherence Sensitivity** slider controls when this switch occurs. Works with both AOS-V and AOS-ε variants.
 - **Full UI Integration**: All features are configurable through a custom accordion panel in the WebUI or reForge interface.
 
@@ -104,7 +104,7 @@ There are two ways to install the extension:
 | **Adept + Exponential Tail** | Faster early lock-in, extra late-step resolution | Polishing fine detail and textures | CFG Scale: -1 to -2 from normal | Image not available | Stronger tail for late-stage refinement |
 | **Adept + Jittered-Karras** | Karras spacing with stratified jitter | Reducing resonance/banding on repetitive patterns | CFG Scale: -1 to -2 from normal | Image not available | Adds robustness via blue-noise-like jitter |
 | **Adept + Stochastic** | Controlled randomness in timestep selection | Reducing repetitive patterns, improving diversity | CFG Scale: -1 to -2 from normal<br/>Noise Type: Brownian/Uniform/Normal<br/>Noise Scale: 0.1-0.5 | Image not available | Adds strategic randomness for better sample variety |
-| **Adept + JYS** | Non-uniform timestep skipping with precomputed jump sequences | Faster inference with maintained quality, efficiency optimization | CFG Scale: -1 to -2 from normal<br/>Steps: 20/50/100 (precomputed schedules) | Image not available | Reduces denoising calls by up to 60% while preserving sample quality through optimized timestep selection |
+| **Adept + JYS** | Non-uniform timestep skipping with dynamic jump sequence calculation | Faster inference with maintained quality, efficiency optimization | CFG Scale: -1 to -2 from normal<br/>Dynamic timestep optimization | Image not available | Reduces denoising calls by up to 60% while preserving sample quality through dynamic timestep selection |
 
 ## 📄 License
 
