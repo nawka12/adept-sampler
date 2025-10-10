@@ -192,8 +192,6 @@ class AdeptSamplerForge(scripts.Script):
                             "▻ **Universal**: `None`, `Entropic`, `Constant-Rate`, `Adaptive-Optimized`, `Cosine-Annealed`, `LogSNR-Uniform`, `Tanh Mid-Boost`, `Exponential Tail`, `Jittered-Karras`, `Stochastic`, `JYS (Dynamic)`<br>"
                             "▻ **V-Prediction**: `AOS-V`, `SNR-Optimized`<br>"
                             "▻ **ε-Prediction**: `AOS-ε`<br><br>"
-                            "**JYS (Jump Your Steps)**: Dynamic schedules that automatically optimize timestep spacing for your chosen step count. Uses large jumps early for composition, dense clustering in detail formation regions, and fine steps for refinement.<br><br>"
-                            "**Stochastic**: Adds controlled randomness to timestep selection to reduce repetitive patterns and improve sample diversity."
                         )
 
                         with gr.Group(visible=False) as aos_plus_options:

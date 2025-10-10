@@ -71,14 +71,28 @@ There are two ways to install the extension:
 
 ## 📖 Usage
 
-1.  Navigate to the "Scripts" section at the bottom of the `txt2img` or `img2img` tabs.
-2.  Select **"Adept Sampler"** from the script dropdown.
-3.  Enable the **"Enable Adept Sampler"** checkbox to activate the custom features.
-4.  The settings are organized into tabs for easy configuration:
+1.  In the main sampler dropdown, select your base sampling method (e.g., **Euler a**, **DPM++ 2M SDE**, etc.). Adept works together with the chosen sampler: it preserves the sampler's solver and overrides only the sigma schedule. Note: **Euler a is recommended** for stability, and quality may vary depending on the sampler you choose.
+2.  Navigate to the "Scripts" section at the bottom of the `txt2img` or `img2img` tabs.
+3.  Select **"Adept Sampler"** from the script dropdown.
+4.  Enable the **"Enable Adept Sampler"** checkbox to activate the custom features. Once enabled, Adept works alongside your selected sampling method, preserving its solver while only overriding the sigma schedule.
+5.  The settings are organized into tabs for easy configuration:
     - **Scheduler**:
-        - First choose a **Scheduler Category** (Universal / V-Prediction / ε-Prediction), then pick a **Scheduler** from the filtered dropdown. See the "Features" section for descriptions.
-        - **Entropic Power**: If using the `Entropic` scheduler, this slider controls timestep clustering. Higher values focus on detail earlier.
-        - **Content-Aware Pacing (AOS Only)**: For `AOS` schedulers, this enables dynamic adjustment from composition to detail focus. You can control its sensitivity.
+        - Choose a **Scheduler Category** (Universal / V-Prediction / ε-Prediction), then pick a **Scheduler**:
+            - **Universal**: `None`, `Entropic`, `Constant-Rate`, `Adaptive-Optimized`, `Cosine-Annealed`, `LogSNR-Uniform`, `Tanh Mid-Boost`, `Exponential Tail`, `Jittered-Karras`, `Stochastic`, `JYS (Dynamic)`
+            - **V-Prediction**: `AOS-V (for v-prediction)`, `SNR-Optimized`
+            - **ε-Prediction**: `AOS-ε (for ε-prediction)`
+        - **AOS (V/ε) Options**:
+            - **Content-Aware Pacing (AOS Only)**: Dynamically switches from composition to detail. Recommended with higher step counts (~1.5× model-recommended) for effective phasing.
+            - **Coherence Sensitivity**: Controls how early the switch occurs.
+            - **Manual Pacing Override (JSON)**: Optional. Examples: `{ "composition": 0.4 }` (fraction of steps) or `{ "composition": 10 }` (absolute steps).
+            - **[Debug] Stop after coherence**: Halts after composition when coherence is reached.
+        - **Entropic**:
+            - **Entropic Power**: Controls timestep clustering. Higher values focus more steps earlier for detail formation.
+        - **Stochastic**:
+            - **Noise Type**: `brownian`, `uniform`, or `normal`
+            - **Noise Scale**: 0.0–1.0 (higher = more randomness)
+            - **Base Schedule**: `karras`, `uniform`, or `cosine`
+        - **JYS (Dynamic)**: Dynamically optimizes timestep spacing to skip redundant steps; no additional controls.
     - **Detail Enhancement**:
         - Toggle the detail enhancer and adjust its `Strength`.
         - Use the `Detail Separation Radius` to define what counts as a "detail." Higher values sharpen larger features.
