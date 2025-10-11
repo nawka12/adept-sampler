@@ -120,6 +120,10 @@ There are two ways to install the extension:
 | **Adept + Stochastic** | Controlled randomness in timestep selection | Reducing repetitive patterns, improving diversity | CFG Scale: -1 to -2 from normal<br/>Noise Type: Brownian/Uniform/Normal<br/>Noise Scale: 0.1-0.5 | Image not available | Adds strategic randomness for better sample variety |
 | **Adept + JYS** | Non-uniform timestep skipping with dynamic jump sequence calculation | Faster inference with maintained quality, efficiency optimization | CFG Scale: -1 to -2 from normal<br/>Dynamic timestep optimization | Image not available | Reduces denoising calls by up to 60% while preserving sample quality through dynamic timestep selection |
 
+## Samples using AkashicPulse v4.0
+![xyz_grid-0010-185404508](https://github.com/user-attachments/assets/b5a4d8d3-2b30-4a2e-861e-c02a95f16c93)
+
+
 ## 📄 License
 
 This project is licensed under the **GNU General Public License v3.0 (GPL-3.0)**.
@@ -153,3 +157,4 @@ The complete license text can be found at: https://www.gnu.org/licenses/gpl-3.0.
 ---
 
 Copyright (C) 2025 nawka12/KayfaHaarukku. This program comes with ABSOLUTELY NO WARRANTY. This is free software, and you are welcome to redistribute it under certain conditions as specified in the GPL-3.0 license.
+
