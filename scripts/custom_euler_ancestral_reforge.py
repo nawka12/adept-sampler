@@ -2,14 +2,19 @@ import math
 import numpy as np
 import torch
 import json
+import sys
+import traceback
 
 from modules import scripts
 import gradio as gr
 import k_diffusion.sampling
+from functools import partial
+from typing import Any
 
 # Import shared for RNG state management
 try:
     from modules import shared
+    from modules import script_callbacks
     from modules.processing import StableDiffusionProcessing, StableDiffusionProcessingTxt2Img, StableDiffusionProcessingImg2Img
     WEBUI_AVAILABLE = True
 except ImportError:
@@ -363,6 +368,53 @@ class AdeptSamplerForge(scripts.Script):
             disable_for_hr,
             exp_cfg_to_zero,
         ) = script_args
+
+        # --- XYZ Grid overrides (if provided) ---
+        xyz = getattr(p, "_adept_xyz", {})
+        if xyz:
+            if "enabled" in xyz:
+                enable_custom = str(xyz["enabled"]) == "True"
+            if "eta" in xyz:
+                try: eta = float(xyz["eta"]) 
+                except Exception: pass
+            if "s_noise" in xyz:
+                try: s_noise = float(xyz["s_noise"]) 
+                except Exception: pass
+            if "debug_reproducibility" in xyz:
+                debug_reproducibility = str(xyz["debug_reproducibility"]) == "True"
+            if "scheduler_override" in xyz:
+                scheduler_override = str(xyz["scheduler_override"]) or scheduler_override
+            if "entropic_scheduler_power" in xyz:
+                try: entropic_scheduler_power = float(xyz["entropic_scheduler_power"]) 
+                except Exception: pass
+            if "stochastic_noise_type" in xyz:
+                stochastic_noise_type = str(xyz["stochastic_noise_type"]) or stochastic_noise_type
+            if "stochastic_noise_scale" in xyz:
+                try: stochastic_noise_scale = float(xyz["stochastic_noise_scale"]) 
+                except Exception: pass
+            if "stochastic_base_schedule" in xyz:
+                stochastic_base_schedule = str(xyz["stochastic_base_schedule"]) or stochastic_base_schedule
+            if "use_content_aware_pacing" in xyz:
+                use_content_aware_pacing = str(xyz["use_content_aware_pacing"]) == "True"
+            if "pacing_coherence_sensitivity" in xyz:
+                try: pacing_coherence_sensitivity = float(xyz["pacing_coherence_sensitivity"]) 
+                except Exception: pass
+            if "manual_pacing_override" in xyz:
+                manual_pacing_override = str(xyz["manual_pacing_override"]) or manual_pacing_override
+            if "debug_stop_after_coherence" in xyz:
+                debug_stop_after_coherence = str(xyz["debug_stop_after_coherence"]) == "True"
+            if "use_enhanced_detail_phase" in xyz:
+                use_enhanced_detail_phase = str(xyz["use_enhanced_detail_phase"]) == "True"
+            if "detail_enhancement_strength" in xyz:
+                try: detail_enhancement_strength = float(xyz["detail_enhancement_strength"]) 
+                except Exception: pass
+            if "detail_separation_radius" in xyz:
+                try: detail_separation_radius = float(xyz["detail_separation_radius"]) 
+                except Exception: pass
+            if "disable_for_hr" in xyz:
+                disable_for_hr = str(xyz["disable_for_hr"]) == "True"
+            if "exp_cfg_to_zero" in xyz:
+                exp_cfg_to_zero = str(xyz["exp_cfg_to_zero"]) == "True"
 
         # Set scheduler flags based on the radio button choice
         use_anime_schedule_v = (scheduler_override == "AOS-V (for v-prediction)")
@@ -1403,6 +1455,137 @@ def compute_sigma_schedule_from_settings(sigmas: torch.Tensor, settings: dict | 
     return sigmas
 
 
+# --- XYZ Grid integration (Axes + value setters) ---
+def set_value(p, x: Any, xs: Any, *, field: str):
+    if not hasattr(p, "_adept_xyz"):
+        p._adept_xyz = {}
+    p._adept_xyz[field] = x
+
+
+def make_axis_on_xyz_grid():
+    xyz_grid = None
+    for sd in scripts.scripts_data:
+        if sd.script_class.__module__ == "xyz_grid.py":
+            xyz_grid = sd.module
+            break
+
+    if xyz_grid is None:
+        return
+
+    axis = [
+        xyz_grid.AxisOption(
+            "(Adept) Enabled",
+            str,
+            partial(set_value, field="enabled"),
+            choices=lambda: ["True", "False"],
+        ),
+        xyz_grid.AxisOption(
+            "(Adept) Scheduler",
+            str,
+            partial(set_value, field="scheduler_override"),
+            choices=list_supported_schedulers,
+        ),
+        xyz_grid.AxisOption(
+            "(Adept) Entropic Power",
+            float,
+            partial(set_value, field="entropic_scheduler_power"),
+        ),
+        xyz_grid.AxisOption(
+            "(Adept) Enhanced Detail",
+            str,
+            partial(set_value, field="use_enhanced_detail_phase"),
+            choices=lambda: ["True", "False"],
+        ),
+        xyz_grid.AxisOption(
+            "(Adept) Detail Strength",
+            float,
+            partial(set_value, field="detail_enhancement_strength"),
+        ),
+        xyz_grid.AxisOption(
+            "(Adept) Detail Radius",
+            float,
+            partial(set_value, field="detail_separation_radius"),
+        ),
+        xyz_grid.AxisOption(
+            "(Adept) Eta",
+            float,
+            partial(set_value, field="eta"),
+        ),
+        xyz_grid.AxisOption(
+            "(Adept) Noise Scale",
+            float,
+            partial(set_value, field="s_noise"),
+        ),
+        xyz_grid.AxisOption(
+            "(Adept) Pacing On",
+            str,
+            partial(set_value, field="use_content_aware_pacing"),
+            choices=lambda: ["True", "False"],
+        ),
+        xyz_grid.AxisOption(
+            "(Adept) Coherence Sensitivity",
+            float,
+            partial(set_value, field="pacing_coherence_sensitivity"),
+        ),
+        xyz_grid.AxisOption(
+            "(Adept) Debug Stop After Coherence",
+            str,
+            partial(set_value, field="debug_stop_after_coherence"),
+            choices=lambda: ["True", "False"],
+        ),
+        xyz_grid.AxisOption(
+            "(Adept) Disable for HR",
+            str,
+            partial(set_value, field="disable_for_hr"),
+            choices=lambda: ["True", "False"],
+        ),
+        xyz_grid.AxisOption(
+            "(Adept) Exp CFG to Zero",
+            str,
+            partial(set_value, field="exp_cfg_to_zero"),
+            choices=lambda: ["True", "False"],
+        ),
+        xyz_grid.AxisOption(
+            "(Adept) Stochastic Noise Type",
+            str,
+            partial(set_value, field="stochastic_noise_type"),
+            choices=lambda: ["brownian", "uniform", "normal"],
+        ),
+        xyz_grid.AxisOption(
+            "(Adept) Stochastic Noise Scale",
+            float,
+            partial(set_value, field="stochastic_noise_scale"),
+        ),
+        xyz_grid.AxisOption(
+            "(Adept) Stochastic Base Schedule",
+            str,
+            partial(set_value, field="stochastic_base_schedule"),
+            choices=lambda: ["karras", "uniform", "cosine"],
+        ),
+    ]
+
+    if not any(getattr(x, "label", "").startswith("(Adept)") for x in xyz_grid.axis_options):
+        xyz_grid.axis_options.extend(axis)
+
+
+def on_before_ui():
+    try:
+        make_axis_on_xyz_grid()
+    except Exception:
+        error = traceback.format_exc()
+        print(
+            f"[-] Adept Sampler: xyz_grid error:\n{error}",
+            file=sys.stderr,
+        )
+
+
 # Initialize the extension when script loads
 patch_samplers_globally()
 print("Adept Sampler for reForge loaded successfully!") 
+
+if WEBUI_AVAILABLE:
+    try:
+        script_callbacks.on_before_ui(on_before_ui)
+    except Exception:
+        # If callbacks are not available, ignore gracefully
+        pass
