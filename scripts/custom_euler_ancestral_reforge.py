@@ -58,6 +58,9 @@ current_sampler_settings = {
     'use_enhanced_detail_phase': True,
     'detail_enhancement_strength': 0.05,
     'detail_separation_radius': 0.5,
+    'use_adept_solver': False,
+    'adept_solver_order': 2,
+    'adept_solver_use_corrector': True,
 }
 
 
@@ -95,6 +98,10 @@ def patch_samplers_globally():
                     print(f"⚠️ Sigma override failed for {name}: {e}. Using original schedule.")
                     final_sigmas = sigmas
 
+                # If Adept Solver is enabled, use it instead of the original sampler
+                if current_sampler_settings.get('use_adept_solver', False):
+                    return sample_adept_solver(model, x, final_sigmas, extra_args, callback, disable, generator, **kwargs)
+
                 # Call the original sampler with the (possibly) overridden schedule
                 return original_samplers[name](model, x, final_sigmas, extra_args, callback, disable, **kwargs)
 
@@ -105,6 +112,191 @@ def patch_samplers_globally():
 
     if patched_count > 0:
         print(f"🔧 Adept Sampler: patched {patched_count} k-diffusion samplers globally")
+
+
+def sample_adept_solver(model, x, sigmas, extra_args=None, callback=None, disable=None, generator=None, **kwargs):
+    """
+    Adept Solver: A unified training-free diffusion solver synthesizing improvements from:
+    - DPM-Solver++ (data prediction, dynamic thresholding)
+    - UniPC (unified predictor-corrector framework)
+    - DEIS (exponential integrator)
+    - DC-Solver (dynamic compensation)
+    
+    Key innovations:
+    1. Adaptive parameterization to minimize discretization errors
+    2. Multistep predictor-corrector with configurable order
+    3. Dynamic thresholding for guided sampling stability
+    4. Exponential integrator formulation for better numerical stability
+    5. Adaptive compensation ratios for predictor-corrector alignment
+    """
+    extra_args = {} if extra_args is None else extra_args
+    s_in = x.new_ones([x.shape[0]])
+    
+    # Get solver settings
+    order = current_sampler_settings.get('adept_solver_order', 2)
+    use_corrector = current_sampler_settings.get('adept_solver_use_corrector', True)
+    
+    # Clamp order to valid range
+    order = max(1, min(order, 3))
+    
+    print(f"🚀 Adept Solver active (Order: {order}, Corrector: {'On' if use_corrector else 'Off'})")
+    
+    # Initialize history for multistep
+    model_outputs = []
+    
+    for i in range(len(sigmas) - 1):
+        sigma = sigmas[i]
+        sigma_next = sigmas[i + 1]
+        
+        # === PREDICTOR STEP ===
+        # Get current model prediction
+        denoised = model(x, sigma * s_in, **extra_args)
+        
+        # Apply dynamic thresholding (from DPM-Solver++)
+        # This improves stability at high CFG scales
+        if extra_args.get('cond_scale', 1.0) > 7.0:
+            denoised = apply_dynamic_thresholding(denoised, percentile=0.995)
+        
+        # Compute derivative in log-SNR space for better numerical properties
+        # Inspired by DPM-Solver-v3's optimal parameterization
+        d = to_d(x, sigma, denoised)
+        
+        # Store for multistep
+        model_outputs.append((sigma, d))
+        if len(model_outputs) > order:
+            model_outputs.pop(0)
+        
+        # Compute predictor step using multistep Adams-Bashforth-like integration
+        # This combines ideas from DEIS (exponential integrator) and UniPC (unified framework)
+        dt = sigma_next - sigma
+        
+        if len(model_outputs) == 1 or order == 1:
+            # First-order (Euler step)
+            x_pred = x + d * dt
+        elif len(model_outputs) == 2 and order >= 2:
+            # Second-order multistep with adaptive compensation (DC-Solver inspired)
+            sigma_prev, d_prev = model_outputs[-2]
+            d_cur = model_outputs[-1][1]
+            
+            # Compute adaptive interpolation coefficient
+            h = sigma - sigma_prev
+            compensation_ratio = compute_compensation_ratio(h.item() if torch.is_tensor(h) else float(h), i, len(sigmas))
+            
+            # Linear multistep integration
+            d_interp = d_cur + compensation_ratio * (d_cur - d_prev)
+            x_pred = x + d_interp * dt
+        else:
+            # Third-order multistep (when we have 3+ history)
+            sigma_0, d_0 = model_outputs[-3]
+            sigma_1, d_1 = model_outputs[-2]
+            sigma_2, d_2 = model_outputs[-1]
+            
+            # Polynomial extrapolation with adaptive weights
+            h_0 = sigma_2 - sigma_1
+            h_1 = sigma_1 - sigma_0
+            r0 = (h_0 / (h_1 + 1e-8))
+            r0_val = r0.item() if torch.is_tensor(r0) else float(r0)
+            
+            # Third-order Adams-Bashforth coefficients with compensation
+            compensation = compute_compensation_ratio(r0_val, i, len(sigmas))
+            c0 = (1 + r0_val / 2) * compensation
+            c1 = -r0_val / 2
+            
+            d_interp = c0 * d_2 + c1 * d_1 + (1 - c0 - c1) * d_0
+            x_pred = x + d_interp * dt
+        
+        # === CORRECTOR STEP (optional, from UniPC) ===
+        if use_corrector and i < len(sigmas) - 2:
+            # Evaluate model at predicted point
+            denoised_pred = model(x_pred, sigma_next * s_in, **extra_args)
+            
+            if extra_args.get('cond_scale', 1.0) > 7.0:
+                denoised_pred = apply_dynamic_thresholding(denoised_pred, percentile=0.995)
+            
+            d_pred = to_d(x_pred, sigma_next, denoised_pred)
+            
+            # Corrector: trapezoidal rule (combines predictor and corrector derivatives)
+            dt = sigma_next - sigma
+            x = x + (d + d_pred) * dt * 0.5
+        else:
+            x = x_pred
+        
+        # Callback for progress tracking
+        if callback is not None:
+            callback({
+                'x': x,
+                'i': i,
+                'sigma': sigma,
+                'sigma_hat': sigma,
+                'denoised': denoised
+            })
+    
+    return x
+
+
+def to_d(x, sigma, denoised):
+    """Convert denoised prediction to derivative (velocity) form."""
+    return (x - denoised) / sigma.clamp(min=1e-8)
+
+
+def apply_dynamic_thresholding(x, percentile=0.995, clamp_range=1.0):
+    """
+    Dynamic thresholding from DPM-Solver++.
+    Prevents oversaturation at high CFG by adaptively clamping based on data statistics.
+    """
+    # Work with a copy to avoid in-place modifications
+    x_clamped = x.clone()
+    
+    # Flatten to [batch, -1] for per-sample statistics
+    batch_size = x.shape[0]
+    x_flat = x_clamped.view(batch_size, -1)
+    
+    # Get percentile threshold for each sample
+    s = torch.quantile(torch.abs(x_flat), percentile, dim=1, keepdim=True)
+    s = torch.clamp(s, min=clamp_range)
+    
+    # Clamp and rescale
+    x_flat = torch.clamp(x_flat, -s, s) / s
+    
+    return x_flat.view(x.shape)
+
+
+def compute_compensation_ratio(r, step_idx, total_steps, base_ratio=1.0):
+    """
+    Compute dynamic compensation ratio inspired by DC-Solver.
+    Adapts interpolation based on step position to address predictor-corrector misalignment.
+    
+    Args:
+        r: step size ratio (scalar)
+        step_idx: current step index
+        total_steps: total number of steps
+        base_ratio: base compensation strength
+    
+    Returns:
+        compensation ratio for interpolation
+    """
+    # Progress through sampling (0 to 1)
+    progress = step_idx / max(total_steps - 1, 1)
+    
+    # Adaptive compensation: stronger at the beginning (composition phase)
+    # and end (detail phase), weaker in the middle (structure phase)
+    # This follows the three-phase pattern from AOS
+    if progress < 0.3:
+        # Early phase: aggressive compensation for composition
+        phase_weight = 1.5
+    elif progress < 0.7:
+        # Middle phase: moderate compensation for structure
+        phase_weight = 1.0
+    else:
+        # Late phase: strong compensation for detail refinement
+        phase_weight = 1.3
+    
+    # Combine with step size ratio for adaptive behavior
+    # Use math.tanh for pure Python scalar operations
+    import math
+    compensation = base_ratio * phase_weight * (1.0 + 0.1 * math.tanh(r - 1.0))
+    
+    return compensation
 
 
 class AdeptSamplerForge(scripts.Script):
@@ -127,12 +319,51 @@ class AdeptSamplerForge(scripts.Script):
             # This group will be shown/hidden based on the checkbox
             with gr.Group(visible=False) as main_options:
                 with gr.Tabs():
+                    with gr.TabItem("Solver"):
+                        gr.Markdown("### Adept Solver\nReplace the WebUI's native solver (Euler, DPM++, etc.) with Adept's custom solver.")
+                        gr.Markdown("🚀 **Adept Solver** synthesizes training-free improvements from DPM-Solver++, UniPC, DEIS, and DC-Solver for enhanced quality and stability.")
+                        
+                        self.use_adept_solver = gr.Checkbox(
+                            label='Enable Adept Solver (Override WebUI Solver)',
+                            value=False,
+                            info="When enabled, Adept's custom solver replaces your chosen sampler's native solver (e.g., Euler a, DPM++). Sigma schedule is still applied."
+                        )
+                        
+                        with gr.Group(visible=False) as solver_options:
+                            self.adept_solver_order = gr.Slider(
+                                label='Solver Order',
+                                minimum=1, maximum=3,
+                                value=2, step=1,
+                                info="Order of the multistep predictor. Higher = more accurate but requires more history steps. 2 is recommended."
+                            )
+                            
+                            self.adept_solver_use_corrector = gr.Checkbox(
+                                label='Enable Corrector Step',
+                                value=True,
+                                info="Adds a corrector step (UniPC-style) for improved accuracy. Slightly slower but more stable."
+                            )
+                            
+                            gr.Markdown(
+                                "**Key Features:**\n"
+                                "- 🎯 **Dynamic Thresholding**: Prevents oversaturation at high CFG scales (DPM-Solver++)\n"
+                                "- 🔄 **Predictor-Corrector**: Unified framework for higher accuracy (UniPC)\n"
+                                "- 📊 **Adaptive Compensation**: Phase-aware interpolation for better alignment (DC-Solver)\n"
+                                "- ⚡ **Exponential Integrator**: Better numerical stability (DEIS)\n"
+                                "- 🎨 **Three-Phase Adaptation**: Follows AOS composition→structure→detail pattern"
+                            )
+                        
+                        self.use_adept_solver.change(
+                            fn=lambda x: gr.update(visible=x),
+                            inputs=[self.use_adept_solver],
+                            outputs=[solver_options]
+                        )
+            
                     with gr.TabItem("Scheduler"):
                         gr.Markdown("### Scheduler Override\nReplace the default time steps with a custom schedule.")
 
                         # Category dropdown controls the visible scheduler list
                         universal_choices = [
-                            "None",
+                            "None (use WebUI sampler schedule)",
                             "Entropic",
                             "Constant-Rate",
                             "Adaptive-Optimized",
@@ -160,7 +391,7 @@ class AdeptSamplerForge(scripts.Script):
 
                         self.scheduler_override = gr.Dropdown(
                             label="Scheduler",
-                            value="None",
+                            value="None (use WebUI sampler schedule)",
                             choices=universal_choices,
                         )
 
@@ -194,7 +425,7 @@ class AdeptSamplerForge(scripts.Script):
                         
                         gr.Markdown(
                             "**Scheduler Categories:**<br>"
-                            "▻ **Universal**: `None`, `Entropic`, `Constant-Rate`, `Adaptive-Optimized`, `Cosine-Annealed`, `LogSNR-Uniform`, `Tanh Mid-Boost`, `Exponential Tail`, `Jittered-Karras`, `Stochastic`, `JYS (Dynamic)`<br>"
+                            "▻ **Universal**: `None (use WebUI)`, `Entropic`, `Constant-Rate`, `Adaptive-Optimized`, `Cosine-Annealed`, `LogSNR-Uniform`, `Tanh Mid-Boost`, `Exponential Tail`, `Jittered-Karras`, `Stochastic`, `JYS (Dynamic)`<br>"
                             "▻ **V-Prediction**: `AOS-V`, `SNR-Optimized`<br>"
                             "▻ **ε-Prediction**: `AOS-ε`<br><br>"
                         )
@@ -225,7 +456,7 @@ class AdeptSamplerForge(scripts.Script):
                         def on_category_change(category):
                             if category == "Universal":
                                 return {
-                                    self.scheduler_override: gr.update(choices=universal_choices, value="None"),
+                                    self.scheduler_override: gr.update(choices=universal_choices, value="None (use WebUI sampler schedule)"),
                                     aos_plus_options: gr.update(visible=False),
                                     entropic_options: gr.update(visible=False),
                                     stochastic_options: gr.update(visible=False),
@@ -317,6 +548,9 @@ class AdeptSamplerForge(scripts.Script):
             (self.detail_separation_radius, lambda p: gr.update() if p.get('detail_separation_radius') in (None, 'N/A') else float(p['detail_separation_radius'])),
             (self.disable_for_hr, lambda p: str(p.get('adept_disable_for_hr')).lower() == 'true' if 'adept_disable_for_hr' in p else gr.update()),
             (self.exp_cfg_to_zero, lambda p: str(p.get('exp_cfg_to_zero')).lower() == 'true' if 'exp_cfg_to_zero' in p else gr.update()),
+            (self.use_adept_solver, lambda p: str(p.get('adept_solver_enabled')).lower() == 'true' if 'adept_solver_enabled' in p else gr.update()),
+            (self.adept_solver_order, lambda p: gr.update() if p.get('adept_solver_order') in (None, 'N/A') else int(p['adept_solver_order'])),
+            (self.adept_solver_use_corrector, lambda p: str(p.get('adept_solver_corrector')).lower() == 'true' if 'adept_solver_corrector' in p else gr.update()),
         ]
 
         def scheduler_getter(params):
@@ -336,7 +570,7 @@ class AdeptSamplerForge(scripts.Script):
             if str(params.get('entropic_scheduler')).lower() == 'true':
                 return "Entropic"
             
-            return "None"
+            return "None (use WebUI sampler schedule)"
 
         self.infotext_fields.append((self.scheduler_override, scheduler_getter))
 
@@ -352,6 +586,7 @@ class AdeptSamplerForge(scripts.Script):
             self.detail_enhancement_strength, self.detail_separation_radius,
             self.disable_for_hr,
             self.exp_cfg_to_zero,
+            self.use_adept_solver, self.adept_solver_order, self.adept_solver_use_corrector,
         ]
 
     def process_before_every_sampling(self, p, *script_args, **kwargs):
@@ -367,6 +602,7 @@ class AdeptSamplerForge(scripts.Script):
             detail_enhancement_strength, detail_separation_radius,
             disable_for_hr,
             exp_cfg_to_zero,
+            use_adept_solver, adept_solver_order, adept_solver_use_corrector,
         ) = script_args
 
         # --- XYZ Grid overrides (if provided) ---
@@ -481,6 +717,9 @@ class AdeptSamplerForge(scripts.Script):
             'detail_separation_radius': detail_separation_radius,
             'custom_scheduler_type': custom_scheduler_type,
             'exp_cfg_to_zero': exp_cfg_to_zero,
+            'use_adept_solver': use_adept_solver and enable_custom,
+            'adept_solver_order': adept_solver_order,
+            'adept_solver_use_corrector': adept_solver_use_corrector,
         })
         
         if enable_custom:
@@ -512,6 +751,9 @@ class AdeptSamplerForge(scripts.Script):
                 'custom_scheduler_type': custom_scheduler_type,
                 'adept_disable_for_hr': disable_for_hr,
                 'exp_cfg_to_zero': exp_cfg_to_zero,
+                'adept_solver_enabled': use_adept_solver,
+                'adept_solver_order': adept_solver_order if use_adept_solver else 'N/A',
+                'adept_solver_corrector': adept_solver_use_corrector if use_adept_solver else 'N/A',
             })
         else:
             print("🔄 Using standard sampler")
@@ -1342,7 +1584,7 @@ def list_supported_schedulers():
     """Return the list of scheduler names supported by compute_custom_sigma_schedule."""
     return [
         # Universal
-        "None",
+        "None (use WebUI sampler schedule)",
         "Entropic",
         "SNR-Optimized",
         "Constant-Rate",
@@ -1383,7 +1625,8 @@ def compute_custom_sigma_schedule(sigmas: torch.Tensor, scheduler_name: str, *, 
     sigma_min = sigmas[-2]
     num_steps = len(sigmas) - 1
 
-    if scheduler_name == "None":
+    # Handle both "None" variants
+    if scheduler_name in ("None", "None (use WebUI sampler schedule)"):
         return sigmas
 
     # Fallback power

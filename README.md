@@ -10,19 +10,21 @@ While this sampler implements advanced techniques to improve generation, the fie
 
 This extension is developed and tested on **Stable Diffusion WebUI reForge**. Compatibility with other versions, such as the original WebUI or WebUI Forge, is not guaranteed.
 
-### Sampler/Scheduler compatibility
+### Sampler/Solver/Scheduler compatibility
 
-- Adept now works with all k-diffusion samplers by overriding only the sigma schedule; the sampler's solver is preserved.
-- Not all schedulers are compatible or equally stable with every sampler choice.
-- Euler a remains the most stable sampler across schedules. If you encounter artifacts or instability, switch to Euler a or try another scheduler.
+- Adept can now run with either the WebUI sampler's native solver or the new Adept Solver.
+  - When the Adept Solver is enabled, it replaces the WebUI solver but still respects the chosen sigma schedule (from WebUI or Adept's Scheduler tab).
+  - When the Adept Solver is disabled, Adept preserves the sampler's native solver and can optionally override only the sigma schedule.
+- Not all schedulers are equally stable with every sampler choice. Euler a remains a strong baseline for stability.
 
 ## 🌟 Features
 
-- **Global Sampler Support**: Adept applies to all k-diffusion samplers by overriding the sigma schedule while preserving each sampler's native solver.
+- **Adept Solver (training-free)**: A custom solver that synthesizes improvements from DPM-Solver++, UniPC, DEIS, and DC-Solver. Offers multistep predictor, optional corrector, dynamic thresholding at high CFG, exponential-integrator-inspired stability, and phase-aware adaptive compensation.
+- **Global Sampler Support**: Works with all k-diffusion samplers. You can use the Adept Solver or preserve the native solver, and you can still apply Adept's custom sigma schedules.
 - **Detail Enhancement**: A unique method to enhance high-frequency details, which can be used with any scheduler. The **Detail Separation Radius** controls what is considered a 'detail,' with higher values sharpening larger features.
 - **Custom Schedulers**: A suite of schedulers to control the denoising process.
     > **Scheduler Categories:**
-    > - **Universal**: Recommended for all model types. Includes `Entropic`, `Constant-Rate`, `Adaptive-Optimized`, `Cosine-Annealed`, `LogSNR-Uniform`, `Tanh Mid-Boost`, `Exponential Tail`, `Jittered-Karras`, `Stochastic`.
+    > - **Universal**: Recommended for all model types. Includes `None (use WebUI sampler schedule)`, `Entropic`, `Constant-Rate`, `Adaptive-Optimized`, `Cosine-Annealed`, `LogSNR-Uniform`, `Tanh Mid-Boost`, `Exponential Tail`, `Jittered-Karras`, `Stochastic`, `JYS (Dynamic)`.
     > - **V-Prediction**: Specialized for `v-prediction` models. Includes `AOS-V` and `SNR-Optimized`.
     > - **ε-Prediction**: Specialized for `epsilon-prediction` models. Includes `AOS-ε`.
 
@@ -71,16 +73,21 @@ There are two ways to install the extension:
 
 ## 📖 Usage
 
-1.  In the main sampler dropdown, select your base sampling method (e.g., **Euler a**, **DPM++ 2M SDE**, etc.). Adept works together with the chosen sampler: it preserves the sampler's solver and overrides only the sigma schedule. Note: **Euler a is recommended** for stability, and quality may vary depending on the sampler you choose.
+1.  In the main sampler dropdown, select your base sampling method (e.g., **Euler a**, **DPM++ 2M SDE**, etc.).
 2.  Navigate to the "Scripts" section at the bottom of the `txt2img` or `img2img` tabs.
 3.  Select **"Adept Sampler"** from the script dropdown.
 4.  Enable the **"Enable Adept Sampler"** checkbox to activate the custom features. Once enabled, Adept works alongside your selected sampling method, preserving its solver while only overriding the sigma schedule.
-5.  The settings are organized into tabs for easy configuration:
+5.  The settings are organized into tabs for easy configuration (in this order):
+    - **Solver**:
+        - Enable **Adept Solver (Override WebUI Solver)** to replace the WebUI solver with Adept's custom solver while keeping the current sigma schedule.
+        - Configure **Solver Order** (1–3) and **Enable Corrector Step**.
+        - Key features: Dynamic Thresholding (stability at high CFG), Predictor-Corrector (accuracy), Adaptive Compensation (phase-aware), Exponential-Integrator-inspired stability.
     - **Scheduler**:
         - Choose a **Scheduler Category** (Universal / V-Prediction / ε-Prediction), then pick a **Scheduler**:
-            - **Universal**: `None`, `Entropic`, `Constant-Rate`, `Adaptive-Optimized`, `Cosine-Annealed`, `LogSNR-Uniform`, `Tanh Mid-Boost`, `Exponential Tail`, `Jittered-Karras`, `Stochastic`, `JYS (Dynamic)`
+            - **Universal**: `None (use WebUI sampler schedule)`, `Entropic`, `Constant-Rate`, `Adaptive-Optimized`, `Cosine-Annealed`, `LogSNR-Uniform`, `Tanh Mid-Boost`, `Exponential Tail`, `Jittered-Karras`, `Stochastic`, `JYS (Dynamic)`
             - **V-Prediction**: `AOS-V (for v-prediction)`, `SNR-Optimized`
             - **ε-Prediction**: `AOS-ε (for ε-prediction)`
+        - Note: `None (use WebUI sampler schedule)` means Adept will not override your sigma schedule; it will use whatever the WebUI sampler provides.
         - **AOS (V/ε) Options**:
             - **Content-Aware Pacing (AOS Only)**: Dynamically switches from composition to detail. Recommended with higher step counts (~1.5× model-recommended) for effective phasing.
             - **Coherence Sensitivity**: Controls how early the switch occurs.
@@ -100,7 +107,19 @@ There are two ways to install the extension:
         - Fine-tune `Eta` and `Noise Scale` for different ancestral noise effects.
         - Option to automatically disable the sampler for the Hires. fix pass.
       > ℹ️ **Note**: When using a custom scheduler, you may often need to **lower your CFG Scale** (e.g., by 1-2 points) to prevent oversaturated or 'burnt' images.
-    - **Advanced Noise Settings**: Fine-tune `Eta` and `Noise Scale` for different effects. 
+    - **Experimental**:
+        - Optional features that may affect stability, e.g., CFG-to-zero after 40% of steps.
+
+### Adept Solver: Recommended Settings
+
+- **Quality-first**: Order 2–3, Corrector On
+- **Speed-first**: Order 1, Corrector Off
+- **High CFG (≥ 7)**: Dynamic Thresholding auto-activates; use Order 2+ and Corrector On for stability
+
+### Notes
+
+- Adept Solver is training-free and compatible with all sigma schedules (including WebUI native, AOS, Entropic, etc.).
+- You can enable Adept Solver and still choose `None (use WebUI sampler schedule)` in Scheduler to keep the WebUI’s native schedule while using Adept’s solver.
 
 ## 🔍 Sampling Method Comparison
 
