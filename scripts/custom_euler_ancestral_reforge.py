@@ -651,6 +651,13 @@ class AdeptSamplerForge(scripts.Script):
                 disable_for_hr = str(xyz["disable_for_hr"]) == "True"
             if "exp_cfg_to_zero" in xyz:
                 exp_cfg_to_zero = str(xyz["exp_cfg_to_zero"]) == "True"
+            if "use_adept_solver" in xyz:
+                use_adept_solver = str(xyz["use_adept_solver"]) == "True"
+            if "adept_solver_order" in xyz:
+                try: adept_solver_order = int(xyz["adept_solver_order"])
+                except Exception: pass
+            if "adept_solver_use_corrector" in xyz:
+                adept_solver_use_corrector = str(xyz["adept_solver_use_corrector"]) == "True"
 
         # Set scheduler flags based on the radio button choice
         use_anime_schedule_v = (scheduler_override == "AOS-V (for v-prediction)")
@@ -1720,6 +1727,24 @@ def make_axis_on_xyz_grid():
             "(Adept) Enabled",
             str,
             partial(set_value, field="enabled"),
+            choices=lambda: ["True", "False"],
+        ),
+        xyz_grid.AxisOption(
+            "(Adept) Solver Enabled",
+            str,
+            partial(set_value, field="use_adept_solver"),
+            choices=lambda: ["True", "False"],
+        ),
+        xyz_grid.AxisOption(
+            "(Adept) Solver Order",
+            int,
+            partial(set_value, field="adept_solver_order"),
+            choices=lambda: ["1", "2", "3"],
+        ),
+        xyz_grid.AxisOption(
+            "(Adept) Solver Corrector",
+            str,
+            partial(set_value, field="adept_solver_use_corrector"),
             choices=lambda: ["True", "False"],
         ),
         xyz_grid.AxisOption(
