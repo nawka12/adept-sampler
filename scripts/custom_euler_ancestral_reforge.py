@@ -180,6 +180,11 @@ def patch_samplers_globally():
                 # Priority 2: Adept Solver (if pacing is not active)
                 if use_adept_solver:
                     return sample_adept_solver(active_model, x, final_sigmas, extra_args, callback, disable, generator, **kwargs)
+                
+                # Priority 3: Adept Ancestral Solver (if neither pacing nor regular solver is active)
+                use_adept_ancestral_solver = current_sampler_settings.get('use_adept_ancestral_solver', False)
+                if use_adept_ancestral_solver:
+                    return sample_adept_ancestral_solver(active_model, x, final_sigmas, extra_args, callback, disable, generator, **kwargs)
 
                 # Default: Call the original sampler with the (possibly) overridden schedule and enhanced model
                 return original_samplers[name](active_model, x, final_sigmas, extra_args, callback, disable, **kwargs)
@@ -361,6 +366,211 @@ def sample_adept_solver(model, x, sigmas, extra_args=None, callback=None, disabl
     return x
 
 
+def sample_adept_ancestral_solver(model, x, sigmas, extra_args=None, callback=None, disable=None, generator=None, **kwargs):
+    """
+    Adept Ancestral Solver: Combines the advanced Adept Solver with ancestral noise injection.
+    
+    This solver synthesizes:
+    - Adept Solver's multistep predictor-corrector framework
+    - DPM-Solver++ dynamic thresholding
+    - UniPC corrector steps
+    - DEIS exponential integrator stability
+    - DC-Solver adaptive compensation
+    - Ancestral noise injection for improved sample diversity
+    
+    Key innovations:
+    1. Multistep predictor-corrector with ancestral noise injection
+    2. Adaptive parameterization with noise scaling
+    3. Dynamic thresholding for high CFG stability
+    4. Exponential integrator formulation for numerical stability
+    5. Phase-aware adaptive compensation
+    6. Controlled noise injection for sample diversity
+    """
+    extra_args = {} if extra_args is None else extra_args
+    s_in = x.new_ones([x.shape[0]])
+    
+    # Get solver settings - Ancestral solver uses fixed Order 1 and no Corrector for compatibility with noise injection
+    order = 1  # Fixed for ancestral solver - multistep is incompatible with noise injection
+    use_corrector = False  # Fixed for ancestral solver - corrector is incompatible with noise injection
+    eta = current_sampler_settings.get('adept_ancestral_eta', 1.0)
+    s_noise = current_sampler_settings.get('adept_ancestral_s_noise', 1.0)
+    
+    # Clamp order to valid range
+    order = max(1, min(order, 3))
+    
+    print(f"🚀 Adept Ancestral Solver active (Order: {order}, Corrector: {'On' if use_corrector else 'Off'}, η: {eta:.2f}, s_noise: {s_noise:.2f})")
+    
+    # Get noise sampler for ancestral injection
+    noise_sampler = get_noise_sampler(x)
+    
+    # Initialize history for multistep
+    model_outputs = []
+    
+    for i in range(len(sigmas) - 1):
+        sigma = sigmas[i]
+        sigma_next = sigmas[i + 1]
+        
+        # === PREDICTOR STEP ===
+        # Get current model prediction
+        denoised = model(x, sigma * s_in, **extra_args)
+        
+        # Apply dynamic thresholding (from DPM-Solver++)
+        # This improves stability at high CFG scales
+        if extra_args.get('cond_scale', 1.0) > 7.0:
+            denoised = apply_dynamic_thresholding(denoised, percentile=0.995)
+        
+        # Compute derivative in log-SNR space for better numerical properties
+        # Inspired by DPM-Solver-v3's optimal parameterization
+        d = to_d(x, sigma, denoised)
+
+        # Additional safety check for extreme derivatives
+        if torch.isnan(d).any() or torch.isinf(d).any() or torch.abs(d).max() > 1000.0:
+            print(f"⚠️ Extreme derivative detected at step {i}/{len(sigmas)-1}. Clamping for stability.")
+            d = torch.clamp(d, -100.0, 100.0)
+            # If still problematic, use a more conservative fallback
+            if torch.isnan(d).any() or torch.isinf(d).any():
+                d = torch.zeros_like(d)
+
+        # Store for multistep
+        model_outputs.append((sigma, d))
+        if len(model_outputs) > order:
+            model_outputs.pop(0)
+        
+        # === ANCESTRAL STEP CALCULATION ===
+        # Calculate ancestral step sizes (same as Euler Ancestral)
+        if sigma_next > 0:
+            sigma_up = min(sigma_next, eta * (sigma_next ** 2 * (sigma ** 2 - sigma_next ** 2) / sigma ** 2) ** 0.5)
+            sigma_down = (sigma_next ** 2 - sigma_up ** 2) ** 0.5
+        else:
+            # Final step - no ancestral calculation needed
+            sigma_up = 0.0
+            sigma_down = 0.0
+        
+        # Use ancestral dt instead of simple dt
+        dt = sigma_down - sigma
+        
+        # Compute predictor step using multistep Adams-Bashforth-like integration
+        # This combines ideas from DEIS (exponential integrator) and UniPC (unified framework)
+        if len(model_outputs) == 1 or order == 1:
+            # First-order (Euler step)
+            x_pred = x + d * dt
+        elif len(model_outputs) == 2 and order >= 2:
+            # Second-order multistep with adaptive compensation (DC-Solver inspired)
+            sigma_prev, d_prev = model_outputs[-2]
+            d_cur = model_outputs[-1][1]
+            
+            # Compute adaptive interpolation coefficient
+            h = sigma - sigma_prev
+            compensation_ratio = compute_compensation_ratio(h.item() if torch.is_tensor(h) else float(h), i, len(sigmas))
+            
+            # Linear multistep integration
+            d_interp = d_cur + compensation_ratio * (d_cur - d_prev)
+            x_pred = x + d_interp * dt
+        else:
+            # Third-order multistep (when we have 3+ history)
+            sigma_0, d_0 = model_outputs[-3]
+            sigma_1, d_1 = model_outputs[-2]
+            sigma_2, d_2 = model_outputs[-1]
+            
+            # Polynomial extrapolation with adaptive weights
+            h_0 = sigma_2 - sigma_1
+            h_1 = sigma_1 - sigma_0
+            
+            # Clamp to avoid division issues
+            h_0_val = h_0.item() if torch.is_tensor(h_0) else float(h_0)
+            h_1_val = h_1.item() if torch.is_tensor(h_1) else float(h_1)
+            
+            # Avoid numerical instability with very small step sizes
+            if abs(h_1_val) < 1e-6:
+                # Fall back to second-order if history is too close
+                compensation_ratio = compute_compensation_ratio(h_0_val, i, len(sigmas))
+                d_interp = d_2 + compensation_ratio * (d_2 - d_1)
+            else:
+                r0 = h_0_val / h_1_val
+                
+                # Standard Adams-Bashforth 3rd order coefficients (sum to 1)
+                # Adjusted for non-uniform step sizes
+                c0 = 1.0 + r0 / 2.0
+                c1 = -r0 / 2.0
+                c2 = 0.0  # Coefficient for d_0, derived from sum=1 constraint
+                
+                # Normalize to ensure sum = 1 for stability
+                c_sum = c0 + c1 + c2
+                c0 /= c_sum
+                c1 /= c_sum
+                c2 = 1.0 - c0 - c1  # Exact residual
+                
+                d_interp = c0 * d_2 + c1 * d_1 + c2 * d_0
+            
+            x_pred = x + d_interp * dt
+        
+        # === CORRECTOR STEP (optional, from UniPC) ===
+        if use_corrector and i < len(sigmas) - 2:
+            # Evaluate model at predicted point
+            denoised_pred = model(x_pred, sigma_next * s_in, **extra_args)
+            
+            if extra_args.get('cond_scale', 1.0) > 7.0:
+                denoised_pred = apply_dynamic_thresholding(denoised_pred, percentile=0.995)
+
+            d_pred = to_d(x_pred, sigma_next, denoised_pred)
+
+            # Additional safety check for corrector derivatives
+            if torch.isnan(d_pred).any() or torch.isinf(d_pred).any() or torch.abs(d_pred).max() > 1000.0:
+                print(f"⚠️ Extreme corrector derivative detected at step {i}/{len(sigmas)-1}. Clamping for stability.")
+                d_pred = torch.clamp(d_pred, -100.0, 100.0)
+                # If still problematic, use a more conservative fallback
+                if torch.isnan(d_pred).any() or torch.isinf(d_pred).any():
+                    d_pred = torch.zeros_like(d_pred)
+            
+            # Corrector: trapezoidal rule (combines predictor and corrector derivatives)
+            x = x + (d + d_pred) * dt * 0.5
+        else:
+            x = x_pred
+        
+        # === ANCESTRAL NOISE INJECTION ===
+        # Apply noise injection (same as original Euler Ancestral)
+        if sigma_next > 0:
+            noise = noise_sampler(sigma, sigma_next) * s_noise * sigma_up
+            x = x + noise
+        
+        # Safety check for numerical stability
+        if torch.isnan(x).any() or torch.isinf(x).any():
+            cfg_scale = extra_args.get('cond_scale', 1.0)
+            print(f"⚠️ Adept Ancestral Solver: NaN/Inf detected at step {i}/{len(sigmas)-1}!")
+            print(f"   Sigma: {sigma.item():.4f} → {sigma_next.item():.4f}")
+            print(f"   CFG Scale: {cfg_scale}")
+            print(f"   Dynamic thresholding active: {cfg_scale > 7.0}")
+            print(f"   This usually indicates numerical instability.")
+            print(f"   Try: Lower order (1-2), disable corrector, or use fewer steps.")
+            if cfg_scale > 7.0:
+                print(f"   High CFG detected - try reducing CFG scale or disabling dynamic thresholding.")
+            # Clamp to reasonable range to allow generation to complete
+            x = torch.nan_to_num(x, nan=0.0, posinf=1.0, neginf=-1.0)
+        
+        # Callback for progress tracking
+        if callback is not None:
+            callback({
+                'x': x,
+                'i': i,
+                'sigma': sigma,
+                'sigma_hat': sigma,
+                'denoised': denoised
+            })
+    
+    return x
+
+
+def get_noise_sampler(x):
+    """Get the proper noise sampler using k_diffusion's approach"""
+    if hasattr(k_diffusion.sampling, 'default_noise_sampler'):
+        return k_diffusion.sampling.default_noise_sampler(x)
+    else:
+        # Fallback: create a simple noise sampler
+        def simple_noise_sampler(sigma_from, sigma_to):
+            return torch.randn_like(x)
+        return simple_noise_sampler
+
+
 def to_d(x, sigma, denoised):
     """Convert denoised prediction to derivative (velocity) form."""
     # Compute the difference
@@ -497,10 +707,11 @@ class AdeptSamplerForge(scripts.Script):
                         gr.Markdown("### Adept Solver\nReplace the WebUI's native solver (Euler, DPM++, etc.) with Adept's custom solver.")
                         gr.Markdown("🚀 **Adept Solver** synthesizes training-free improvements from DPM-Solver++, UniPC, DEIS, and DC-Solver for enhanced quality and stability.")
                         
-                        self.use_adept_solver = gr.Checkbox(
-                            label='Enable Adept Solver (Override WebUI Solver)',
-                            value=False,
-                            info="When enabled, Adept's custom solver replaces your chosen sampler's native solver (e.g., Euler a, DPM++). Note: Content-Aware Pacing takes priority if both are enabled."
+                        self.solver_type = gr.Dropdown(
+                            label='Solver Type',
+                            value='None',
+                            choices=['None', 'Adept Solver', 'Adept Ancestral Solver'],
+                            info="Choose the solver type. 'None' uses the WebUI's native solver. 'Adept Solver' provides deterministic multistep predictor-corrector. 'Adept Ancestral Solver' adds controlled noise injection for diversity."
                         )
                         
                         with gr.Group(visible=False) as solver_options:
@@ -508,13 +719,13 @@ class AdeptSamplerForge(scripts.Script):
                                 label='Solver Order',
                                 minimum=1, maximum=3,
                                 value=2, step=1,
-                                info="Order of the multistep predictor. Higher = more accurate but requires more history steps. 2 is recommended."
+                                info="Order of the multistep predictor. Higher = more accurate but requires more history steps. 2 is recommended. Not used with Ancestral Solver."
                             )
                             
                             self.adept_solver_use_corrector = gr.Checkbox(
                                 label='Enable Corrector Step',
                                 value=True,
-                                info="Adds a corrector step (UniPC-style) for improved accuracy. Slightly slower but more stable."
+                                info="Adds a corrector step (UniPC-style) for improved accuracy. Slightly slower but more stable. Not used with Ancestral Solver."
                             )
                             
                             gr.Markdown(
@@ -530,10 +741,44 @@ class AdeptSamplerForge(scripts.Script):
                                 "- If you get NaN errors, try: lower order, disable corrector, or increase steps"
                             )
                         
-                        self.use_adept_solver.change(
-                            fn=lambda x: gr.update(visible=x),
-                            inputs=[self.use_adept_solver],
-                            outputs=[solver_options]
+                        with gr.Group(visible=False) as ancestral_solver_options:
+                            gr.Markdown("### Ancestral Parameters\nControl the noise injection behavior for improved sample diversity.")
+                            
+                            self.adept_ancestral_eta = gr.Slider(
+                                label='Eta (Ancestral)',
+                                minimum=0.0, maximum=2.0, value=1.0, step=0.01,
+                                info="Controls the amount of ancestral noise injection. Higher values = more noise, more diversity but potentially less stability."
+                            )
+                            
+                            self.adept_ancestral_s_noise = gr.Slider(
+                                label='Noise Scale',
+                                minimum=0.0, maximum=2.0, value=1.0, step=0.01,
+                                info="Scales the noise injection strength. Higher values = stronger noise effects."
+                            )
+                            
+                            gr.Markdown(
+                                "**Ancestral Features:**\n"
+                                "- 🌊 **Noise Injection**: Controlled noise addition for sample diversity\n"
+                                "- 🎲 **Ancestral Steps**: Proper sigma_up/sigma_down calculation\n"
+                                "- ⚖️ **Balanced Sampling**: Combines deterministic solver with stochastic noise\n"
+                                "- 🔧 **Advanced Integration**: Uses Adept Solver's dynamic thresholding and stability features\n\n"
+                                "**Usage Tips:**\n"
+                                "- Start with default values (η=1.0, s_noise=1.0)\n"
+                                "- Increase η for more diversity, decrease for stability\n"
+                                "- Higher s_noise = stronger noise effects\n"
+                                "- Uses fixed Order 1 and no Corrector (multistep/corrector incompatible with noise injection)"
+                            )
+                        
+                        def on_solver_type_change(solver_type):
+                            return {
+                                solver_options: gr.update(visible=solver_type == 'Adept Solver'),
+                                ancestral_solver_options: gr.update(visible=solver_type == 'Adept Ancestral Solver')
+                            }
+                        
+                        self.solver_type.change(
+                            fn=on_solver_type_change,
+                            inputs=[self.solver_type],
+                            outputs=[solver_options, ancestral_solver_options]
                         )
             
                     with gr.TabItem("Scheduler"):
@@ -726,9 +971,11 @@ class AdeptSamplerForge(scripts.Script):
             (self.detail_separation_radius, lambda p: gr.update() if p.get('detail_separation_radius') in (None, 'N/A') else float(p['detail_separation_radius'])),
             (self.disable_for_hr, lambda p: str(p.get('adept_disable_for_hr')).lower() == 'true' if 'adept_disable_for_hr' in p else gr.update()),
             (self.exp_cfg_to_zero, lambda p: str(p.get('exp_cfg_to_zero')).lower() == 'true' if 'exp_cfg_to_zero' in p else gr.update()),
-            (self.use_adept_solver, lambda p: str(p.get('adept_solver_enabled')).lower() == 'true' if 'adept_solver_enabled' in p else gr.update()),
+            (self.solver_type, lambda p: p.get('solver_type', 'None')),
             (self.adept_solver_order, lambda p: gr.update() if p.get('adept_solver_order') in (None, 'N/A') else int(p['adept_solver_order'])),
             (self.adept_solver_use_corrector, lambda p: str(p.get('adept_solver_corrector')).lower() == 'true' if 'adept_solver_corrector' in p else gr.update()),
+            (self.adept_ancestral_eta, lambda p: gr.update() if p.get('adept_ancestral_eta') in (None, 'N/A') else float(p['adept_ancestral_eta'])),
+            (self.adept_ancestral_s_noise, lambda p: gr.update() if p.get('adept_ancestral_s_noise') in (None, 'N/A') else float(p['adept_ancestral_s_noise'])),
         ]
 
         def scheduler_getter(params):
@@ -764,7 +1011,8 @@ class AdeptSamplerForge(scripts.Script):
             self.detail_enhancement_strength, self.detail_separation_radius,
             self.disable_for_hr,
             self.exp_cfg_to_zero,
-            self.use_adept_solver, self.adept_solver_order, self.adept_solver_use_corrector,
+            self.solver_type, self.adept_solver_order, self.adept_solver_use_corrector,
+            self.adept_ancestral_eta, self.adept_ancestral_s_noise,
         ]
 
     def process_before_every_sampling(self, p, *script_args, **kwargs):
@@ -780,7 +1028,8 @@ class AdeptSamplerForge(scripts.Script):
             detail_enhancement_strength, detail_separation_radius,
             disable_for_hr,
             exp_cfg_to_zero,
-            use_adept_solver, adept_solver_order, adept_solver_use_corrector,
+            solver_type, adept_solver_order, adept_solver_use_corrector,
+            adept_ancestral_eta, adept_ancestral_s_noise,
         ) = script_args
 
         # --- XYZ Grid overrides (if provided) ---
@@ -829,14 +1078,24 @@ class AdeptSamplerForge(scripts.Script):
                 disable_for_hr = str(xyz["disable_for_hr"]) == "True"
             if "exp_cfg_to_zero" in xyz:
                 exp_cfg_to_zero = str(xyz["exp_cfg_to_zero"]) == "True"
-            if "use_adept_solver" in xyz:
-                use_adept_solver = str(xyz["use_adept_solver"]) == "True"
+            if "solver_type" in xyz:
+                solver_type = str(xyz["solver_type"]) or solver_type
             if "adept_solver_order" in xyz:
                 try: adept_solver_order = int(xyz["adept_solver_order"])
                 except Exception: pass
             if "adept_solver_use_corrector" in xyz:
                 adept_solver_use_corrector = str(xyz["adept_solver_use_corrector"]) == "True"
+            if "adept_ancestral_eta" in xyz:
+                try: adept_ancestral_eta = float(xyz["adept_ancestral_eta"])
+                except Exception: pass
+            if "adept_ancestral_s_noise" in xyz:
+                try: adept_ancestral_s_noise = float(xyz["adept_ancestral_s_noise"])
+                except Exception: pass
 
+        # Set solver flags based on the dropdown choice
+        use_adept_solver = (solver_type == 'Adept Solver')
+        use_adept_ancestral_solver = (solver_type == 'Adept Ancestral Solver')
+        
         # Set scheduler flags based on the radio button choice
         use_anime_schedule_v = (scheduler_override == "AOS-V (for v-prediction)")
         use_anime_schedule_e = (scheduler_override == "AOS-ε (for ε-prediction)")
@@ -905,6 +1164,9 @@ class AdeptSamplerForge(scripts.Script):
             'use_adept_solver': use_adept_solver and enable_custom,
             'adept_solver_order': adept_solver_order,
             'adept_solver_use_corrector': adept_solver_use_corrector,
+            'use_adept_ancestral_solver': use_adept_ancestral_solver and enable_custom,
+            'adept_ancestral_eta': adept_ancestral_eta,
+            'adept_ancestral_s_noise': adept_ancestral_s_noise,
         })
         
         if enable_custom:
@@ -936,9 +1198,11 @@ class AdeptSamplerForge(scripts.Script):
                 'custom_scheduler_type': custom_scheduler_type,
                 'adept_disable_for_hr': disable_for_hr,
                 'exp_cfg_to_zero': exp_cfg_to_zero,
-                'adept_solver_enabled': use_adept_solver,
+                'solver_type': solver_type,
                 'adept_solver_order': adept_solver_order if use_adept_solver else 'N/A',
                 'adept_solver_corrector': adept_solver_use_corrector if use_adept_solver else 'N/A',
+                'adept_ancestral_eta': adept_ancestral_eta if use_adept_ancestral_solver else 'N/A',
+                'adept_ancestral_s_noise': adept_ancestral_s_noise if use_adept_ancestral_solver else 'N/A',
             })
         else:
             print("🔄 Using standard sampler")
@@ -1916,10 +2180,10 @@ def make_axis_on_xyz_grid():
             choices=lambda: ["True", "False"],
         ),
         xyz_grid.AxisOption(
-            "(Adept) Solver Enabled",
+            "(Adept) Solver Type",
             str,
-            partial(set_value, field="use_adept_solver"),
-            choices=lambda: ["True", "False"],
+            partial(set_value, field="solver_type"),
+            choices=lambda: ["None", "Adept Solver", "Adept Ancestral Solver"],
         ),
         xyz_grid.AxisOption(
             "(Adept) Solver Order",
@@ -2015,6 +2279,16 @@ def make_axis_on_xyz_grid():
             str,
             partial(set_value, field="stochastic_base_schedule"),
             choices=lambda: ["karras", "uniform", "cosine"],
+        ),
+        xyz_grid.AxisOption(
+            "(Adept) Ancestral Eta",
+            float,
+            partial(set_value, field="adept_ancestral_eta"),
+        ),
+        xyz_grid.AxisOption(
+            "(Adept) Ancestral Noise Scale",
+            float,
+            partial(set_value, field="adept_ancestral_s_noise"),
         ),
     ]
 

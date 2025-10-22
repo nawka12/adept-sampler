@@ -20,6 +20,7 @@ This extension is developed and tested on **Stable Diffusion WebUI reForge**. Co
 ## 🌟 Features
 
 - **Adept Solver (training-free)**: A custom solver that synthesizes improvements from DPM-Solver++, UniPC, DEIS, and DC-Solver. Offers multistep predictor, optional corrector, dynamic thresholding at high CFG, exponential-integrator-inspired stability, and phase-aware adaptive compensation.
+- **Adept Ancestral Solver**: Combines the advanced Adept Solver with ancestral noise injection for improved sample diversity and quality. Features controlled noise injection, proper ancestral step calculation, and balanced deterministic-stochastic sampling.
 - **Global Sampler Support**: Works with all k-diffusion samplers. You can use the Adept Solver or preserve the native solver, and you can still apply Adept's custom sigma schedules.
 - **Detail Enhancement**: A unique method to enhance high-frequency details, which can be used with any scheduler. The **Detail Separation Radius** controls what is considered a 'detail,' with higher values sharpening larger features.
 - **Custom Schedulers**: A suite of schedulers to control the denoising process.
@@ -79,9 +80,10 @@ There are two ways to install the extension:
 4.  Enable the **"Enable Adept Sampler"** checkbox to activate the custom features. Once enabled, Adept works alongside your selected sampling method, preserving its solver while only overriding the sigma schedule.
 5.  The settings are organized into tabs for easy configuration (in this order):
     - **Solver**:
-        - Enable **Adept Solver (Override WebUI Solver)** to replace the WebUI solver with Adept's custom solver while keeping the current sigma schedule.
-        - Configure **Solver Order** (1–3) and **Enable Corrector Step**.
-        - Key features: Dynamic Thresholding (stability at high CFG), Predictor-Corrector (accuracy), Adaptive Compensation (phase-aware), Exponential-Integrator-inspired stability.
+        - Choose **Solver Type** from dropdown: `None` (uses WebUI native solver), `Adept Solver` (deterministic multistep), or `Adept Ancestral Solver` (with noise injection).
+        - For **Adept Solver**: Configure **Solver Order** (1–3) and **Enable Corrector Step**.
+        - For **Adept Ancestral Solver**: Adjust **Eta (Ancestral)** and **Noise Scale** to control noise injection behavior (uses fixed Order 1 + no Corrector for compatibility with noise injection).
+        - Key features: Dynamic Thresholding (stability at high CFG), Predictor-Corrector (accuracy), Adaptive Compensation (phase-aware), Exponential-Integrator-inspired stability, Ancestral Noise Injection (diversity).
     - **Scheduler**:
         - Choose a **Scheduler Category** (Universal / V-Prediction / ε-Prediction), then pick a **Scheduler**:
             - **Universal**: `None (use WebUI sampler schedule)`, `Entropic`, `Constant-Rate`, `Adaptive-Optimized`, `Cosine-Annealed`, `LogSNR-Uniform`, `Tanh Mid-Boost`, `Exponential Tail`, `Jittered-Karras`, `Stochastic`, `JYS (Dynamic)`
@@ -116,6 +118,15 @@ There are two ways to install the extension:
 - **Speed-first**: Order 1, Corrector Off
 - **High CFG (≥ 7)**: Dynamic Thresholding auto-activates; use Order 2+ and Corrector On for stability
 
+### Adept Ancestral Solver: Recommended Settings
+
+- **Balanced**: Order 1, Corrector Off, η=1.0, s_noise=1.0
+- **High Diversity**: Order 1, Corrector Off, η=1.2, s_noise=1.1
+- **Stable**: Order 1, Corrector Off, η=0.8, s_noise=0.9
+- **Experimental**: Order 1, Corrector Off, η=1.5, s_noise=1.2
+
+**Note**: Ancestral solver uses fixed Order 1 and no Corrector because multistep predictor-corrector methods are incompatible with noise injection.
+
 ### Notes
 
 - Adept Solver is training-free and compatible with all sigma schedules (including WebUI native, AOS, Entropic, etc.).
@@ -138,6 +149,7 @@ There are two ways to install the extension:
 | **Adept + Jittered-Karras** | Karras spacing with stratified jitter | Reducing resonance/banding on repetitive patterns | CFG Scale: -1 to -2 from normal | Image not available | Adds robustness via blue-noise-like jitter |
 | **Adept + Stochastic** | Controlled randomness in timestep selection | Reducing repetitive patterns, improving diversity | CFG Scale: -1 to -2 from normal<br/>Noise Type: Brownian/Uniform/Normal<br/>Noise Scale: 0.1-0.5 | Image not available | Adds strategic randomness for better sample variety |
 | **Adept + JYS** | Non-uniform timestep skipping with dynamic jump sequence calculation | Faster inference with maintained quality, efficiency optimization | CFG Scale: -1 to -2 from normal<br/>Dynamic timestep optimization | Image not available | Reduces denoising calls by up to 60% while preserving sample quality through dynamic timestep selection |
+| **Adept Ancestral Solver** | Advanced solver with controlled noise injection | High-quality samples with improved diversity and creativity | Order: 1, Corrector: Off<br/>η: 1.0-1.2, s_noise: 1.0-1.1<br/>CFG Scale: -1 to -2 from normal | Image not available | Combines Adept Solver's stability features with ancestral noise injection (Order 1 + no Corrector required for noise compatibility) |
 
 ## Samples using AkashicPulse v4.0
 ![xyz_grid-0010-185404508](https://github.com/user-attachments/assets/b5a4d8d3-2b30-4a2e-861e-c02a95f16c93)
