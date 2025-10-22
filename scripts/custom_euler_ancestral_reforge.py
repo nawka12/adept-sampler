@@ -65,6 +65,50 @@ current_sampler_settings = {
 
 
 
+def create_detail_enhanced_model(model, x, sigmas):
+    """
+    Creates a model wrapper that applies detail enhancement to all predictions.
+    Works with any sampler by intercepting model calls.
+    """
+    if not TORCHVISION_AVAILABLE:
+        return model
+    
+    base_strength = current_sampler_settings.get('detail_enhancement_strength', 0.05)
+    radius = current_sampler_settings.get('detail_separation_radius', 0.5)
+    total_steps = len(sigmas) - 1
+    
+    # Track which step we're on
+    step_counter = {'current': 0}
+    
+    def enhanced_model(x_current, sigma, **kwargs):
+        # Get base model prediction
+        denoised = model(x_current, sigma, **kwargs)
+        
+        # Apply detail enhancement
+        try:
+            # Separate high and low frequency components
+            from torchvision.transforms.functional import gaussian_blur
+            low_freq = gaussian_blur(denoised, kernel_size=3, sigma=radius)
+            high_freq = denoised - low_freq
+            
+            # Calculate progressive enhancement based on sampling progress
+            progress = step_counter['current'] / max(total_steps, 1)
+            strength = base_strength * (0.5 + progress)  # Gradual increase
+            
+            # Enhance details
+            enhanced = denoised + high_freq * strength
+            
+            step_counter['current'] += 1
+            
+            return enhanced
+        except Exception as e:
+            # If enhancement fails, return original prediction
+            print(f"⚠️ Detail enhancement failed: {e}")
+            return denoised
+    
+    return enhanced_model
+
+
 def patch_samplers_globally():
     """Patch all k-diffusion sampling functions once at startup."""
     patched_count = 0
@@ -98,12 +142,47 @@ def patch_samplers_globally():
                     print(f"⚠️ Sigma override failed for {name}: {e}. Using original schedule.")
                     final_sigmas = sigmas
 
-                # If Adept Solver is enabled, use it instead of the original sampler
-                if current_sampler_settings.get('use_adept_solver', False):
-                    return sample_adept_solver(model, x, final_sigmas, extra_args, callback, disable, generator, **kwargs)
+                # Check for content-aware pacing and detail enhancement
+                use_pacing = current_sampler_settings.get('use_content_aware_pacing', False)
+                use_detail_enhancement = current_sampler_settings.get('use_enhanced_detail_phase', False)
+                use_adept_solver = current_sampler_settings.get('use_adept_solver', False)
+                
+                # Warn if pacing is enabled but sampler is not Euler Ancestral
+                if use_pacing and name != 'sample_euler_ancestral':
+                    print(f"⚠️ Content-Aware Pacing only works with Euler Ancestral sampler.")
+                    print(f"   Current sampler: {name.replace('sample_', '')}. Pacing will be disabled.")
+                    use_pacing = False  # Disable pacing for non-Euler samplers
+                
+                # If pacing is enabled with Adept Solver, warn user and use pacing
+                if use_pacing and use_adept_solver and name == 'sample_euler_ancestral':
+                    print("⚠️ Content-Aware Pacing enabled with Adept Solver - using Enhanced Euler Ancestral with pacing instead.")
+                    print("   (Pacing is not yet implemented in Adept Solver)")
+                
+                # Priority 1: Pacing (only for Euler Ancestral)
+                if use_pacing and name == 'sample_euler_ancestral':
+                    # Get eta and s_noise from settings
+                    eta = current_sampler_settings.get('eta', 1.0)
+                    s_noise = current_sampler_settings.get('s_noise', 1.0)
+                    # Create an instance to call the method
+                    # Pass skip_schedule_override=True because we already processed the schedule above
+                    forge = AdeptSamplerForge()
+                    return forge.sample_enhanced_euler_ancestral(model, x, final_sigmas, extra_args, callback, disable, eta, s_noise, generator, skip_schedule_override=True)
+                
+                # Apply detail enhancement wrapper if enabled (works with all samplers)
+                active_model = model
+                if use_detail_enhancement and TORCHVISION_AVAILABLE:
+                    active_model = create_detail_enhanced_model(model, x, final_sigmas)
+                    if use_adept_solver:
+                        print(f"🎨 Detail Enhancement: Model wrapper active (will be used with Adept Solver)")
+                    else:
+                        print(f"🎨 Detail Enhancement: Model wrapper active (will be used with {name.replace('sample_', '')} sampler)")
+                
+                # Priority 2: Adept Solver (if pacing is not active)
+                if use_adept_solver:
+                    return sample_adept_solver(active_model, x, final_sigmas, extra_args, callback, disable, generator, **kwargs)
 
-                # Call the original sampler with the (possibly) overridden schedule
-                return original_samplers[name](model, x, final_sigmas, extra_args, callback, disable, **kwargs)
+                # Default: Call the original sampler with the (possibly) overridden schedule and enhanced model
+                return original_samplers[name](active_model, x, final_sigmas, extra_args, callback, disable, **kwargs)
 
             return smart_wrapper
 
@@ -194,15 +273,33 @@ def sample_adept_solver(model, x, sigmas, extra_args=None, callback=None, disabl
             # Polynomial extrapolation with adaptive weights
             h_0 = sigma_2 - sigma_1
             h_1 = sigma_1 - sigma_0
-            r0 = (h_0 / (h_1 + 1e-8))
-            r0_val = r0.item() if torch.is_tensor(r0) else float(r0)
             
-            # Third-order Adams-Bashforth coefficients with compensation
-            compensation = compute_compensation_ratio(r0_val, i, len(sigmas))
-            c0 = (1 + r0_val / 2) * compensation
-            c1 = -r0_val / 2
+            # Clamp to avoid division issues
+            h_0_val = h_0.item() if torch.is_tensor(h_0) else float(h_0)
+            h_1_val = h_1.item() if torch.is_tensor(h_1) else float(h_1)
             
-            d_interp = c0 * d_2 + c1 * d_1 + (1 - c0 - c1) * d_0
+            # Avoid numerical instability with very small step sizes
+            if abs(h_1_val) < 1e-6:
+                # Fall back to second-order if history is too close
+                compensation_ratio = compute_compensation_ratio(h_0_val, i, len(sigmas))
+                d_interp = d_2 + compensation_ratio * (d_2 - d_1)
+            else:
+                r0 = h_0_val / h_1_val
+                
+                # Standard Adams-Bashforth 3rd order coefficients (sum to 1)
+                # Adjusted for non-uniform step sizes
+                c0 = 1.0 + r0 / 2.0
+                c1 = -r0 / 2.0
+                c2 = 0.0  # Coefficient for d_0, derived from sum=1 constraint
+                
+                # Normalize to ensure sum = 1 for stability
+                c_sum = c0 + c1 + c2
+                c0 /= c_sum
+                c1 /= c_sum
+                c2 = 1.0 - c0 - c1  # Exact residual
+                
+                d_interp = c0 * d_2 + c1 * d_1 + c2 * d_0
+            
             x_pred = x + d_interp * dt
         
         # === CORRECTOR STEP (optional, from UniPC) ===
@@ -220,6 +317,15 @@ def sample_adept_solver(model, x, sigmas, extra_args=None, callback=None, disabl
             x = x + (d + d_pred) * dt * 0.5
         else:
             x = x_pred
+        
+        # Safety check for numerical stability
+        if torch.isnan(x).any() or torch.isinf(x).any():
+            print(f"⚠️ Adept Solver: NaN/Inf detected at step {i}/{len(sigmas)-1}!")
+            print(f"   Sigma: {sigma.item():.4f} → {sigma_next.item():.4f}")
+            print(f"   This usually indicates numerical instability.")
+            print(f"   Try: Lower order (1-2), disable corrector, or use fewer steps.")
+            # Clamp to reasonable range to allow generation to complete
+            x = torch.nan_to_num(x, nan=0.0, posinf=1.0, neginf=-1.0)
         
         # Callback for progress tracking
         if callback is not None:
@@ -312,7 +418,7 @@ class AdeptSamplerForge(scripts.Script):
 
     def ui(self, *args, **kwargs):
         with gr.Accordion(open=False, label=self.title()):
-            gr.HTML('Adept Sampler: An advanced Euler Ancestral sampler with custom schedulers and detail enhancement.')
+            gr.HTML('Adept Sampler: Advanced sampling enhancements including custom schedulers (all samplers), detail enhancement (all samplers), content-aware pacing (Euler Ancestral), and Adept Solver.')
             
             self.enable_custom = gr.Checkbox(label='Enable Adept Sampler', value=False)
             
@@ -326,7 +432,7 @@ class AdeptSamplerForge(scripts.Script):
                         self.use_adept_solver = gr.Checkbox(
                             label='Enable Adept Solver (Override WebUI Solver)',
                             value=False,
-                            info="When enabled, Adept's custom solver replaces your chosen sampler's native solver (e.g., Euler a, DPM++). Sigma schedule is still applied."
+                            info="When enabled, Adept's custom solver replaces your chosen sampler's native solver (e.g., Euler a, DPM++). Note: Content-Aware Pacing takes priority if both are enabled."
                         )
                         
                         with gr.Group(visible=False) as solver_options:
@@ -349,7 +455,11 @@ class AdeptSamplerForge(scripts.Script):
                                 "- 🔄 **Predictor-Corrector**: Unified framework for higher accuracy (UniPC)\n"
                                 "- 📊 **Adaptive Compensation**: Phase-aware interpolation for better alignment (DC-Solver)\n"
                                 "- ⚡ **Exponential Integrator**: Better numerical stability (DEIS)\n"
-                                "- 🎨 **Three-Phase Adaptation**: Follows AOS composition→structure→detail pattern"
+                                "- 🎨 **Three-Phase Adaptation**: Follows AOS composition→structure→detail pattern\n\n"
+                                "**Stability Tips:**\n"
+                                "- Order 1-2 recommended for most cases\n"
+                                "- Order 3 is experimental and may be unstable with some models\n"
+                                "- If you get NaN errors, try: lower order, disable corrector, or increase steps"
                             )
                         
                         self.use_adept_solver.change(
@@ -432,7 +542,7 @@ class AdeptSamplerForge(scripts.Script):
 
                         with gr.Group(visible=False) as aos_plus_options:
                             gr.Markdown("⚠️ **Compatibility Warning:** Use the correct AOS variant for your model type. **AOS-V** is for **v-prediction** models. **AOS-ε** is for **epsilon-prediction** models. Mismatching them may break the generation.")
-                            self.use_content_aware_pacing = gr.Checkbox(label='Enable Content-Aware Pacing (AOS Only)', value=False, info="Dynamically adjusts pacing based on image coherence. Requires higher step counts (at least model recommended step count * 1.5) for effective phasing.")
+                            self.use_content_aware_pacing = gr.Checkbox(label='Enable Content-Aware Pacing (Euler Ancestral + AOS Only)', value=False, info="Dynamically adjusts pacing based on image coherence. REQUIRES: Euler Ancestral sampler + AOS scheduler + higher step counts (≥26). Pacing takes priority over Adept Solver.")
                             self.pacing_coherence_sensitivity = gr.Slider(
                                 label='Coherence Sensitivity',
                                 minimum=0.1, maximum=1.0, value=0.75, step=0.05,
@@ -492,7 +602,7 @@ class AdeptSamplerForge(scripts.Script):
 
                     with gr.TabItem("Detail Enhancement"):
                         gr.Markdown("### Detail Enhancement Settings")
-                        self.use_enhanced_detail_phase = gr.Checkbox(label="Enable Detail Enhancement", value=True, info="Separates and enhances high-frequency details during sampling. Works with all schedulers.")
+                        self.use_enhanced_detail_phase = gr.Checkbox(label="Enable Detail Enhancement", value=True, info="Separates and enhances high-frequency details during sampling. Works with ALL samplers and schedulers via model wrapper.")
 
                         with gr.Group(visible=True) as enhancer_settings:
                             self.detail_enhancement_strength = gr.Slider(label="Detail Enhancement Strength", minimum=0.0, maximum=1.0, value=0.05, step=0.05)
@@ -766,7 +876,7 @@ class AdeptSamplerForge(scripts.Script):
             print("🔄 Using standard sampler")
             return
     
-    def sample_enhanced_euler_ancestral(self, model, x, sigmas, extra_args=None, callback=None, disable=None, eta=1., s_noise=1., generator=None):
+    def sample_enhanced_euler_ancestral(self, model, x, sigmas, extra_args=None, callback=None, disable=None, eta=1., s_noise=1., generator=None, skip_schedule_override=False):
         """Simplified custom Euler Ancestral with dynamic thresholding, focused on AOS."""
         # --- Read settings from global config to ensure they are always correct ---
         use_enhanced_detail_phase = current_sampler_settings.get('use_enhanced_detail_phase', True)
@@ -775,10 +885,11 @@ class AdeptSamplerForge(scripts.Script):
         cfg_zeroed_reported = False
 
         # --- Sigma Schedule Override ---
+        # Skip if already processed by global wrapper (to avoid double processing)
         final_sigmas = sigmas
         is_custom_scheduler = custom_scheduler_type != 'None'
 
-        if is_custom_scheduler and not current_sampler_settings.get('debug_reproducibility', False):
+        if not skip_schedule_override and is_custom_scheduler and not current_sampler_settings.get('debug_reproducibility', False):
             print(f"🔬 Overriding sigma schedule with Custom Scheduler: {custom_scheduler_type}.")
             if len(sigmas) > 1:
                 sigma_args = (sigmas[0], sigmas[-2], len(sigmas) - 1, sigmas.device)
@@ -809,14 +920,14 @@ class AdeptSamplerForge(scripts.Script):
                             )
                         else:
                             final_sigmas = scheduler_map[custom_scheduler_type](*sigma_args)
-        elif current_sampler_settings.get('use_entropic_scheduler', False) and not current_sampler_settings.get('debug_reproducibility', False):
+        elif not skip_schedule_override and current_sampler_settings.get('use_entropic_scheduler', False) and not current_sampler_settings.get('debug_reproducibility', False):
             print("🔄 Overriding sigma schedule with Entropic Time Scheduler.")
             power = current_sampler_settings.get('entropic_scheduler_power', 3.0)
             if len(sigmas) > 1:
                 final_sigmas = self.create_entropic_sigmas(
                     sigmas[0], sigmas[-2], len(sigmas) - 1, power, sigmas.device
                 )
-        elif current_sampler_settings.get('use_anime_schedule', False) and not current_sampler_settings.get('debug_reproducibility', False):
+        elif not skip_schedule_override and current_sampler_settings.get('use_anime_schedule', False) and not current_sampler_settings.get('debug_reproducibility', False):
             if current_sampler_settings.get('use_anime_schedule_v', False):
                 print("🎨 Overriding sigma schedule with Anime-Optimized Schedule (AOS-V).")
                 if len(sigmas) > 1:
@@ -852,11 +963,11 @@ class AdeptSamplerForge(scripts.Script):
                 print("🧠 Pacing: Disabled automatically for low step count (< 26) to ensure quality.")
                 use_pacing = False
             elif total_steps <= 40:
-                print("🧠 Pacing: Using conservative single-step pacing for medium step count (<= 40).")
-                pacing_step_size = 1
+                print("🧠 Pacing: Using coherence check every step for medium step count (<= 40).")
+                coherence_check_interval = 1
             else:
-                print("🧠 Pacing: Using aggressive double-step pacing for high step count (> 40).")
-                pacing_step_size = 2
+                print("🧠 Pacing: Using coherence check every 2 steps for high step count (> 40).")
+                coherence_check_interval = 2
 
         if use_pacing:
             is_coherent = False
@@ -922,6 +1033,10 @@ class AdeptSamplerForge(scripts.Script):
                 fallback_step_pct = 0.4 + 0.3 * min(1.0, (total_steps - 20) / 40.0)
 
                 # --- Composition Phase ---
+                # BUG FIX: Previously used pacing_step_size to skip sigma values (i += pacing_step_size),
+                # which caused fewer steps to be performed than requested and unreliable coherence detection.
+                # Now we always go through all sigmas sequentially (i += 1) and only reduce coherence
+                # check frequency for performance. Callbacks now report correct iteration count.
                 print("🧠 Pacing: Starting composition phase...")
                 i = 0
                 
@@ -930,16 +1045,15 @@ class AdeptSamplerForge(scripts.Script):
                     last_composition_sigma_idx = i
                     
                     current_sigma = original_sigmas[i]
-                    next_sigma_idx = min(i + pacing_step_size, total_steps)
-                    next_sigma = original_sigmas[next_sigma_idx]
+                    next_sigma = original_sigmas[i + 1]
 
                     if current_sigma < next_sigma: break
 
                     current_extra_args = extra_args.copy()
-                    if exp_cfg_to_zero and (i / total_steps) >= 0.4:
+                    if exp_cfg_to_zero and (composition_steps_taken / total_steps) >= 0.4:
                         if 'cond_scale' in current_extra_args and current_extra_args['cond_scale'] != 0.0:
                             if not cfg_zeroed_reported:
-                                print(f"⚡ Experimental: CFG to Zero active at step {i+1}/{total_steps}. Overriding CFG from {current_extra_args['cond_scale']} to 0.0.")
+                                print(f"⚡ Experimental: CFG to Zero active at step {composition_steps_taken}/{total_steps}. Overriding CFG from {current_extra_args['cond_scale']} to 0.0.")
                                 cfg_zeroed_reported = True
                             current_extra_args['cond_scale'] = 0.0
 
@@ -949,24 +1063,28 @@ class AdeptSamplerForge(scripts.Script):
                     last_composition_derivative = derivative
                     
                     # --- Coherence Calculation ---
-                    variance = torch.var(derivative.flatten(1), dim=1).mean().item()
+                    # Only check coherence at specified intervals for performance
+                    if composition_steps_taken % coherence_check_interval == 0 and composition_steps_taken >= 2:
+                        variance = torch.var(derivative.flatten(1), dim=1).mean().item()
 
-                    if composition_steps_taken == 2:
-                        # Establish a stable baseline variance after the initial large drop from pure noise.
-                        initial_variance = variance
-                    elif composition_steps_taken > 2 and initial_variance is not None:
-                        # Start checking for coherence against the post-drop baseline.
-                        sensitivity = current_sampler_settings.get('pacing_coherence_sensitivity', 0.75)
+                        if initial_variance is None:
+                            # Establish a stable baseline variance after the initial large drop from pure noise.
+                            # This happens at the first coherence check after step 2.
+                            initial_variance = variance
+                            print(f"🧠 Pacing: Baseline variance established at step {composition_steps_taken}: {variance:.6f}")
+                        else:
+                            # Start checking for coherence against the post-drop baseline.
+                            sensitivity = current_sampler_settings.get('pacing_coherence_sensitivity', 0.75)
+                            
+                            threshold_percentage = sensitivity * 0.4 + 0.5
+                            coherence_threshold = initial_variance * threshold_percentage
                         
-                        threshold_percentage = sensitivity * 0.4 + 0.5
-                        coherence_threshold = initial_variance * threshold_percentage
-                    
-                        if variance < coherence_threshold:
-                            print(f"🧠 Pacing: Coherence achieved at iteration {composition_steps_taken} (Sigma Step {i}). Rescheduling detail phase.")
-                            is_coherent = True
-                            break
+                            if variance < coherence_threshold:
+                                print(f"🧠 Pacing: Coherence achieved at iteration {composition_steps_taken} (Sigma Step {i}). Variance: {variance:.6f}, Threshold: {coherence_threshold:.6f}. Rescheduling detail phase.")
+                                is_coherent = True
+                                break
 
-                    if callback is not None: callback({'x': x, 'i': i, 'sigma': original_sigmas[i], 'sigma_hat': original_sigmas[i], 'denoised': denoised})
+                    if callback is not None: callback({'x': x, 'i': composition_steps_taken - 1, 'sigma': original_sigmas[i], 'sigma_hat': original_sigmas[i], 'denoised': denoised})
                     
                     sigma_down, sigma_up = self.get_ancestral_step(current_sigma, next_sigma, eta)
                     dt = sigma_down - current_sigma
@@ -988,7 +1106,7 @@ class AdeptSamplerForge(scripts.Script):
 
                     if next_sigma > 0: x = x + noise_sampler(current_sigma, next_sigma) * s_noise * sigma_up
                     
-                    i = next_sigma_idx
+                    i += 1  # Always increment by 1 - go through all sigmas sequentially
                 
                 sigma_idx_at_switch = i
 
