@@ -239,7 +239,15 @@ def sample_adept_solver(model, x, sigmas, extra_args=None, callback=None, disabl
         # Compute derivative in log-SNR space for better numerical properties
         # Inspired by DPM-Solver-v3's optimal parameterization
         d = to_d(x, sigma, denoised)
-        
+
+        # Additional safety check for extreme derivatives
+        if torch.isnan(d).any() or torch.isinf(d).any() or torch.abs(d).max() > 1000.0:
+            print(f"⚠️ Extreme derivative detected at step {i}/{len(sigmas)-1}. Clamping for stability.")
+            d = torch.clamp(d, -100.0, 100.0)
+            # If still problematic, use a more conservative fallback
+            if torch.isnan(d).any() or torch.isinf(d).any():
+                d = torch.zeros_like(d)
+
         # Store for multistep
         model_outputs.append((sigma, d))
         if len(model_outputs) > order:
@@ -309,8 +317,16 @@ def sample_adept_solver(model, x, sigmas, extra_args=None, callback=None, disabl
             
             if extra_args.get('cond_scale', 1.0) > 7.0:
                 denoised_pred = apply_dynamic_thresholding(denoised_pred, percentile=0.995)
-            
+
             d_pred = to_d(x_pred, sigma_next, denoised_pred)
+
+            # Additional safety check for corrector derivatives
+            if torch.isnan(d_pred).any() or torch.isinf(d_pred).any() or torch.abs(d_pred).max() > 1000.0:
+                print(f"⚠️ Extreme corrector derivative detected at step {i}/{len(sigmas)-1}. Clamping for stability.")
+                d_pred = torch.clamp(d_pred, -100.0, 100.0)
+                # If still problematic, use a more conservative fallback
+                if torch.isnan(d_pred).any() or torch.isinf(d_pred).any():
+                    d_pred = torch.zeros_like(d_pred)
             
             # Corrector: trapezoidal rule (combines predictor and corrector derivatives)
             dt = sigma_next - sigma
@@ -320,10 +336,15 @@ def sample_adept_solver(model, x, sigmas, extra_args=None, callback=None, disabl
         
         # Safety check for numerical stability
         if torch.isnan(x).any() or torch.isinf(x).any():
+            cfg_scale = extra_args.get('cond_scale', 1.0)
             print(f"⚠️ Adept Solver: NaN/Inf detected at step {i}/{len(sigmas)-1}!")
             print(f"   Sigma: {sigma.item():.4f} → {sigma_next.item():.4f}")
+            print(f"   CFG Scale: {cfg_scale}")
+            print(f"   Dynamic thresholding active: {cfg_scale > 7.0}")
             print(f"   This usually indicates numerical instability.")
             print(f"   Try: Lower order (1-2), disable corrector, or use fewer steps.")
+            if cfg_scale > 7.0:
+                print(f"   High CFG detected - try reducing CFG scale or disabling dynamic thresholding.")
             # Clamp to reasonable range to allow generation to complete
             x = torch.nan_to_num(x, nan=0.0, posinf=1.0, neginf=-1.0)
         
@@ -342,7 +363,16 @@ def sample_adept_solver(model, x, sigmas, extra_args=None, callback=None, disabl
 
 def to_d(x, sigma, denoised):
     """Convert denoised prediction to derivative (velocity) form."""
-    return (x - denoised) / sigma.clamp(min=1e-8)
+    # Compute the difference
+    diff = x - denoised
+
+    # Additional numerical stability for high CFG scenarios
+    # Clamp extreme differences that could cause instability
+    diff_max = 100.0  # Reasonable maximum difference for image data
+    diff = torch.clamp(diff, -diff_max, diff_max)
+
+    # Compute derivative with improved numerical stability
+    return diff / sigma.clamp(min=1e-8)
 
 
 def apply_dynamic_thresholding(x, percentile=0.995, clamp_range=1.0):
@@ -350,21 +380,59 @@ def apply_dynamic_thresholding(x, percentile=0.995, clamp_range=1.0):
     Dynamic thresholding from DPM-Solver++.
     Prevents oversaturation at high CFG by adaptively clamping based on data statistics.
     """
-    # Work with a copy to avoid in-place modifications
-    x_clamped = x.clone()
-    
-    # Flatten to [batch, -1] for per-sample statistics
-    batch_size = x.shape[0]
-    x_flat = x_clamped.view(batch_size, -1)
-    
-    # Get percentile threshold for each sample
-    s = torch.quantile(torch.abs(x_flat), percentile, dim=1, keepdim=True)
-    s = torch.clamp(s, min=clamp_range)
-    
-    # Clamp and rescale
-    x_flat = torch.clamp(x_flat, -s, s) / s
-    
-    return x_flat.view(x.shape)
+    # Early exit if no thresholding needed
+    if percentile >= 1.0:
+        return x
+
+    try:
+        # Work with a copy to avoid in-place modifications
+        x_clamped = x.clone()
+
+        # Flatten to [batch, -1] for per-sample statistics
+        batch_size = x.shape[0]
+        x_flat = x_clamped.view(batch_size, -1)
+
+        # Safety check for empty or invalid tensors
+        if x_flat.numel() == 0 or torch.isnan(x_flat).all() or torch.isinf(x_flat).all():
+            return x
+
+        # Get percentile threshold for each sample
+        s = torch.quantile(torch.abs(x_flat), percentile, dim=1, keepdim=True)
+
+        # Ensure s is not too small to avoid numerical instability
+        # Use a more conservative minimum threshold
+        s_min = 2.0  # Higher minimum to be more conservative
+        s = torch.clamp(s, min=s_min)
+
+        # More conservative thresholding - only apply to extreme outliers
+        # Use a higher threshold ratio to be less aggressive
+        threshold_ratio = 3.0  # Much more conservative
+        dynamic_threshold = s * threshold_ratio
+
+        # Apply clamping to extreme values only (much more selective)
+        x_flat = torch.where(
+            torch.abs(x_flat) > dynamic_threshold,
+            torch.clamp(x_flat, -dynamic_threshold, dynamic_threshold),
+            x_flat
+        )
+
+        # Minimal rescaling - only very slight adjustment
+        # Use a much gentler scale factor
+        scale_factor = 0.95  # Very gentle scaling to preserve most of the original magnitude
+        x_flat = x_flat * scale_factor
+
+        # Final safety check
+        x_clamped = x_flat.view(x.shape)
+        if torch.isnan(x_clamped).any() or torch.isinf(x_clamped).any():
+            # If thresholding introduced NaN/Inf, fall back to original tensor
+            return x
+
+        return x_clamped
+
+    except Exception as e:
+        # If any error occurs during thresholding, return original tensor
+        print(f"⚠️ Dynamic thresholding failed: {e}. Using original tensor.")
+        return x
 
 
 def compute_compensation_ratio(r, step_idx, total_steps, base_ratio=1.0):
