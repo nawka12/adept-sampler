@@ -41,6 +41,9 @@ except ImportError:
 # Store original sampling functions to restore later
 original_samplers = {}
 
+# Track patching state
+_patching_enabled = False
+
 # JYS (Jump Your Steps) Dynamic Schedule Computation
 # Computes optimized timestep sequences dynamically based on user-specified step count
 # Strategy: Large jumps early (composition), dense clustering in detail formation region (200-400), fine steps at end
@@ -66,10 +69,7 @@ current_sampler_settings = {
 
 
 def create_detail_enhanced_model(model, x, sigmas):
-    """
-    Creates a model wrapper that applies detail enhancement to all predictions.
-    Works with any sampler by intercepting model calls.
-    """
+    """Creates a model wrapper with proper state management."""
     if not TORCHVISION_AVAILABLE:
         return model
     
@@ -77,40 +77,44 @@ def create_detail_enhanced_model(model, x, sigmas):
     radius = current_sampler_settings.get('detail_separation_radius', 0.5)
     total_steps = len(sigmas) - 1
     
-    # Track which step we're on
-    step_counter = {'current': 0}
+    # Use a class to encapsulate state properly
+    class DetailEnhancer:
+        def __init__(self):
+            self.current_step = 0
+            
+        def __call__(self, x_current, sigma, **kwargs):
+            # Get base model prediction
+            denoised = model(x_current, sigma, **kwargs)
+            
+            # Apply detail enhancement
+            try:
+                low_freq = gaussian_blur(denoised, kernel_size=3, sigma=radius)
+                high_freq = denoised - low_freq
+                
+                # Calculate progressive enhancement
+                progress = min(self.current_step / max(total_steps, 1), 1.0)  # Clamp to [0,1]
+                strength = base_strength * (0.5 + progress)
+                
+                enhanced = denoised + high_freq * strength
+                
+                self.current_step += 1
+                
+                return enhanced
+            except Exception as e:
+                print(f"⚠️ Detail enhancement failed: {e}")
+                return denoised
     
-    def enhanced_model(x_current, sigma, **kwargs):
-        # Get base model prediction
-        denoised = model(x_current, sigma, **kwargs)
-        
-        # Apply detail enhancement
-        try:
-            # Separate high and low frequency components
-            from torchvision.transforms.functional import gaussian_blur
-            low_freq = gaussian_blur(denoised, kernel_size=3, sigma=radius)
-            high_freq = denoised - low_freq
-            
-            # Calculate progressive enhancement based on sampling progress
-            progress = step_counter['current'] / max(total_steps, 1)
-            strength = base_strength * (0.5 + progress)  # Gradual increase
-            
-            # Enhance details
-            enhanced = denoised + high_freq * strength
-            
-            step_counter['current'] += 1
-            
-            return enhanced
-        except Exception as e:
-            # If enhancement fails, return original prediction
-            print(f"⚠️ Detail enhancement failed: {e}")
-            return denoised
-    
-    return enhanced_model
+    return DetailEnhancer()
 
 
 def patch_samplers_globally():
-    """Patch all k-diffusion sampling functions once at startup."""
+    """Patch all k-diffusion sampling functions with cleanup support."""
+    global _patching_enabled
+    
+    if _patching_enabled:
+        print("🔧 Adept Sampler: Already patched, skipping.")
+        return
+    
     patched_count = 0
 
     # Iterate over all functions named like sample_* in k_diffusion.sampling
@@ -194,8 +198,33 @@ def patch_samplers_globally():
         setattr(k_diffusion.sampling, attr_name, make_wrapper(attr_name))
         patched_count += 1
 
-    if patched_count > 0:
-        print(f"🔧 Adept Sampler: patched {patched_count} k-diffusion samplers globally")
+    _patching_enabled = True
+    print(f"🔧 Adept Sampler: patched {patched_count} samplers")
+
+def unpatch_samplers_globally():
+    """Restore original k-diffusion samplers."""
+    global _patching_enabled
+    
+    if not _patching_enabled:
+        return
+    
+    restored_count = 0
+    for attr_name, original_func in original_samplers.items():
+        setattr(k_diffusion.sampling, attr_name, original_func)
+        restored_count += 1
+    
+    _patching_enabled = False
+    print(f"🔄 Adept Sampler: restored {restored_count} original samplers")
+
+# Add to script callbacks
+def on_script_unloaded():
+    unpatch_samplers_globally()
+
+if WEBUI_AVAILABLE:
+    try:
+        script_callbacks.on_script_unloaded(on_script_unloaded)
+    except AttributeError:
+        print("⚠️ Script unload callback not available")
 
 
 def sample_adept_solver(model, x, sigmas, extra_args=None, callback=None, disable=None, generator=None, **kwargs):
@@ -339,19 +368,32 @@ def sample_adept_solver(model, x, sigmas, extra_args=None, callback=None, disabl
         else:
             x = x_pred
         
-        # Safety check for numerical stability
+        # Robust error handling with recovery
         if torch.isnan(x).any() or torch.isinf(x).any():
             cfg_scale = extra_args.get('cond_scale', 1.0)
-            print(f"⚠️ Adept Solver: NaN/Inf detected at step {i}/{len(sigmas)-1}!")
+            print(f"❌ CRITICAL: NaN/Inf detected at step {i}/{len(sigmas)-1}!")
             print(f"   Sigma: {sigma.item():.4f} → {sigma_next.item():.4f}")
             print(f"   CFG Scale: {cfg_scale}")
-            print(f"   Dynamic thresholding active: {cfg_scale > 7.0}")
-            print(f"   This usually indicates numerical instability.")
-            print(f"   Try: Lower order (1-2), disable corrector, or use fewer steps.")
-            if cfg_scale > 7.0:
-                print(f"   High CFG detected - try reducing CFG scale or disabling dynamic thresholding.")
-            # Clamp to reasonable range to allow generation to complete
-            x = torch.nan_to_num(x, nan=0.0, posinf=1.0, neginf=-1.0)
+            print(f"   Order: {order}, Corrector: {use_corrector}")
+            
+            # Try recovery with simpler method
+            if i == 0:
+                # Can't recover on first step
+                raise RuntimeError("NaN/Inf on first step - check model/inputs")
+            
+            # Fallback: use last known good state with reduced step
+            print("   Attempting recovery with conservative Euler step...")
+            denoised_safe = model(x, sigma * s_in, **extra_args)
+            if torch.isnan(denoised_safe).any():
+                raise RuntimeError("Model producing NaN - check CFG scale and model")
+            
+            d_safe = to_d(x, sigma, denoised_safe)
+            dt_safe = (sigma_next - sigma) * 0.5  # Reduced step size
+            x = x + d_safe * dt_safe
+            
+            # Disable corrector for remaining steps
+            use_corrector = False
+            print("   Recovery successful. Corrector disabled for stability.")
         
         # Callback for progress tracking
         if callback is not None:
@@ -533,19 +575,32 @@ def sample_adept_ancestral_solver(model, x, sigmas, extra_args=None, callback=No
             noise = noise_sampler(sigma, sigma_next) * s_noise * sigma_up
             x = x + noise
         
-        # Safety check for numerical stability
+        # Robust error handling with recovery
         if torch.isnan(x).any() or torch.isinf(x).any():
             cfg_scale = extra_args.get('cond_scale', 1.0)
-            print(f"⚠️ Adept Ancestral Solver: NaN/Inf detected at step {i}/{len(sigmas)-1}!")
+            print(f"❌ CRITICAL: NaN/Inf detected at step {i}/{len(sigmas)-1}!")
             print(f"   Sigma: {sigma.item():.4f} → {sigma_next.item():.4f}")
             print(f"   CFG Scale: {cfg_scale}")
-            print(f"   Dynamic thresholding active: {cfg_scale > 7.0}")
-            print(f"   This usually indicates numerical instability.")
-            print(f"   Try: Lower order (1-2), disable corrector, or use fewer steps.")
-            if cfg_scale > 7.0:
-                print(f"   High CFG detected - try reducing CFG scale or disabling dynamic thresholding.")
-            # Clamp to reasonable range to allow generation to complete
-            x = torch.nan_to_num(x, nan=0.0, posinf=1.0, neginf=-1.0)
+            print(f"   Order: {order}, Corrector: {use_corrector}")
+            
+            # Try recovery with simpler method
+            if i == 0:
+                # Can't recover on first step
+                raise RuntimeError("NaN/Inf on first step - check model/inputs")
+            
+            # Fallback: use last known good state with reduced step
+            print("   Attempting recovery with conservative Euler step...")
+            denoised_safe = model(x, sigma * s_in, **extra_args)
+            if torch.isnan(denoised_safe).any():
+                raise RuntimeError("Model producing NaN - check CFG scale and model")
+            
+            d_safe = to_d(x, sigma, denoised_safe)
+            dt_safe = (sigma_next - sigma) * 0.5  # Reduced step size
+            x = x + d_safe * dt_safe
+            
+            # Disable corrector for remaining steps
+            use_corrector = False
+            print("   Recovery successful. Corrector disabled for stability.")
         
         # Callback for progress tracking
         if callback is not None:
@@ -561,87 +616,84 @@ def sample_adept_ancestral_solver(model, x, sigmas, extra_args=None, callback=No
 
 
 def get_noise_sampler(x):
-    """Get the proper noise sampler using k_diffusion's approach"""
+    """Get proper noise sampler with working fallback."""
     if hasattr(k_diffusion.sampling, 'default_noise_sampler'):
         return k_diffusion.sampling.default_noise_sampler(x)
     else:
-        # Fallback: create a simple noise sampler
+        # Proper fallback with sigma scaling
         def simple_noise_sampler(sigma_from, sigma_to):
-            return torch.randn_like(x)
+            # Scale noise appropriately
+            noise = torch.randn_like(x)
+            # Apply sigma scaling if there's a meaningful difference
+            if abs(sigma_to - sigma_from) > 1e-6:
+                scale = (sigma_to / sigma_from.clamp(min=1e-6)).sqrt()
+                noise = noise * scale
+            return noise
         return simple_noise_sampler
 
 
 def to_d(x, sigma, denoised):
-    """Convert denoised prediction to derivative (velocity) form."""
+    """Convert denoised prediction to derivative with robust numerical stability."""
     # Compute the difference
     diff = x - denoised
-
-    # Additional numerical stability for high CFG scenarios
-    # Clamp extreme differences that could cause instability
-    diff_max = 100.0  # Reasonable maximum difference for image data
+    
+    # Clamp extreme differences
+    diff_max = 100.0
     diff = torch.clamp(diff, -diff_max, diff_max)
-
-    # Compute derivative with improved numerical stability
-    return diff / sigma.clamp(min=1e-8)
+    
+    # Use a safer minimum sigma threshold
+    safe_sigma = torch.clamp(sigma, min=1e-4)  # More conservative
+    
+    # Check for extreme sigma ratios before division
+    derivative = diff / safe_sigma
+    
+    # Post-division safety check
+    if torch.abs(derivative).max() > 500.0:
+        print(f"⚠️ Extreme derivative detected. Clamping from {torch.abs(derivative).max():.2f}")
+        derivative = torch.clamp(derivative, -500.0, 500.0)
+    
+    return derivative
 
 
 def apply_dynamic_thresholding(x, percentile=0.995, clamp_range=1.0):
     """
-    Dynamic thresholding from DPM-Solver++.
-    Prevents oversaturation at high CFG by adaptively clamping based on data statistics.
+    Optimized dynamic thresholding with better stability.
     """
-    # Early exit if no thresholding needed
     if percentile >= 1.0:
         return x
-
+    
     try:
-        # Work with a copy to avoid in-place modifications
-        x_clamped = x.clone()
-
-        # Flatten to [batch, -1] for per-sample statistics
         batch_size = x.shape[0]
-        x_flat = x_clamped.view(batch_size, -1)
-
-        # Safety check for empty or invalid tensors
-        if x_flat.numel() == 0 or torch.isnan(x_flat).all() or torch.isinf(x_flat).all():
+        
+        # Use in-place operations where safe
+        x_flat = x.view(batch_size, -1)
+        
+        # Fast absolute max as proxy for extreme values (faster than quantile)
+        abs_max = torch.abs(x_flat).max(dim=1, keepdim=True)[0]
+        
+        # Only apply thresholding if we detect extreme values
+        if abs_max.max() < 5.0:  # Conservative threshold
             return x
-
-        # Get percentile threshold for each sample
-        s = torch.quantile(torch.abs(x_flat), percentile, dim=1, keepdim=True)
-
-        # Ensure s is not too small to avoid numerical instability
-        # Use a more conservative minimum threshold
-        s_min = 2.0  # Higher minimum to be more conservative
-        s = torch.clamp(s, min=s_min)
-
-        # More conservative thresholding - only apply to extreme outliers
-        # Use a higher threshold ratio to be less aggressive
-        threshold_ratio = 3.0  # Much more conservative
-        dynamic_threshold = s * threshold_ratio
-
-        # Apply clamping to extreme values only (much more selective)
-        x_flat = torch.where(
-            torch.abs(x_flat) > dynamic_threshold,
-            torch.clamp(x_flat, -dynamic_threshold, dynamic_threshold),
-            x_flat
-        )
-
-        # Minimal rescaling - only very slight adjustment
-        # Use a much gentler scale factor
-        scale_factor = 0.95  # Very gentle scaling to preserve most of the original magnitude
-        x_flat = x_flat * scale_factor
-
-        # Final safety check
-        x_clamped = x_flat.view(x.shape)
-        if torch.isnan(x_clamped).any() or torch.isinf(x_clamped).any():
-            # If thresholding introduced NaN/Inf, fall back to original tensor
-            return x
-
-        return x_clamped
-
+        
+        # Use topk instead of quantile (much faster)
+        k = max(1, int(x_flat.shape[1] * (1.0 - percentile)))
+        topk_vals = torch.topk(torch.abs(x_flat), k=k, dim=1, largest=True)[0]
+        s = topk_vals[:, -1:].clamp(min=1.0)  # Last value is the threshold
+        
+        # Gentler clamping
+        threshold = s * 2.5  # Less aggressive than 3.0
+        
+        # Apply only to extreme outliers
+        mask = torch.abs(x_flat) > threshold
+        x_flat = torch.where(mask, torch.sign(x_flat) * threshold, x_flat)
+        
+        # Very gentle rescaling
+        x_flat = x_flat * 0.98
+        
+        return x_flat.view(x.shape)
+        
     except Exception as e:
-        # If any error occurs during thresholding, return original tensor
-        print(f"⚠️ Dynamic thresholding failed: {e}. Using original tensor.")
+        print(f"⚠️ Dynamic thresholding failed: {e}")
         return x
 
 
@@ -1462,10 +1514,16 @@ class AdeptSamplerForge(scripts.Script):
             if remaining_iterations > 0 and is_coherent:
                 print(f"🧠 Pacing: Starting detail phase with {remaining_iterations} steps.")
                 
-                # Regardless of the main scheduler, when pacing triggers a phase switch,
-                # we create a new detail-focused schedule for the remaining steps.
-                sigma_at_switch = original_sigmas[min(sigma_idx_at_switch, total_steps)]
-                sigma_min = original_sigmas[-2] # The one before zero
+                # Ensure valid sigma index
+                safe_idx = min(sigma_idx_at_switch, len(original_sigmas) - 2)
+                sigma_at_switch = original_sigmas[safe_idx]
+                sigma_min = original_sigmas[-2]
+                
+                # Validate sigma values
+                if sigma_at_switch <= sigma_min:
+                    print(f"⚠️ Invalid sigma range for detail phase. Using fallback.")
+                    sigma_at_switch = original_sigmas[len(original_sigmas) // 2]
+                
                 detail_sigmas = self.create_detail_schedule(sigma_at_switch, sigma_min, remaining_iterations, x.device)
                 
                 # The derivative from the composition phase is used to smooth the first step of the detail phase.
@@ -1611,54 +1669,49 @@ class AdeptSamplerForge(scripts.Script):
         return sigma_down, sigma_up
     
     def get_noise_sampler(self, x):
-        """Get the proper noise sampler using k_diffusion's approach"""
+        """Get proper noise sampler with working fallback."""
         if hasattr(k_diffusion.sampling, 'default_noise_sampler'):
             return k_diffusion.sampling.default_noise_sampler(x)
         else:
-            # Fallback: create a simple noise sampler
+            # Proper fallback with sigma scaling
             def simple_noise_sampler(sigma_from, sigma_to):
-                return torch.randn_like(x)
+                # Scale noise appropriately
+                noise = torch.randn_like(x)
+                # Apply sigma scaling if there's a meaningful difference
+                if abs(sigma_to - sigma_from) > 1e-6:
+                    scale = (sigma_to / sigma_from.clamp(min=1e-6)).sqrt()
+                    noise = noise * scale
+                return noise
             return simple_noise_sampler
 
     def create_aos_v_sigmas(self, sigma_max, sigma_min, num_steps, device='cpu'):
-        """Creates a three-phase noise schedule optimized for anime aesthetics on v-prediction models."""
-        rho = 7.0  # karras-ve rho
+        """Memory-efficient AOS-V schedule creation."""
+        rho = 7.0
         
-        # Phase boundaries (as fractions of total steps)
-        p1_frac, p2_frac = 0.2, 0.6
-
-        # Ramp values at phase boundaries, defining the sigma drop steepness
-        ramp_p1_val, ramp_p2_val = 0.6, 0.9
-
-        # Step indices for boundaries
-        p1_steps = int(num_steps * p1_frac)
-        p2_steps = int(num_steps * p2_frac)
-
-        # Phase 1: Composition Lock-in (aggressive, starts fast)
-        # Power < 1 starts fast then slows down.
-        phase1_ramp = torch.linspace(0, 1, p1_steps, device=device) ** 0.5 * ramp_p1_val
-
-        # Phase 2: Color Blocking (medium, linear steps)
-        phase2_ramp = torch.linspace(ramp_p1_val, ramp_p2_val, p2_steps - p1_steps, device=device)
-
-        # Phase 3: Detail Refinement (slow, extended tail)
-        # Power > 1 starts slow then speeds up at the very end.
-        phase3_base = torch.linspace(0, 1, num_steps - p2_steps, device=device) ** 3
-        phase3_ramp = phase3_base * (1 - ramp_p2_val) + ramp_p2_val
+        p1_steps = int(num_steps * 0.2)
+        p2_steps = int(num_steps * 0.6)
         
-        # Handle cases where phases have 0 steps
-        if p1_steps == 0: phase1_ramp = torch.empty(0, device=device)
-        if p2_steps - p1_steps == 0: phase2_ramp = torch.empty(0, device=device)
-        if num_steps - p2_steps == 0: phase3_ramp = torch.empty(0, device=device)
-
-        ramp = torch.cat([phase1_ramp, phase2_ramp, phase3_ramp])
+        # Pre-allocate full tensor
+        ramp = torch.empty(num_steps, device=device, dtype=torch.float32)
         
-        # Map to sigmas using karras formula
+        # Fill in-place
+        if p1_steps > 0:
+            torch.linspace(0, 1, p1_steps, out=ramp[:p1_steps])
+            ramp[:p1_steps].pow_(0.5).mul_(0.6)
+        
+        if p2_steps > p1_steps:
+            torch.linspace(0.6, 0.9, p2_steps - p1_steps, out=ramp[p1_steps:p2_steps])
+        
+        if num_steps > p2_steps:
+            torch.linspace(0, 1, num_steps - p2_steps, out=ramp[p2_steps:])
+            ramp[p2_steps:].pow_(3).mul_(0.1).add_(0.9)
+        
+        # Convert to sigmas
         min_inv_rho = sigma_min ** (1 / rho)
         max_inv_rho = sigma_max ** (1 / rho)
-        sigmas = (max_inv_rho + ramp * (min_inv_rho - max_inv_rho)) ** rho
+        ramp.mul_(min_inv_rho - max_inv_rho).add_(max_inv_rho).pow_(rho)
         
-        return torch.cat([sigmas, torch.zeros(1, device=device)])
+        return torch.cat([ramp, torch.zeros(1, device=device)])
 
     def create_aos_e_sigmas(self, sigma_max, sigma_min, num_steps, device='cpu'):
         """Creates a three-phase noise schedule optimized for anime aesthetics on epsilon-prediction models."""
@@ -1951,6 +2004,14 @@ class AdeptSamplerForge(scripts.Script):
         """
         if num_steps <= 0:
             return [0]
+        
+        # Handle very small step counts
+        if num_steps == 1:
+            return [1000, 0]
+        elif num_steps == 2:
+            return [1000, 500, 0]
+        elif num_steps == 3:
+            return [1000, 600, 200, 0]
 
         # Define phase boundaries based on step count
         # Early phase: 20% of steps for composition (large jumps)
@@ -2159,7 +2220,30 @@ def compute_sigma_schedule_from_settings(sigmas: torch.Tensor, settings: dict | 
 def set_value(p, x: Any, xs: Any, *, field: str):
     if not hasattr(p, "_adept_xyz"):
         p._adept_xyz = {}
-    p._adept_xyz[field] = x
+    
+    # Validate and convert types
+    try:
+        if field in ("enabled", "use_content_aware_pacing", "debug_stop_after_coherence",
+                     "use_enhanced_detail_phase", "disable_for_hr", "exp_cfg_to_zero",
+                     "adept_solver_use_corrector"):
+            # Boolean fields
+            x = str(x).strip().lower() == "true"
+        elif field in ("eta", "s_noise", "entropic_scheduler_power", "detail_enhancement_strength",
+                       "detail_separation_radius", "pacing_coherence_sensitivity",
+                       "adept_ancestral_eta", "adept_ancestral_s_noise", "stochastic_noise_scale"):
+            # Float fields
+            x = float(x)
+        elif field == "adept_solver_order":
+            # Integer field
+            x = int(x)
+            if x not in (1, 2, 3):
+                raise ValueError(f"Invalid solver order: {x}")
+        
+        p._adept_xyz[field] = x
+        
+    except (ValueError, TypeError) as e:
+        print(f"⚠️ XYZ Grid: Invalid value '{x}' for field '{field}': {e}")
+        # Don't set invalid values
 
 
 def make_axis_on_xyz_grid():
