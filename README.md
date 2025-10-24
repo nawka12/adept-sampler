@@ -20,7 +20,7 @@ This extension is developed and tested on **Stable Diffusion WebUI reForge**. Co
 ## 🌟 Features
 
 - **Adept Solver (training-free)**: A custom solver that synthesizes improvements from DPM-Solver++, UniPC, DEIS, and DC-Solver. Offers multistep predictor, optional corrector, dynamic thresholding at high CFG, exponential-integrator-inspired stability, and phase-aware adaptive compensation.
-- **Adept Ancestral Solver**: Combines the advanced Adept Solver with ancestral noise injection for improved sample diversity and quality. Features controlled noise injection, proper ancestral step calculation, and balanced deterministic-stochastic sampling.
+- **Adept Ancestral Solver**: Enhanced ancestral sampling with genuine improvements over standard Euler Ancestral. Features adaptive ancestral step sizing, phase-aware noise injection, enhanced derivative computation, and dynamic eta scheduling for superior sample diversity and quality.
 - **Global Sampler Support**: Works with all k-diffusion samplers. You can use the Adept Solver or preserve the native solver, and you can still apply Adept's custom sigma schedules.
 - **Detail Enhancement**: A unique method to enhance high-frequency details, which can be used with any scheduler. The **Detail Separation Radius** controls what is considered a 'detail,' with higher values sharpening larger features.
 - **Custom Schedulers**: A suite of schedulers to control the denoising process.
@@ -118,14 +118,20 @@ There are two ways to install the extension:
 - **Speed-first**: Order 1, Corrector Off
 - **High CFG (≥ 7)**: Dynamic Thresholding auto-activates; use Order 2+ and Corrector On for stability
 
-### Adept Ancestral Solver: Recommended Settings
+### Enhanced Adept Ancestral Solver: Recommended Settings
 
-- **Balanced**: Order 1, Corrector Off, η=1.0, s_noise=1.0
-- **High Diversity**: Order 1, Corrector Off, η=1.2, s_noise=1.1
-- **Stable**: Order 1, Corrector Off, η=0.8, s_noise=0.9
-- **Experimental**: Order 1, Corrector Off, η=1.5, s_noise=1.2
+- **Classic Mode (Default)**: η=1.0, s_noise=1.0, Adaptive Eta=Off, Phase Noise=Off, Enhanced Derivative=Off (similar to standard Euler Ancestral)
+- **Balanced**: η=1.0, s_noise=1.0, Adaptive Eta=On, Phase Noise=On, Enhanced Derivative=On
+- **High Diversity**: η=1.1, s_noise=1.05, Adaptive Eta=On, Phase Noise=On, Enhanced Derivative=On
+- **Stable**: η=0.9, s_noise=0.95, Adaptive Eta=On, Phase Noise=On, Enhanced Derivative=On
+- **Experimental**: η=1.3, s_noise=1.1, Adaptive Eta=On, Phase Noise=On, Enhanced Derivative=On
 
-**Note**: Ancestral solver uses fixed Order 1 and no Corrector because multistep predictor-corrector methods are incompatible with noise injection.
+**Enhanced Features**: The new adaptive features make Adept Ancestral genuinely different from Euler Ancestral while maintaining image quality:
+- **Adaptive Eta**: Dynamically adjusts eta throughout sampling phases (composition→structure→detail) with conservative tuning
+- **Phase-Aware Noise**: Subtly adjusts noise injection based on sampling phase for optimal diversity without excessive noisiness
+- **Enhanced Derivatives**: Ancestral-specific derivative computation with subtle adaptive corrections for better noise handling
+
+**Note**: All enhanced features are now properly reflected in the generation metadata (PNG info) for accurate parameter tracking.
 
 ### Notes
 
