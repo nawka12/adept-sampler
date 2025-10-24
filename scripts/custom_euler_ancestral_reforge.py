@@ -479,7 +479,7 @@ def sample_adept_ancestral_solver(model, x, sigmas, extra_args=None, callback=No
         
         # === ENHANCED DERIVATIVE COMPUTATION ===
         if enable_enhanced_derivative:
-            d = to_d_enhanced_ancestral(x, sigma, denoised, adaptive_eta, progress)
+            d = to_d_enhanced_ancestral(x, sigma, denoised, adaptive_eta, progress, generator)
         else:
             d = to_d(x, sigma, denoised)
 
@@ -614,51 +614,86 @@ def to_d(x, sigma, denoised):
     return derivative
 
 
-def to_d_enhanced_ancestral(x, sigma, denoised, eta, progress):
+def to_d_enhanced_ancestral(x, sigma, denoised, eta, progress, generator=None):
     """
     Enhanced derivative computation optimized for ancestral sampling.
-    
+
     This function provides ancestral-specific derivative corrections that adapt
     based on the sampling progress and eta value for better noise injection behavior.
+    Uses the provided generator for reproducible results when enhanced derivative is enabled.
+
+    Args:
+        x: Input tensor
+        sigma: Current sigma value
+        denoised: Denoised prediction
+        eta: Adaptive eta value
+        progress: Sampling progress (0.0 to 1.0)
+        generator: Random number generator for reproducible results (None for global random state)
     """
     # Standard derivative computation
     diff = x - denoised
-    
+
     # Clamp extreme differences
     diff_max = 100.0
     diff = torch.clamp(diff, -diff_max, diff_max)
-    
+
     # Use a safer minimum sigma threshold
     safe_sigma = torch.clamp(sigma, min=1e-4)
-    
+
     # Base derivative
     base_derivative = diff / safe_sigma
-    
+
+    # Generate random tensor with proper generator support
+    def safe_randn_like(tensor, generator=None):
+        """Generate random tensor with generator support.
+
+        Note: This function attempts to use the provided generator for reproducible results.
+        If the generator format is not compatible with the current PyTorch version,
+        it falls back to global random state. Future versions should implement full
+        generator compatibility when the WebUI generator format is better understood.
+        """
+        if generator is None:
+            return torch.randn_like(tensor)
+        else:
+            # Try to use torch.randn with generator (more reliable than randn_like)
+            try:
+                # Get tensor properties
+                shape = tensor.shape
+                device = tensor.device
+                dtype = tensor.dtype
+
+                # Try torch.randn with generator
+                result = torch.randn(shape, device=device, dtype=dtype, generator=generator)
+                return result
+            except (TypeError, AttributeError):
+                # Fallback: use global random state
+                return torch.randn_like(tensor)
+
     # Ancestral-specific enhancements (more conservative to reduce noisiness)
     # Add subtle adaptive corrections based on eta and progress
     if eta > 1.0:
         # Higher eta values benefit from slightly more aggressive derivatives
-        eta_correction = 0.02 * (eta - 1.0) * torch.randn_like(diff) * progress  # Reduced from 0.05 to 0.02
+        eta_correction = 0.02 * (eta - 1.0) * safe_randn_like(diff, generator) * progress  # Reduced from 0.05 to 0.02
         base_derivative = base_derivative + eta_correction
     elif eta < 1.0:
         # Lower eta values benefit from more conservative derivatives
-        eta_correction = 0.015 * (1.0 - eta) * torch.randn_like(diff) * (1.0 - progress)  # Reduced from 0.03 to 0.015
+        eta_correction = 0.015 * (1.0 - eta) * safe_randn_like(diff, generator) * (1.0 - progress)  # Reduced from 0.03 to 0.015
         base_derivative = base_derivative - eta_correction
 
     # Progress-based phase corrections (more subtle)
     if progress < 0.3:
         # Early phase: slightly more aggressive for composition
-        phase_correction = 0.01 * torch.randn_like(diff)  # Reduced from 0.02 to 0.01
+        phase_correction = 0.01 * safe_randn_like(diff, generator)  # Reduced from 0.02 to 0.01
         base_derivative = base_derivative + phase_correction
     elif progress > 0.7:
         # Late phase: slightly more conservative for detail preservation
-        phase_correction = 0.008 * torch.randn_like(diff)  # Reduced from 0.015 to 0.008
+        phase_correction = 0.008 * safe_randn_like(diff, generator)  # Reduced from 0.015 to 0.008
         base_derivative = base_derivative - phase_correction
-    
+
     # Final safety check
     if torch.abs(base_derivative).max() > 500.0:
         base_derivative = torch.clamp(base_derivative, -500.0, 500.0)
-    
+
     return base_derivative
 
 

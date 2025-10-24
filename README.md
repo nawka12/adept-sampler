@@ -131,8 +131,6 @@ There are two ways to install the extension:
 - **Phase-Aware Noise**: Subtly adjusts noise injection based on sampling phase for optimal diversity without excessive noisiness
 - **Enhanced Derivatives**: Ancestral-specific derivative computation with subtle adaptive corrections for better noise handling
 
-**Note**: All enhanced features are now properly reflected in the generation metadata (PNG info) for accurate parameter tracking.
-
 ### Notes
 
 - Adept Solver is training-free and compatible with all sigma schedules (including WebUI native, AOS, Entropic, etc.).
