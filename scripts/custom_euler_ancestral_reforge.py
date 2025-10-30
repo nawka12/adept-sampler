@@ -274,10 +274,12 @@ def sample_adept_solver(model, x, sigmas, extra_args=None, callback=None, disabl
         # Inspired by DPM-Solver-v3's optimal parameterization
         d = to_d(x, sigma, denoised)
 
-        # Additional safety check for extreme derivatives
-        if torch.isnan(d).any() or torch.isinf(d).any() or torch.abs(d).max() > 1000.0:
+        # Additional safety check for extreme derivatives with adaptive threshold
+        derivative_max = torch.abs(d).max()
+        sigma_adaptive_threshold = 1000.0 * (1.0 + sigma / 10.0)
+        if torch.isnan(d).any() or torch.isinf(d).any() or derivative_max > sigma_adaptive_threshold:
             print(f"⚠️ Extreme derivative detected at step {i}/{len(sigmas)-1}. Clamping for stability.")
-            d = torch.clamp(d, -100.0, 100.0)
+            d = torch.clamp(d, -sigma_adaptive_threshold, sigma_adaptive_threshold)
             # If still problematic, use a more conservative fallback
             if torch.isnan(d).any() or torch.isinf(d).any():
                 d = torch.zeros_like(d)
@@ -438,10 +440,11 @@ def sample_adept_ancestral_solver(model, x, sigmas, extra_args=None, callback=No
     # New settings for enhanced features
     enable_adaptive_eta = current_sampler_settings.get('adept_ancestral_adaptive_eta', False)
     enable_phase_noise = current_sampler_settings.get('adept_ancestral_phase_noise', False)
+    phase_strength = current_sampler_settings.get('adept_ancestral_phase_strength', 0.5)
     enable_enhanced_derivative = current_sampler_settings.get('adept_ancestral_enhanced_derivative', False)
     
     print(f"🚀 Enhanced Adept Ancestral Solver active (η: {base_eta:.2f}, s_noise: {base_s_noise:.2f})")
-    print(f"   Adaptive Eta: {enable_adaptive_eta}, Phase Noise: {enable_phase_noise}, Enhanced Derivative: {enable_enhanced_derivative}")
+    print(f"   Adaptive Eta: {enable_adaptive_eta}, Phase Noise: {enable_phase_noise}, Phase Strength: {phase_strength:.2f}, Enhanced Derivative: {enable_enhanced_derivative}")
     
     # Get noise sampler for ancestral injection
     noise_sampler = get_noise_sampler(x)
@@ -483,10 +486,12 @@ def sample_adept_ancestral_solver(model, x, sigmas, extra_args=None, callback=No
         else:
             d = to_d(x, sigma, denoised)
 
-        # Additional safety check for extreme derivatives
-        if torch.isnan(d).any() or torch.isinf(d).any() or torch.abs(d).max() > 1000.0:
+        # Additional safety check for extreme derivatives with adaptive threshold
+        derivative_max = torch.abs(d).max()
+        sigma_adaptive_threshold = 1000.0 * (1.0 + sigma / 10.0)
+        if torch.isnan(d).any() or torch.isinf(d).any() or derivative_max > sigma_adaptive_threshold:
             print(f"⚠️ Extreme derivative detected at step {i}/{len(sigmas)-1}. Clamping for stability.")
-            d = torch.clamp(d, -100.0, 100.0)
+            d = torch.clamp(d, -sigma_adaptive_threshold, sigma_adaptive_threshold)
             if torch.isnan(d).any() or torch.isinf(d).any():
                 d = torch.zeros_like(d)
 
@@ -513,16 +518,20 @@ def sample_adept_ancestral_solver(model, x, sigmas, extra_args=None, callback=No
         # === PHASE-AWARE NOISE INJECTION ===
         if sigma_next > 0:
             if enable_phase_noise:
-                # Phase-aware noise scaling (more conservative to reduce noisiness)
-                if progress < 0.3:
-                    # Early phase - slightly more noise for diversity and composition
-                    noise_multiplier = 1.1  # Reduced from 1.2 to 1.1
-                elif progress < 0.7:
-                    # Middle phase - balanced noise for structure
-                    noise_multiplier = 1.0
+                # Phase-aware noise scaling with smooth interpolation
+                # Conservative multipliers to reduce high-CFG appearance
+                if progress < 0.25:
+                    # Early phase - subtle increase for diversity (was 1.1, now 1.05 max)
+                    target_multiplier = 1.0 + (0.05 * min(progress / 0.25, 1.0))
+                elif progress < 0.6:
+                    # Middle phase - very subtle decrease (was 1.0, now 0.98 max decrease)
+                    target_multiplier = 1.0 - (0.02 * min((progress - 0.25) / 0.35, 1.0))
                 else:
-                    # Late phase - slightly less noise for detail preservation
-                    noise_multiplier = 0.9  # Reduced from 0.8 to 0.9
+                    # Late phase - gentle detail preservation (was 0.9, now 0.95 max)
+                    target_multiplier = 1.0 - (0.05 * min((progress - 0.6) / 0.4, 1.0))
+
+                # Interpolate with phase strength for fine control
+                noise_multiplier = 1.0 + (target_multiplier - 1.0) * phase_strength
 
                 adaptive_s_noise = base_s_noise * noise_multiplier
             else:
@@ -596,20 +605,21 @@ def to_d(x, sigma, denoised):
     # Compute the difference
     diff = x - denoised
     
-    # Clamp extreme differences
-    diff_max = 100.0
-    diff = torch.clamp(diff, -diff_max, diff_max)
-    
     # Use a safer minimum sigma threshold
     safe_sigma = torch.clamp(sigma, min=1e-4)  # More conservative
     
     # Check for extreme sigma ratios before division
     derivative = diff / safe_sigma
     
-    # Post-division safety check
-    if torch.abs(derivative).max() > 500.0:
-        print(f"⚠️ Extreme derivative detected. Clamping from {torch.abs(derivative).max():.2f}")
-        derivative = torch.clamp(derivative, -500.0, 500.0)
+    # Normalize derivative by sigma to handle different prediction types (v-prediction produces larger values)
+    # Use a sigma-adaptive threshold: allow larger derivatives when sigma is large
+    sigma_adaptive_threshold = 1000.0 * (1.0 + sigma / 10.0)  # More permissive for larger sigma
+    
+    # Post-division safety check with adaptive threshold
+    derivative_max = torch.abs(derivative).max()
+    if derivative_max > sigma_adaptive_threshold:
+        print(f"⚠️ Extreme derivative detected. Clamping from {derivative_max:.2f}")
+        derivative = torch.clamp(derivative, -sigma_adaptive_threshold, sigma_adaptive_threshold)
     
     return derivative
 
@@ -633,14 +643,10 @@ def to_d_enhanced_ancestral(x, sigma, denoised, eta, progress, generator=None):
     # Standard derivative computation
     diff = x - denoised
 
-    # Clamp extreme differences
-    diff_max = 100.0
-    diff = torch.clamp(diff, -diff_max, diff_max)
-
     # Use a safer minimum sigma threshold
     safe_sigma = torch.clamp(sigma, min=1e-4)
 
-    # Base derivative
+    # Base derivative (removed diff clamping for v-prediction compatibility)
     base_derivative = diff / safe_sigma
 
     # Generate random tensor with proper generator support
@@ -690,9 +696,11 @@ def to_d_enhanced_ancestral(x, sigma, denoised, eta, progress, generator=None):
         phase_correction = 0.008 * safe_randn_like(diff, generator)  # Reduced from 0.015 to 0.008
         base_derivative = base_derivative - phase_correction
 
-    # Final safety check
-    if torch.abs(base_derivative).max() > 500.0:
-        base_derivative = torch.clamp(base_derivative, -500.0, 500.0)
+    # Final safety check with adaptive threshold for v-prediction
+    sigma_adaptive_threshold = 500.0 * (1.0 + sigma / 10.0)
+    derivative_max = torch.abs(base_derivative).max()
+    if derivative_max > sigma_adaptive_threshold:
+        base_derivative = torch.clamp(base_derivative, -sigma_adaptive_threshold, sigma_adaptive_threshold)
 
     return base_derivative
 
@@ -861,7 +869,21 @@ class AdeptSamplerForge(scripts.Script):
                             self.adept_ancestral_phase_noise = gr.Checkbox(
                                 label='Enable Phase-Aware Noise',
                                 value=False,
-                                info="Adjusts noise injection based on sampling phase. More noise early for diversity, less noise late for detail preservation."
+                                info="Adjusts noise injection based on sampling phase. More noise early for diversity, less noise late for detail preservation. Use Phase-Aware Strength to control intensity."
+                            )
+
+                            with gr.Group(visible=False) as phase_strength_group:
+                                self.adept_ancestral_phase_strength = gr.Slider(
+                                    label='Phase-Aware Strength',
+                                    minimum=0.0, maximum=1.0, value=0.5, step=0.1,
+                                    info="Controls how strongly the phase-aware noise scaling is applied. Lower values = subtler effect, less high-CFG appearance."
+                                )
+
+                            # Show/hide phase strength slider based on phase noise setting
+                            self.adept_ancestral_phase_noise.change(
+                                fn=lambda x: gr.update(visible=x),
+                                inputs=[self.adept_ancestral_phase_noise],
+                                outputs=[phase_strength_group]
                             )
                             
                             self.adept_ancestral_enhanced_derivative = gr.Checkbox(
@@ -1094,6 +1116,7 @@ class AdeptSamplerForge(scripts.Script):
             (self.adept_ancestral_s_noise, lambda p: gr.update() if p.get('adept_ancestral_s_noise') in (None, 'N/A') else float(p['adept_ancestral_s_noise'])),
             (self.adept_ancestral_adaptive_eta, lambda p: str(p.get('adept_ancestral_adaptive_eta', 'false')).lower() == 'true' if 'adept_ancestral_adaptive_eta' in p else gr.update()),
             (self.adept_ancestral_phase_noise, lambda p: str(p.get('adept_ancestral_phase_noise', 'false')).lower() == 'true' if 'adept_ancestral_phase_noise' in p else gr.update()),
+            (self.adept_ancestral_phase_strength, lambda p: gr.update() if p.get('adept_ancestral_phase_strength') in (None, 'N/A') else float(p['adept_ancestral_phase_strength'])),
             (self.adept_ancestral_enhanced_derivative, lambda p: str(p.get('adept_ancestral_enhanced_derivative', 'false')).lower() == 'true' if 'adept_ancestral_enhanced_derivative' in p else gr.update()),
         ]
 
@@ -1132,7 +1155,7 @@ class AdeptSamplerForge(scripts.Script):
             self.exp_cfg_to_zero,
             self.solver_type, self.adept_solver_order, self.adept_solver_use_corrector,
             self.adept_ancestral_eta, self.adept_ancestral_s_noise,
-            self.adept_ancestral_adaptive_eta, self.adept_ancestral_phase_noise, self.adept_ancestral_enhanced_derivative,
+            self.adept_ancestral_adaptive_eta, self.adept_ancestral_phase_noise, self.adept_ancestral_phase_strength, self.adept_ancestral_enhanced_derivative,
         ]
 
     def process_before_every_sampling(self, p, *script_args, **kwargs):
@@ -1150,7 +1173,7 @@ class AdeptSamplerForge(scripts.Script):
             exp_cfg_to_zero,
             solver_type, adept_solver_order, adept_solver_use_corrector,
             adept_ancestral_eta, adept_ancestral_s_noise,
-            adept_ancestral_adaptive_eta, adept_ancestral_phase_noise, adept_ancestral_enhanced_derivative,
+            adept_ancestral_adaptive_eta, adept_ancestral_phase_noise, adept_ancestral_phase_strength, adept_ancestral_enhanced_derivative,
         ) = script_args
 
         # --- XYZ Grid overrides (if provided) ---
@@ -1216,6 +1239,11 @@ class AdeptSamplerForge(scripts.Script):
                 adept_ancestral_adaptive_eta = str(xyz["adept_ancestral_adaptive_eta"]) == "True"
             if "adept_ancestral_phase_noise" in xyz:
                 adept_ancestral_phase_noise = str(xyz["adept_ancestral_phase_noise"]) == "True"
+            if "adept_ancestral_phase_strength" in xyz:
+                try:
+                    adept_ancestral_phase_strength = float(xyz["adept_ancestral_phase_strength"])
+                except (ValueError, TypeError):
+                    adept_ancestral_phase_strength = 0.5
             if "adept_ancestral_enhanced_derivative" in xyz:
                 adept_ancestral_enhanced_derivative = str(xyz["adept_ancestral_enhanced_derivative"]) == "True"
 
@@ -1296,6 +1324,7 @@ class AdeptSamplerForge(scripts.Script):
             'adept_ancestral_s_noise': adept_ancestral_s_noise,
             'adept_ancestral_adaptive_eta': adept_ancestral_adaptive_eta,
             'adept_ancestral_phase_noise': adept_ancestral_phase_noise,
+            'adept_ancestral_phase_strength': adept_ancestral_phase_strength,
             'adept_ancestral_enhanced_derivative': adept_ancestral_enhanced_derivative,
         })
         
@@ -1335,6 +1364,7 @@ class AdeptSamplerForge(scripts.Script):
                 'adept_ancestral_s_noise': adept_ancestral_s_noise if use_adept_ancestral_solver else 'N/A',
                 'adept_ancestral_adaptive_eta': adept_ancestral_adaptive_eta if use_adept_ancestral_solver else False,
                 'adept_ancestral_phase_noise': adept_ancestral_phase_noise if use_adept_ancestral_solver else False,
+                'adept_ancestral_phase_strength': adept_ancestral_phase_strength if use_adept_ancestral_solver else 0.5,
                 'adept_ancestral_enhanced_derivative': adept_ancestral_enhanced_derivative if use_adept_ancestral_solver else False,
             })
         else:
@@ -2306,12 +2336,13 @@ def set_value(p, x: Any, xs: Any, *, field: str):
     try:
         if field in ("enabled", "use_content_aware_pacing", "debug_stop_after_coherence",
                      "use_enhanced_detail_phase", "disable_for_hr", "exp_cfg_to_zero",
-                     "adept_solver_use_corrector"):
+                     "adept_solver_use_corrector", "adept_ancestral_adaptive_eta",
+                     "adept_ancestral_phase_noise", "adept_ancestral_enhanced_derivative"):
             # Boolean fields
             x = str(x).strip().lower() == "true"
         elif field in ("eta", "s_noise", "entropic_scheduler_power", "detail_enhancement_strength",
                        "detail_separation_radius", "pacing_coherence_sensitivity",
-                       "adept_ancestral_eta", "adept_ancestral_s_noise", "stochastic_noise_scale"):
+                       "adept_ancestral_eta", "adept_ancestral_s_noise", "adept_ancestral_phase_strength", "stochastic_noise_scale"):
             # Float fields
             x = float(x)
         elif field == "adept_solver_order":
