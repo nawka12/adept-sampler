@@ -7,7 +7,7 @@ import traceback
 
 from modules import scripts
 import gradio as gr
-import k_diffusion.sampling
+import k_diff.k_diffusion.sampling
 from functools import partial
 from typing import Any
 
@@ -117,8 +117,8 @@ def patch_samplers_globally():
     
     patched_count = 0
 
-    # Iterate over all functions named like sample_* in k_diffusion.sampling
-    for attr_name in dir(k_diffusion.sampling):
+    # Iterate over all functions named like sample_* in k_diff.k_diffusion.sampling
+    for attr_name in dir(k_diff.k_diffusion.sampling):
         if not attr_name.startswith('sample_'):
             continue
 
@@ -126,7 +126,7 @@ def patch_samplers_globally():
         if attr_name in original_samplers:
             continue
 
-        func = getattr(k_diffusion.sampling, attr_name)
+        func = getattr(k_diff.k_diffusion.sampling, attr_name)
         if not callable(func):
             continue
 
@@ -195,7 +195,7 @@ def patch_samplers_globally():
 
             return smart_wrapper
 
-        setattr(k_diffusion.sampling, attr_name, make_wrapper(attr_name))
+        setattr(k_diff.k_diffusion.sampling, attr_name, make_wrapper(attr_name))
         patched_count += 1
 
     _patching_enabled = True
@@ -210,7 +210,7 @@ def unpatch_samplers_globally():
     
     restored_count = 0
     for attr_name, original_func in original_samplers.items():
-        setattr(k_diffusion.sampling, attr_name, original_func)
+        setattr(k_diff.k_diffusion.sampling, attr_name, original_func)
         restored_count += 1
     
     _patching_enabled = False
@@ -585,8 +585,8 @@ def sample_adept_ancestral_solver(model, x, sigmas, extra_args=None, callback=No
 
 def get_noise_sampler(x):
     """Get proper noise sampler with working fallback."""
-    if hasattr(k_diffusion.sampling, 'default_noise_sampler'):
-        return k_diffusion.sampling.default_noise_sampler(x)
+    if hasattr(k_diff.k_diffusion.sampling, 'default_noise_sampler'):
+        return k_diff.k_diffusion.sampling.default_noise_sampler(x)
     else:
         # Proper fallback with sigma scaling
         def simple_noise_sampler(sigma_from, sigma_to):
@@ -1781,8 +1781,8 @@ class AdeptSamplerForge(scripts.Script):
     
     def get_noise_sampler(self, x):
         """Get proper noise sampler with working fallback."""
-        if hasattr(k_diffusion.sampling, 'default_noise_sampler'):
-            return k_diffusion.sampling.default_noise_sampler(x)
+        if hasattr(k_diff.k_diffusion.sampling, 'default_noise_sampler'):
+            return k_diff.k_diffusion.sampling.default_noise_sampler(x)
         else:
             # Proper fallback with sigma scaling
             def simple_noise_sampler(sigma_from, sigma_to):
