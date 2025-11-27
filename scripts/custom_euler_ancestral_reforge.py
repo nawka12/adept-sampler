@@ -933,6 +933,7 @@ class AdeptSamplerForge(scripts.Script):
                             "Tanh Mid-Boost",
                             "Exponential Tail",
                             "Jittered-Karras",
+                            "Hybrid JYS-Karras",
                             "Stochastic",
                             "JYS (Dynamic)",
                         ]
@@ -986,7 +987,7 @@ class AdeptSamplerForge(scripts.Script):
                         
                         gr.Markdown(
                             "**Scheduler Categories:**<br>"
-                            "▻ **Universal**: `None (use WebUI)`, `Entropic`, `Constant-Rate`, `Adaptive-Optimized`, `Cosine-Annealed`, `LogSNR-Uniform`, `Tanh Mid-Boost`, `Exponential Tail`, `Jittered-Karras`, `Stochastic`, `JYS (Dynamic)`<br>"
+                            "▻ **Universal**: `None (use WebUI)`, `Entropic`, `Constant-Rate`, `Adaptive-Optimized`, `Cosine-Annealed`, `LogSNR-Uniform`, `Tanh Mid-Boost`, `Exponential Tail`, `Jittered-Karras`, `Hybrid JYS-Karras`, `Stochastic`, `JYS (Dynamic)`<br>"
                             "▻ **V-Prediction**: `AOS-V`, `SNR-Optimized`<br>"
                             "▻ **ε-Prediction**: `AOS-ε`<br><br>"
                         )
@@ -2204,6 +2205,60 @@ class AdeptSamplerForge(scripts.Script):
 
         return unique_timesteps
 
+    def create_hybrid_jys_karras_sigmas(self, sigma_max, sigma_min, num_steps, device='cpu'):
+        """
+        Hybrid schedule that locks exposure like Jittered-Karras while retaining the
+        mid-phase detail density of JYS. Designed for Adept Ancestral @ CFG≈7 with 24–36 steps.
+        """
+        if num_steps <= 0:
+            return torch.cat([sigma_max.unsqueeze(0), torch.zeros(1, device=device)])
+
+        rho = 7.0
+
+        # Detail-focused backbone (drop trailing zero)
+        jys_sigmas = self.create_jys_sigmas(sigma_max, sigma_min, num_steps, device=device)[:-1]
+
+        # Deterministic “jittered” Karras baseline to keep exposure stable without RNG
+        indices = torch.arange(num_steps, device=device, dtype=torch.float32)
+        denom = max(1, num_steps - 1)
+        base = (indices + 0.5) / denom
+        jitter_seed = torch.sin((indices + 1) * 2.3999632)  # irrational multiple for blue-noise feel
+        jitter_strength = 0.35
+        jitter = jitter_seed * jitter_strength / denom
+        u = torch.clamp(base + jitter, 0.0, 1.0)
+
+        min_inv_rho = sigma_min ** (1 / rho)
+        max_inv_rho = sigma_max ** (1 / rho)
+        karras_sigmas = (max_inv_rho + u * (min_inv_rho - max_inv_rho)) ** rho
+
+        # Piecewise blending: start with Karras for exposure, ramp into JYS for detail
+        positions = torch.linspace(0, 1, num_steps, device=device)
+        jys_weight = torch.empty_like(positions)
+        early_mask = positions < 0.3
+        mid_mask = (positions >= 0.3) & (positions < 0.8)
+        late_mask = positions >= 0.8
+        jys_weight[early_mask] = 0.2 + 0.4 * (positions[early_mask] / 0.3)
+        jys_weight[mid_mask] = 0.6 + 0.3 * ((positions[mid_mask] - 0.3) / 0.5)
+        jys_weight[late_mask] = 0.9
+        jys_weight = jys_weight.clamp(0.2, 0.9)
+
+        log_jys = torch.log(jys_sigmas.clamp_min(1e-6))
+        log_karras = torch.log(karras_sigmas.clamp_min(1e-6))
+        log_hybrid = torch.lerp(log_karras, log_jys, jys_weight)
+
+        hybrid = torch.exp(log_hybrid)
+
+        # Late-step smoothing to prevent burn
+        smoothing = 1.0 - 0.05 * (1 - positions) ** 2
+        hybrid = hybrid * smoothing
+
+        # Enforce descending sigmas
+        for i in range(1, hybrid.shape[0]):
+            if hybrid[i] > hybrid[i - 1]:
+                hybrid[i] = hybrid[i - 1] * 0.999
+
+        return torch.cat([hybrid, torch.zeros(1, device=device)])
+
     # --- End of Experimental Schedulers and Methods ---
 
 
@@ -2223,6 +2278,7 @@ def list_supported_schedulers():
         "Tanh Mid-Boost",
         "Exponential Tail",
         "Jittered-Karras",
+        "Hybrid JYS-Karras",
         "Stochastic",
         # JYS (Jump Your Steps) - Dynamic
         "JYS (Dynamic)",
@@ -2275,6 +2331,7 @@ def compute_custom_sigma_schedule(sigmas: torch.Tensor, scheduler_name: str, *, 
         "Tanh Mid-Boost": lambda: forge.create_tanh_midboost_sigmas(sigma_max, sigma_min, num_steps, device),
         "Exponential Tail": lambda: forge.create_exponential_tail_sigmas(sigma_max, sigma_min, num_steps, device),
         "Jittered-Karras": lambda: forge.create_jittered_karras_sigmas(sigma_max, sigma_min, num_steps, device),
+        "Hybrid JYS-Karras": lambda: forge.create_hybrid_jys_karras_sigmas(sigma_max, sigma_min, num_steps, device),
         "Stochastic": lambda: forge.create_stochastic_sigmas(
             sigma_max, sigma_min, num_steps, device,
             current_sampler_settings.get('stochastic_noise_type', 'brownian'),

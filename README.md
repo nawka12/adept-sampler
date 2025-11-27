@@ -102,6 +102,7 @@ There are two ways to install the extension:
             - **Noise Scale**: 0.0–1.0 (higher = more randomness)
             - **Base Schedule**: `karras`, `uniform`, or `cosine`
         - **JYS (Dynamic)**: Dynamically optimizes timestep spacing to skip redundant steps; no additional controls.
+        - **Hybrid JYS-Karras**: Good for low step counts with higher CFG. Keeps exposure tame like Karras but still adds JYS detail.
     - **Detail Enhancement**:
         - Toggle the detail enhancer and adjust its `Strength`.
         - Use the `Detail Separation Radius` to define what counts as a "detail." Higher values sharpen larger features.
@@ -151,6 +152,7 @@ There are two ways to install the extension:
 | **Adept + Tanh Mid-Boost** | Concentrates steps near mid-range sigmas | Refining structure before high-frequency detail | CFG Scale: -1 to -2 from normal | Image not available | Emphasizes composition/structure consolidation |
 | **Adept + Exponential Tail** | Faster early lock-in, extra late-step resolution | Polishing fine detail and textures | CFG Scale: -1 to -2 from normal | Image not available | Stronger tail for late-stage refinement |
 | **Adept + Jittered-Karras** | Karras spacing with stratified jitter | Reducing resonance/banding on repetitive patterns | CFG Scale: -1 to -2 from normal | Image not available | Adds robustness via blue-noise-like jitter |
+| **Adept + Hybrid JYS-Karras** | Good for low steps with higher CFG (≈6–8) | Adept Ancestral runs around 24–36 steps | CFG Scale: 6–7, Steps: 28–36 | Image not available | Keeps exposure controlled like Karras while injecting JYS-style detail in mid/late stages |
 | **Adept + Stochastic** | Controlled randomness in timestep selection | Reducing repetitive patterns, improving diversity | CFG Scale: -1 to -2 from normal<br/>Noise Type: Brownian/Uniform/Normal<br/>Noise Scale: 0.1-0.5 | Image not available | Adds strategic randomness for better sample variety |
 | **Adept + JYS** | Non-uniform timestep skipping with dynamic jump sequence calculation | Faster inference with maintained quality, efficiency optimization | CFG Scale: -1 to -2 from normal<br/>Dynamic timestep optimization | Image not available | Reduces denoising calls by up to 60% while preserving sample quality through dynamic timestep selection |
 | **Adept Ancestral Solver** | Advanced solver with controlled noise injection | High-quality samples with improved diversity and creativity | Order: 1, Corrector: Off<br/>η: 1.0-1.2, s_noise: 1.0-1.1<br/>CFG Scale: -1 to -2 from normal | Image not available | Combines Adept Solver's stability features with ancestral noise injection (Order 1 + no Corrector required for noise compatibility) |
