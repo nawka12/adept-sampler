@@ -755,20 +755,22 @@ def sample_akashic_solver(model, x, sigmas, extra_args=None, callback=None,
             d_history.pop(0)
         
         # === SA-SOLVER STEP WITH TAU CONTROL ===
-        # Combine tau (stochasticity) with eta (noise magnitude) and SMEA (coherency)
-        effective_tau = tau * adaptive_eta  # Scale tau by eta
-        effective_s_noise = base_s_noise * smea_factor  # Apply SMEA to noise
+        # tau controls stochasticity (how much noise injection)
+        # eta controls noise magnitude within the stochastic component
+        # These should be independent, not multiplied together
+        effective_tau = tau  # Use tau directly for stochasticity control
+        effective_s_noise = base_s_noise * adaptive_eta * smea_factor  # eta affects noise magnitude
         
-        # Phase-aware noise adjustment
+        # Phase-aware noise adjustment (more conservative to preserve sharpness)
         if progress < 0.30:
             # Foundation: subtle increase for diversity
-            noise_multiplier = 1.0 + 0.05 * phase_strength
+            noise_multiplier = 1.0 + 0.03 * phase_strength  # Reduced from 0.05
         elif progress < 0.60:
-            # Structure: slightly reduced for stability
-            noise_multiplier = 1.0 - 0.02 * phase_strength
+            # Structure: very slight reduction for stability
+            noise_multiplier = 1.0 - 0.01 * phase_strength  # Reduced from 0.02
         else:
-            # Refinement: reduced to preserve details
-            noise_multiplier = 1.0 - 0.05 * phase_strength
+            # Refinement: minimal reduction to preserve detail sharpness
+            noise_multiplier = 1.0 - 0.02 * phase_strength  # Reduced from 0.05
         
         effective_s_noise *= noise_multiplier
         
