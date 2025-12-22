@@ -2056,46 +2056,87 @@ class AdeptSamplerForge(scripts.Script):
 
     def create_aos_akashic_sigmas(self, sigma_max, sigma_min, num_steps, device='cpu'):
         """
-        AkashicAOS [EXPERIMENTAL]: Three-phase noise schedule optimized for EQVAE models.
+        AkashicAOS [EXPERIMENTAL]: Advanced noise schedule with unique techniques.
         
-        Based on AOS-Epsilon but with adjustments for EQVAE characteristics:
-        - Extended refinement phase (EQVAE benefits from more detail steps)
-        - Gentler phase transitions to reduce artifacts
-        - Optimized for use with rescaleCFG
+        FUNDAMENTALLY DIFFERENT from AOS-Epsilon:
         
-        Phase distribution: 30% foundation, 30% structure, 40% refinement
+        1. COSINE-BLENDED PHASE TRANSITIONS: Smooth S-curve instead of linear jumps
+           for artifact-free phase transitions (inspired by Align Your Steps)
+        
+        2. VARIABLE RHO PER PHASE: Different Karras rho values per phase:
+           - Foundation (rho=5.0): Gentler start, more steps in high noise
+           - Structure (rho=7.0): Standard Karras stepping
+           - Refinement (rho=9.0): Aggressive detail, more steps in low noise
+        
+        3. MID-RANGE SIGMA CONCENTRATION: Extra step density around logSNR≈0
+           (the critical noise-to-signal transition) for EQVAE models
+        
+        Compatible with all solvers (Adept, Euler, DPM++, etc.)
         """
-        rho = 7.0
+        # Phase distribution: 25% foundation, 35% structure, 40% refinement
+        p1_frac, p2_frac = 0.25, 0.60
         
-        # EQVAE-optimized phases: extended refinement for better detail handling
-        p1_frac, p2_frac = 0.30, 0.60  # 30% foundation, 30% structure, 40% refinement
-        ramp_p1_val, ramp_p2_val = 0.35, 0.70  # Gentler transitions
+        p1_steps = max(1, int(num_steps * p1_frac))
+        p2_steps = max(p1_steps + 1, int(num_steps * p2_frac))
+        p3_steps = num_steps - p2_steps
         
-        p1_steps = int(num_steps * p1_frac)
-        p2_steps = int(num_steps * p2_frac)
+        # === PHASE 1: FOUNDATION (rho=5.0, gentler high-noise handling) ===
+        rho1 = 5.0  # Gentler = more steps in high noise range
+        if p1_steps > 0:
+            # Cosine-blended transition (smooth S-curve start)
+            t1 = torch.linspace(0, 1, p1_steps, device=device)
+            # Cosine blend: (1 - cos(t*π)) / 2 creates smooth S-curve
+            phase1_blend = (1 - torch.cos(t1 * math.pi)) / 2
+            
+            # Map to sigma range for phase 1 (sigma_max → mid-high)
+            sigma_p1_end = sigma_max * 0.35  # End at 35% of max
+            min1_inv_rho = sigma_p1_end ** (1 / rho1)
+            max1_inv_rho = sigma_max ** (1 / rho1)
+            phase1_sigmas = (max1_inv_rho + phase1_blend * (min1_inv_rho - max1_inv_rho)) ** rho1
+        else:
+            phase1_sigmas = torch.empty(0, device=device)
         
-        # Phase 1: Foundation (gentle quadratic start for EQVAE)
-        phase1_ramp = torch.linspace(0, 1, p1_steps, device=device) ** 1.3 * ramp_p1_val
+        # === PHASE 2: STRUCTURE (rho=7.0, standard Karras) ===
+        rho2 = 7.0  # Standard Karras stepping
+        structure_steps = p2_steps - p1_steps
+        if structure_steps > 0:
+            # Cosine-blended transition (smooth continuation)
+            t2 = torch.linspace(0, 1, structure_steps, device=device)
+            phase2_blend = (1 - torch.cos(t2 * math.pi)) / 2
+            
+            # Map to mid-range sigmas (this is where logSNR≈0 lives)
+            sigma_p2_start = sigma_max * 0.35
+            sigma_p2_end = sigma_max * 0.08  # End at 8% of max
+            min2_inv_rho = sigma_p2_end ** (1 / rho2)
+            max2_inv_rho = sigma_p2_start ** (1 / rho2)
+            phase2_sigmas = (max2_inv_rho + phase2_blend * (min2_inv_rho - max2_inv_rho)) ** rho2
+        else:
+            phase2_sigmas = torch.empty(0, device=device)
         
-        # Phase 2: Structure (smooth linear progression)
-        phase2_ramp = torch.linspace(ramp_p1_val, ramp_p2_val, p2_steps - p1_steps, device=device)
+        # === PHASE 3: REFINEMENT (rho=9.0, aggressive detail stepping) ===
+        rho3 = 9.0  # More aggressive = more steps in low noise (detail) range
+        if p3_steps > 0:
+            # Cosine-blended with extra emphasis on final steps
+            t3 = torch.linspace(0, 1, p3_steps, device=device)
+            # Use modified cosine for slightly more aggressive end
+            phase3_blend = (1 - torch.cos(t3 * math.pi * 0.9 + math.pi * 0.1)) / 2
+            phase3_blend = (phase3_blend - phase3_blend[0]) / (phase3_blend[-1] - phase3_blend[0] + 1e-8)
+            
+            # Map to low sigma range (detail refinement)
+            sigma_p3_start = sigma_max * 0.08
+            min3_inv_rho = sigma_min ** (1 / rho3)
+            max3_inv_rho = sigma_p3_start ** (1 / rho3)
+            phase3_sigmas = (max3_inv_rho + phase3_blend * (min3_inv_rho - max3_inv_rho)) ** rho3
+        else:
+            phase3_sigmas = torch.empty(0, device=device)
         
-        # Phase 3: Refinement (extended with gentler curve for EQVAE detail)
-        # Use power 0.6 (gentler than AOS-E's 0.7) for more detail steps
-        phase3_base = torch.linspace(0, 1, num_steps - p2_steps, device=device) ** 0.6
-        phase3_ramp = phase3_base * (1 - ramp_p2_val) + ramp_p2_val
+        # Concatenate all phases
+        sigmas = torch.cat([phase1_sigmas, phase2_sigmas, phase3_sigmas])
         
-        # Handle edge cases
-        if p1_steps == 0: phase1_ramp = torch.empty(0, device=device)
-        if p2_steps - p1_steps == 0: phase2_ramp = torch.empty(0, device=device)
-        if num_steps - p2_steps == 0: phase3_ramp = torch.empty(0, device=device)
-        
-        ramp = torch.cat([phase1_ramp, phase2_ramp, phase3_ramp])
-        
-        # Map to sigmas using karras formula
-        min_inv_rho = sigma_min ** (1 / rho)
-        max_inv_rho = sigma_max ** (1 / rho)
-        sigmas = (max_inv_rho + ramp * (min_inv_rho - max_inv_rho)) ** rho
+        # Ensure monotonically decreasing (numerical stability)
+        for i in range(1, len(sigmas)):
+            if sigmas[i] >= sigmas[i-1]:
+                sigmas[i] = sigmas[i-1] * 0.99
         
         return torch.cat([sigmas, torch.zeros(1, device=device)])
 
