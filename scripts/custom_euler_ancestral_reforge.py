@@ -1000,80 +1000,59 @@ class AdeptSamplerForge(scripts.Script):
             with gr.Group(visible=False) as main_options:
                 with gr.Tabs():
                     with gr.TabItem("Solver"):
-                        gr.Markdown("### Adept Solver\nReplace the WebUI's native solver (Euler, DPM++, etc.) with Adept's custom solver.")
-                        gr.Markdown("🚀 **Adept Solver** synthesizes training-free improvements from DPM-Solver++, UniPC, DEIS, and DC-Solver for enhanced quality and stability.")
-                        
                         self.solver_type = gr.Dropdown(
                             label='Solver Type',
                             value='None',
                             choices=['None', 'Adept Solver', 'Adept Ancestral Solver', 'AkashicSolver [EXPERIMENTAL]'],
-                            info="Choose the solver type. 'None' uses the WebUI's native solver. 'Adept Solver' provides deterministic multistep predictor-corrector. 'Adept Ancestral Solver' adds controlled noise injection for diversity. 'AkashicSolver' is optimized for EQVAE models with built-in rescaleCFG."
+                            info="None = WebUI's native solver. Adept = multistep predictor-corrector. Adept Ancestral = adds noise injection. AkashicSolver = optimized for EQVAE models."
                         )
                         
                         with gr.Group(visible=False) as solver_options:
-                            self.adept_solver_order = gr.Slider(
-                                label='Solver Order',
-                                minimum=1, maximum=3,
-                                value=2, step=1,
-                                info="Order of the multistep predictor. Higher = more accurate but requires more history steps. 2 is recommended. Not used with Ancestral Solver."
-                            )
-                            
-                            self.adept_solver_use_corrector = gr.Checkbox(
-                                label='Enable Corrector Step',
-                                value=True,
-                                info="Adds a corrector step (UniPC-style) for improved accuracy. Slightly slower but more stable. Not used with Ancestral Solver."
-                            )
-                            
-                            gr.Markdown(
-                                "**Key Features:**\n"
-                                "- 🎯 **Dynamic Thresholding**: Prevents oversaturation at high CFG scales (DPM-Solver++)\n"
-                                "- 🔄 **Predictor-Corrector**: Unified framework for higher accuracy (UniPC)\n"
-                                "- 📊 **Adaptive Compensation**: Phase-aware interpolation for better alignment (DC-Solver)\n"
-                                "- ⚡ **Exponential Integrator**: Better numerical stability (DEIS)\n"
-                                "- 🎨 **Three-Phase Adaptation**: Follows AOS composition→structure→detail pattern\n\n"
-                                "**Stability Tips:**\n"
-                                "- Order 1-2 recommended for most cases\n"
-                                "- Order 3 is experimental and may be unstable with some models\n"
-                                "- If you get NaN errors, try: lower order, disable corrector, or increase steps"
-                            )
+                            with gr.Row():
+                                self.adept_solver_order = gr.Slider(
+                                    label='Order',
+                                    minimum=1, maximum=3,
+                                    value=2, step=1,
+                                    info="Multistep order. 2 recommended."
+                                )
+                                self.adept_solver_use_corrector = gr.Checkbox(
+                                    label='Corrector Step',
+                                    value=True,
+                                    info="Adds UniPC-style corrector."
+                                )
                         
                         with gr.Group(visible=False) as ancestral_solver_options:
-                            gr.Markdown("### Ancestral Parameters\nControl the noise injection behavior for improved sample diversity.")
+                            with gr.Row():
+                                self.adept_ancestral_eta = gr.Slider(
+                                    label='Eta',
+                                    minimum=0.0, maximum=2.0, value=1.0, step=0.01,
+                                    info="Noise injection amount. Higher = more diversity."
+                                )
+                                self.adept_ancestral_s_noise = gr.Slider(
+                                    label='Noise Scale',
+                                    minimum=0.0, maximum=2.0, value=1.0, step=0.01,
+                                    info="Noise strength multiplier."
+                                )
                             
-                            self.adept_ancestral_eta = gr.Slider(
-                                label='Eta (Ancestral)',
-                                minimum=0.0, maximum=2.0, value=1.0, step=0.01,
-                                info="Controls the amount of ancestral noise injection. Higher values = more noise, more diversity but potentially less stability."
-                            )
-                            
-                            self.adept_ancestral_s_noise = gr.Slider(
-                                label='Noise Scale',
-                                minimum=0.0, maximum=2.0, value=1.0, step=0.01,
-                                info="Scales the noise injection strength. Higher values = stronger noise effects."
-                            )
-                            
-                            gr.Markdown("### Enhanced Features\nAdvanced adaptations that make Adept Ancestral genuinely different from Euler Ancestral.")
-                            
-                            self.adept_ancestral_adaptive_eta = gr.Checkbox(
-                                label='Enable Adaptive Eta',
-                                value=False,
-                                info="Dynamically adjusts eta throughout sampling phases. More aggressive early (composition), conservative middle (structure), slightly aggressive late (detail)."
-                            )
-                            
-                            self.adept_ancestral_phase_noise = gr.Checkbox(
-                                label='Enable Phase-Aware Noise',
-                                value=False,
-                                info="Adjusts noise injection based on sampling phase. More noise early for diversity, less noise late for detail preservation. Use Phase-Aware Strength to control intensity."
-                            )
+                            with gr.Row():
+                                self.adept_ancestral_adaptive_eta = gr.Checkbox(
+                                    label='Adaptive Eta',
+                                    value=False,
+                                    info="Phase-aware eta adjustment."
+                                )
+                                self.adept_ancestral_phase_noise = gr.Checkbox(
+                                    label='Phase-Aware Noise',
+                                    value=False,
+                                    info="Adjusts noise by phase."
+                                )
 
                             with gr.Group(visible=False) as phase_strength_group:
                                 self.adept_ancestral_phase_strength = gr.Slider(
-                                    label='Phase-Aware Strength',
+                                    label='Phase Strength',
                                     minimum=0.0, maximum=1.0, value=0.5, step=0.1,
-                                    info="Controls how strongly the phase-aware noise scaling is applied. Lower values = subtler effect, less high-CFG appearance."
+                                    info="Phase adaptation intensity."
                                 )
 
-                            # Show/hide phase strength slider based on phase noise setting
                             self.adept_ancestral_phase_noise.change(
                                 fn=lambda x: gr.update(visible=x),
                                 inputs=[self.adept_ancestral_phase_noise],
@@ -1081,63 +1060,37 @@ class AdeptSamplerForge(scripts.Script):
                             )
                             
                             self.adept_ancestral_enhanced_derivative = gr.Checkbox(
-                                label='Enable Enhanced Derivative',
+                                label='Enhanced Derivative',
                                 value=False,
-                                info="Uses ancestral-specific derivative computation with adaptive corrections based on eta and sampling progress."
-                            )
-                            
-                            gr.Markdown(
-                                "**Enhanced Ancestral Features:**\n"
-                                "- 🌊 **Adaptive Noise Injection**: Phase-aware noise scaling for optimal diversity\n"
-                                "- 🎲 **Adaptive Ancestral Steps**: Dynamic eta scheduling throughout sampling phases\n"
-                                "- 🧠 **Enhanced Derivatives**: Ancestral-specific derivative computation with adaptive corrections\n"
-                                "- 📈 **Phase Awareness**: Different behavior for composition, structure, and detail phases\n"
-                                "- ⚖️ **Balanced Sampling**: Combines deterministic solver with stochastic noise\n"
-                                "- 🔧 **Advanced Integration**: Uses Adept Solver's dynamic thresholding and stability features\n\n"
-                                "**Usage Tips:**\n"
-                                "- Start with default values (η=1.0, s_noise=1.0)\n"
-                                "- Increase η for more diversity, decrease for stability\n"
-                                "- Higher s_noise = stronger noise effects\n"
-                                "- Uses fixed Order 1 and no Corrector (multistep/corrector incompatible with noise injection)"
+                                info="Ancestral-specific derivative computation."
                             )
                         
                         with gr.Group(visible=False) as akashic_solver_options:
-                            gr.Markdown("### AkashicSolver [EXPERIMENTAL]\nOptimized ancestral sampler for SDXL/EQVAE models. Use with **external rescaleCFG** (e.g., 0.7) for EQVAE models.")
+                            gr.Markdown("⚠️ Use with **external rescaleCFG** (0.7) for EQVAE models.")
                             
-                            self.akashic_base_eta = gr.Slider(
-                                label='Base Eta',
-                                minimum=0.0, maximum=2.0, value=1.0, step=0.01,
-                                info="Base ancestral noise level. 1.0 recommended for most cases."
-                            )
+                            with gr.Row():
+                                self.akashic_base_eta = gr.Slider(
+                                    label='Eta',
+                                    minimum=0.0, maximum=2.0, value=1.0, step=0.01,
+                                    info="Base noise level."
+                                )
+                                self.akashic_s_noise = gr.Slider(
+                                    label='Noise Scale',
+                                    minimum=0.0, maximum=2.0, value=1.0, step=0.01,
+                                    info="Noise strength."
+                                )
                             
-                            self.akashic_s_noise = gr.Slider(
-                                label='Noise Scale',
-                                minimum=0.0, maximum=2.0, value=1.0, step=0.01,
-                                info="Scales the noise injection strength."
-                            )
-                            
-                            self.akashic_adaptive_eta = gr.Checkbox(
-                                label='Enable Adaptive Eta',
-                                value=True,
-                                info="Dynamically adjusts eta throughout sampling phases. Recommended for best results."
-                            )
-                            
-                            self.akashic_phase_strength = gr.Slider(
-                                label='Phase Strength',
-                                minimum=0.0, maximum=1.0, value=0.5, step=0.1,
-                                info="Controls how strongly phase-aware adaptations are applied. 0.5 is balanced."
-                            )
-                            
-                            gr.Markdown(
-                                "**Key Features:**\n"
-                                "- 🌀 **Phase-Aware Sampling**: Adaptive eta and noise for composition→structure→refinement\n"
-                                "- ⚡ **Dynamic Thresholding**: Extra stability at high CFG scales\n"
-                                "- 🎨 **EQVAE Optimized**: Tuned noise injection for better VAE compatibility\n\n"
-                                "**⚠️ IMPORTANT for EQVAE models (e.g., AkashicPulse):**\n"
-                                "- Use **external rescaleCFG at 0.7** (sampler-level rescaleCFG doesn't work)\n"
-                                "- Use with AkashicAOS scheduler\n"
-                                "- CFG Scale: 7-10, Steps: 20-30"
-                            )
+                            with gr.Row():
+                                self.akashic_adaptive_eta = gr.Checkbox(
+                                    label='Adaptive Eta',
+                                    value=True,
+                                    info="Phase-aware eta."
+                                )
+                                self.akashic_phase_strength = gr.Slider(
+                                    label='Phase Strength',
+                                    minimum=0.0, maximum=1.0, value=0.5, step=0.1,
+                                    info="Adaptation intensity."
+                                )
                         
                         def on_solver_type_change(solver_type):
                             return {
@@ -1153,7 +1106,6 @@ class AdeptSamplerForge(scripts.Script):
                         )
             
                     with gr.TabItem("Scheduler"):
-                        gr.Markdown("### Scheduler Override\nReplace the default time steps with a custom schedule.")
 
                         # Category dropdown controls the visible scheduler list
                         universal_choices = [
@@ -1219,27 +1171,22 @@ class AdeptSamplerForge(scripts.Script):
                                 info="Base timestep distribution before adding randomness."
                             )
                         
-                        gr.Markdown(
-                            "**Scheduler Categories:**<br>"
-                            "▻ **Universal**: `None (use WebUI)`, `Entropic`, `Constant-Rate`, `Adaptive-Optimized`, `Cosine-Annealed`, `LogSNR-Uniform`, `Tanh Mid-Boost`, `Exponential Tail`, `Jittered-Karras`, `Hybrid JYS-Karras`, `Stochastic`, `JYS (Dynamic)`<br>"
-                            "▻ **V-Prediction**: `AOS-V`, `SNR-Optimized`<br>"
-                            "▻ **ε-Prediction**: `AOS-ε`<br><br>"
-                        )
+
 
                         with gr.Group(visible=False) as aos_plus_options:
-                            gr.Markdown("⚠️ **Compatibility Warning:** Use the correct AOS variant for your model type. **AOS-V** is for **v-prediction** models. **AOS-ε** is for **epsilon-prediction** models. Mismatching them may break the generation.")
-                            self.use_content_aware_pacing = gr.Checkbox(label='Enable Content-Aware Pacing (Euler Ancestral + AOS Only)', value=False, info="Dynamically adjusts pacing based on image coherence. REQUIRES: Euler Ancestral sampler + AOS scheduler + higher step counts (≥26). Pacing takes priority over Adept Solver.")
-                            self.pacing_coherence_sensitivity = gr.Slider(
-                                label='Coherence Sensitivity',
-                                minimum=0.1, maximum=1.0, value=0.75, step=0.05,
-                                info="Controls when to switch from composition to detail. Higher values switch sooner."
-                            )
+                            gr.Markdown("⚠️ Match AOS variant to model type: **AOS-V** for v-prediction, **AOS-ε** for epsilon-prediction.")
+                            self.use_content_aware_pacing = gr.Checkbox(label='Content-Aware Pacing', value=False, info="Adjusts pacing by coherence. Requires Euler Ancestral + AOS + ≥26 steps.")
+                            with gr.Row():
+                                self.pacing_coherence_sensitivity = gr.Slider(
+                                    label='Coherence Sensitivity',
+                                    minimum=0.1, maximum=1.0, value=0.75, step=0.05,
+                                    info="When to switch phases."
+                                )
                             self.manual_pacing_override = gr.Textbox(
-                                label="Manual Pacing Override (JSON)",
-                                info='Advanced: Manually set phase steps. e.g., {"composition": 0.4} or {"composition": 10}',
-                                placeholder='Disabled (uses automatic pacing)'
+                                label="Manual Override (JSON)",
+                                placeholder='e.g., {"composition": 0.4}'
                             )
-                            self.debug_stop_after_coherence = gr.Checkbox(label='[Debug] Stop after coherence', value=False, info="Stops generation immediately after coherence is detected, skipping the detail phase.")
+                            self.debug_stop_after_coherence = gr.Checkbox(label='[Debug] Stop after coherence', value=False)
 
                         def on_scheduler_change(scheduler):
                             is_aos = "AOS-V" in scheduler or "AOS-ε" in scheduler
@@ -1284,15 +1231,15 @@ class AdeptSamplerForge(scripts.Script):
                             outputs=[self.scheduler_override, aos_plus_options, entropic_options, stochastic_options]
                         )
 
-                        gr.Markdown("ℹ️ **Note:** When using a custom scheduler, you may need to **lower your CFG Scale** (e.g., by 1-2 points) to prevent oversaturated or 'burnt' images.")
+
 
                     with gr.TabItem("Detail Enhancement"):
-                        gr.Markdown("### Detail Enhancement Settings")
-                        self.use_enhanced_detail_phase = gr.Checkbox(label="Enable Detail Enhancement", value=True, info="Separates and enhances high-frequency details during sampling. Works with ALL samplers and schedulers via model wrapper.")
+                        self.use_enhanced_detail_phase = gr.Checkbox(label="Enable Detail Enhancement", value=True, info="Enhances high-frequency details during sampling.")
 
                         with gr.Group(visible=True) as enhancer_settings:
-                            self.detail_enhancement_strength = gr.Slider(label="Detail Enhancement Strength", minimum=0.0, maximum=1.0, value=0.05, step=0.05)
-                            self.detail_separation_radius = gr.Slider(label="Detail Separation Radius (Sigma)", minimum=0.1, maximum=2.0, value=0.5, step=0.05, info="Controls what is considered a 'detail'. Higher values sharpen larger features.")
+                            with gr.Row():
+                                self.detail_enhancement_strength = gr.Slider(label="Strength", minimum=0.0, maximum=1.0, value=0.05, step=0.05)
+                                self.detail_separation_radius = gr.Slider(label="Radius (Sigma)", minimum=0.1, maximum=2.0, value=0.5, step=0.05, info="Higher = sharpen larger features.")
                         
                         self.use_enhanced_detail_phase.change(
                             fn=lambda x: gr.update(visible=x),
@@ -1301,24 +1248,18 @@ class AdeptSamplerForge(scripts.Script):
                         )
 
                     with gr.TabItem("Advanced"):
-                        gr.Markdown("### Advanced Noise & Solver Settings")
-                        self.eta = gr.Slider(label='Eta (Ancestral)', minimum=0.0, maximum=2.0, value=1.0, step=0.01)
-                        self.s_noise = gr.Slider(label='Noise Scale', minimum=0.0, maximum=2.0, value=1.0, step=0.01)
+                        with gr.Row():
+                            self.eta = gr.Slider(label='Eta', minimum=0.0, maximum=2.0, value=1.0, step=0.01, info="Ancestral noise amount.")
+                            self.s_noise = gr.Slider(label='Noise Scale', minimum=0.0, maximum=2.0, value=1.0, step=0.01, info="Noise strength.")
                         
-                        gr.Markdown("---")
-                        gr.Markdown("### Compatibility")
-                        self.disable_for_hr = gr.Checkbox(label="Disable for Hires. fix pass", value=True, info="Automatically turns off the Adept Sampler during the high-resolution pass.")
-
-                        gr.Markdown("---")
-                        gr.Markdown("### Debugging")
-                        self.debug_reproducibility = gr.Checkbox(label='Debug Reproducibility (disables advanced features)', value=False)
+                        self.disable_for_hr = gr.Checkbox(label="Disable for Hires. fix", value=True, info="Turns off during hi-res pass.")
+                        self.debug_reproducibility = gr.Checkbox(label='Debug Reproducibility', value=False, info="Disables advanced features.")
             
                     with gr.TabItem("Experimental"):
-                        gr.Markdown("### Experimental Features\n⚠️ Use with caution. These features may be unstable or have unintended effects.")
                         self.exp_cfg_to_zero = gr.Checkbox(
-                            label="CFG to Zero after 40% Steps",
+                            label="CFG to Zero after 40%",
                             value=False,
-                            info="Sets CFG guidance to zero after 40% of the total steps are completed. Can help with coherence but may reduce prompt adherence."
+                            info="Sets CFG to zero after 40% steps. May reduce prompt adherence."
                         )
 
             
