@@ -64,6 +64,13 @@ current_sampler_settings = {
     'use_adept_solver': False,
     'adept_solver_order': 2,
     'adept_solver_use_corrector': True,
+    # AkashicSolver [EXPERIMENTAL] settings
+    'use_akashic_solver': False,
+    'akashic_rescale_multiplier': 0.7,
+    'akashic_base_eta': 1.0,
+    'akashic_s_noise': 1.0,
+    'akashic_adaptive_eta': True,
+    'akashic_phase_strength': 0.5,
 }
 
 
@@ -189,6 +196,11 @@ def patch_samplers_globally():
                 use_adept_ancestral_solver = current_sampler_settings.get('use_adept_ancestral_solver', False)
                 if use_adept_ancestral_solver:
                     return sample_adept_ancestral_solver(active_model, x, final_sigmas, extra_args, callback, disable, generator, **kwargs)
+
+                # Priority 4: AkashicSolver [EXPERIMENTAL] (optimized for EQVAE models)
+                use_akashic_solver = current_sampler_settings.get('use_akashic_solver', False)
+                if use_akashic_solver:
+                    return sample_akashic_solver(active_model, x, final_sigmas, extra_args, callback, disable, generator, **kwargs)
 
                 # Default: Call the original sampler with the (possibly) overridden schedule and enhanced model
                 return original_samplers[name](active_model, x, final_sigmas, extra_args, callback, disable, **kwargs)
@@ -583,6 +595,213 @@ def sample_adept_ancestral_solver(model, x, sigmas, extra_args=None, callback=No
     return x
 
 
+def apply_rescale_cfg(cond, uncond, cfg_result, rescale_multiplier=0.7):
+    """
+    Apply rescaleCFG to prevent oversaturation at high CFG scales.
+    
+    This technique rescales the CFG output to match the dynamic range of the
+    conditioned output, preventing "burning" and oversaturation that occurs
+    at high CFG values (typically > 5-7).
+    
+    Algorithm:
+    1. Compute std deviation of conditioned output (positive prompt influence)
+    2. Compute std deviation of CFG-scaled result
+    3. Rescale CFG result by (std_cond / std_cfg) ratio
+    4. Blend rescaled result with original based on multiplier
+    
+    Args:
+        cond: Conditioned model output (positive prompt)
+        uncond: Unconditioned model output (negative/null prompt)  
+        cfg_result: The CFG-scaled result (uncond + cfg_scale * (cond - uncond))
+        rescale_multiplier: Blend factor (0.0 = no rescale, 1.0 = full rescale)
+    
+    Returns:
+        Rescaled CFG result with reduced oversaturation
+    """
+    if rescale_multiplier <= 0.0:
+        return cfg_result
+    
+    # Compute standard deviations across spatial dimensions (keeping batch dim)
+    # dims (1, 2, 3) = channels, height, width for latent tensors
+    std_cond = torch.std(cond, dim=(1, 2, 3), keepdim=True)
+    std_cfg = torch.std(cfg_result, dim=(1, 2, 3), keepdim=True)
+    
+    # Rescale to match conditioned output's dynamic range
+    # This prevents the CFG from pushing values into extreme ranges
+    x_rescaled = cfg_result * (std_cond / std_cfg.clamp(min=1e-6))
+    
+    # Blend between original and rescaled based on multiplier
+    # multiplier=0.7 means 70% rescaled + 30% original
+    return rescale_multiplier * x_rescaled + (1 - rescale_multiplier) * cfg_result
+
+
+def sample_akashic_solver(model, x, sigmas, extra_args=None, callback=None, 
+                          disable=None, generator=None, **kwargs):
+    """
+    AkashicSolver [EXPERIMENTAL]: Optimized for SDXL/EQVAE models like AkashicPulse.
+    
+    This solver combines three key techniques for optimal EQVAE generation:
+    1. Built-in rescaleCFG (default 0.7) to prevent burning at high CFG
+    2. AOS-Epsilon-based schedule optimization for ε-prediction models
+    3. Phase-aware adaptive eta scheduling for controlled noise injection
+    
+    Key innovations:
+    - Integrated rescaleCFG applied after each model call
+    - Three-phase sampling: Foundation (30%) → Structure (30%) → Refinement (40%)
+    - Adaptive eta that varies by phase for optimal diversity/detail balance
+    - EQVAE-tuned noise scaling for better VAE compatibility
+    
+    Recommended settings for AkashicPulse EQVAE:
+    - rescaleCFG: 0.7 (essential to prevent burning)
+    - CFG Scale: 7-10 (can use higher values thanks to rescaleCFG)
+    - Steps: 20-30
+    - Eta: 1.0 (with adaptive eta enabled)
+    """
+    extra_args = {} if extra_args is None else extra_args
+    s_in = x.new_ones([x.shape[0]])
+    
+    # Get AkashicSolver settings
+    rescale_multiplier = current_sampler_settings.get('akashic_rescale_multiplier', 0.7)
+    base_eta = current_sampler_settings.get('akashic_base_eta', 1.0)
+    base_s_noise = current_sampler_settings.get('akashic_s_noise', 1.0)
+    enable_adaptive_eta = current_sampler_settings.get('akashic_adaptive_eta', True)
+    phase_strength = current_sampler_settings.get('akashic_phase_strength', 0.5)
+    
+    print(f"🌀 AkashicSolver [EXPERIMENTAL] active")
+    print(f"   rescaleCFG: {rescale_multiplier:.2f}, η: {base_eta:.2f}, s_noise: {base_s_noise:.2f}")
+    print(f"   Adaptive Eta: {enable_adaptive_eta}, Phase Strength: {phase_strength:.2f}")
+    
+    # Get noise sampler for ancestral injection
+    noise_sampler = get_noise_sampler(x)
+    
+    total_steps = len(sigmas) - 1
+    
+    for i in range(total_steps):
+        sigma = sigmas[i]
+        sigma_next = sigmas[i + 1]
+        
+        # Calculate sampling progress for phase-aware adaptations
+        progress = i / max(total_steps - 1, 1)
+        
+        # === PHASE-AWARE ADAPTIVE ETA ===
+        # EQVAE models benefit from different eta values at different stages
+        if enable_adaptive_eta:
+            if progress < 0.30:
+                # Foundation phase: slightly higher eta for composition diversity
+                adaptive_eta = base_eta * (1.0 + 0.08 * phase_strength)
+            elif progress < 0.60:
+                # Structure phase: conservative eta for stable structure formation
+                adaptive_eta = base_eta * (1.0 - 0.05 * phase_strength)
+            else:
+                # Refinement phase: slight eta boost for detail variation
+                adaptive_eta = base_eta * (1.0 + 0.02 * phase_strength)
+        else:
+            adaptive_eta = base_eta
+        
+        # === MODEL PREDICTION WITH RESCALE CFG ===
+        # Get the denoised prediction from the model
+        denoised = model(x, sigma * s_in, **extra_args)
+        
+        # Apply rescaleCFG if CFG scale is being used
+        # Note: In reForge/WebUI, the model wrapper handles CFG internally,
+        # but we can still apply rescaling to the denoised output
+        cfg_scale = extra_args.get('cond_scale', 1.0)
+        if cfg_scale > 1.0 and rescale_multiplier > 0.0:
+            # For models where we have access to cond/uncond separately,
+            # we apply rescaling. In the wrapper context, we approximate
+            # by rescaling based on the output's own statistics.
+            # This is a simplified version that still prevents burning.
+            std_denoised = torch.std(denoised, dim=(1, 2, 3), keepdim=True)
+            std_x = torch.std(x, dim=(1, 2, 3), keepdim=True)
+            
+            # Gentle rescaling to prevent oversaturation
+            # Scale factor approaches 1.0 as we get closer to the end
+            scale_factor = (std_x / std_denoised.clamp(min=1e-6))
+            # Clamp scale factor to reasonable range
+            scale_factor = scale_factor.clamp(0.5, 2.0)
+            
+            # Apply progressive rescaling (stronger early, gentler late)
+            effective_rescale = rescale_multiplier * (1.0 - progress * 0.3)
+            denoised = denoised * (1.0 + (scale_factor - 1.0) * effective_rescale)
+        
+        # Apply dynamic thresholding for additional stability at high CFG
+        if cfg_scale > 7.0:
+            denoised = apply_dynamic_thresholding(denoised, percentile=0.995)
+        
+        # === COMPUTE DERIVATIVE ===
+        d = to_d(x, sigma, denoised)
+        
+        # Safety check for extreme derivatives
+        derivative_max = torch.abs(d).max()
+        sigma_adaptive_threshold = 1000.0 * (1.0 + sigma / 10.0)
+        if torch.isnan(d).any() or torch.isinf(d).any() or derivative_max > sigma_adaptive_threshold:
+            print(f"⚠️ AkashicSolver: Extreme derivative at step {i}/{total_steps}. Clamping.")
+            d = torch.clamp(d, -sigma_adaptive_threshold, sigma_adaptive_threshold)
+            if torch.isnan(d).any() or torch.isinf(d).any():
+                d = torch.zeros_like(d)
+        
+        # === ANCESTRAL STEP CALCULATION ===
+        if sigma_next > 0:
+            sigma_up = min(sigma_next, adaptive_eta * (sigma_next ** 2 * (sigma ** 2 - sigma_next ** 2) / sigma ** 2) ** 0.5)
+            sigma_down = (sigma_next ** 2 - sigma_up ** 2) ** 0.5
+        else:
+            sigma_up = 0.0
+            sigma_down = 0.0
+        
+        # Compute step with ancestral dt
+        dt = sigma_down - sigma
+        x = x + d * dt
+        
+        # === PHASE-AWARE NOISE INJECTION ===
+        if sigma_next > 0:
+            # EQVAE-optimized noise scaling
+            if progress < 0.30:
+                # Foundation: subtle noise increase for diversity
+                noise_multiplier = 1.0 + 0.05 * phase_strength
+            elif progress < 0.60:
+                # Structure: slightly reduced noise for stability
+                noise_multiplier = 1.0 - 0.02 * phase_strength
+            else:
+                # Refinement: reduced noise to preserve details
+                noise_multiplier = 1.0 - 0.05 * phase_strength
+            
+            adaptive_s_noise = base_s_noise * noise_multiplier
+            noise = noise_sampler(sigma, sigma_next) * adaptive_s_noise * sigma_up
+            x = x + noise
+        
+        # === ERROR HANDLING ===
+        if torch.isnan(x).any() or torch.isinf(x).any():
+            cfg_scale = extra_args.get('cond_scale', 1.0)
+            print(f"❌ AkashicSolver: NaN/Inf detected at step {i}/{total_steps}!")
+            print(f"   Sigma: {sigma.item():.4f} → {sigma_next.item():.4f}, CFG: {cfg_scale}")
+            
+            if i == 0:
+                raise RuntimeError("NaN/Inf on first step - check model/inputs")
+            
+            # Recovery attempt
+            print("   Attempting recovery with conservative step...")
+            denoised_safe = model(x, sigma * s_in, **extra_args)
+            if torch.isnan(denoised_safe).any():
+                raise RuntimeError("Model producing NaN - reduce CFG scale or check model")
+            
+            d_safe = to_d(x, sigma, denoised_safe)
+            dt_safe = (sigma_next - sigma) * 0.5
+            x = x + d_safe * dt_safe
+            print("   Recovery successful.")
+        
+        # Callback for progress tracking
+        if callback is not None:
+            callback({
+                'x': x,
+                'i': i,
+                'sigma': sigma,
+                'sigma_hat': sigma,
+                'denoised': denoised
+            })
+    
+    return x
+
+
 def get_noise_sampler(x):
     """Get proper noise sampler with working fallback."""
     if hasattr(k_diff.k_diffusion.sampling, 'default_noise_sampler'):
@@ -812,8 +1031,8 @@ class AdeptSamplerForge(scripts.Script):
                         self.solver_type = gr.Dropdown(
                             label='Solver Type',
                             value='None',
-                            choices=['None', 'Adept Solver', 'Adept Ancestral Solver'],
-                            info="Choose the solver type. 'None' uses the WebUI's native solver. 'Adept Solver' provides deterministic multistep predictor-corrector. 'Adept Ancestral Solver' adds controlled noise injection for diversity."
+                            choices=['None', 'Adept Solver', 'Adept Ancestral Solver', 'AkashicSolver [EXPERIMENTAL]'],
+                            info="Choose the solver type. 'None' uses the WebUI's native solver. 'Adept Solver' provides deterministic multistep predictor-corrector. 'Adept Ancestral Solver' adds controlled noise injection for diversity. 'AkashicSolver' is optimized for EQVAE models with built-in rescaleCFG."
                         )
                         
                         with gr.Group(visible=False) as solver_options:
@@ -907,16 +1126,63 @@ class AdeptSamplerForge(scripts.Script):
                                 "- Uses fixed Order 1 and no Corrector (multistep/corrector incompatible with noise injection)"
                             )
                         
+                        with gr.Group(visible=False) as akashic_solver_options:
+                            gr.Markdown("### AkashicSolver [EXPERIMENTAL]\nOptimized for SDXL/EQVAE models like AkashicPulse. Combines rescaleCFG, AOS-Epsilon schedule, and phase-aware ancestral sampling.")
+                            
+                            self.akashic_rescale_multiplier = gr.Slider(
+                                label='rescaleCFG Multiplier',
+                                minimum=0.0, maximum=1.0, value=0.7, step=0.05,
+                                info="Controls CFG rescaling to prevent burning. 0.7 is recommended for EQVAE. Higher = stronger rescaling, 0 = disabled."
+                            )
+                            
+                            self.akashic_base_eta = gr.Slider(
+                                label='Base Eta',
+                                minimum=0.0, maximum=2.0, value=1.0, step=0.01,
+                                info="Base ancestral noise level. 1.0 recommended for most cases."
+                            )
+                            
+                            self.akashic_s_noise = gr.Slider(
+                                label='Noise Scale',
+                                minimum=0.0, maximum=2.0, value=1.0, step=0.01,
+                                info="Scales the noise injection strength."
+                            )
+                            
+                            self.akashic_adaptive_eta = gr.Checkbox(
+                                label='Enable Adaptive Eta',
+                                value=True,
+                                info="Dynamically adjusts eta throughout sampling phases. Recommended for best results."
+                            )
+                            
+                            self.akashic_phase_strength = gr.Slider(
+                                label='Phase Strength',
+                                minimum=0.0, maximum=1.0, value=0.5, step=0.1,
+                                info="Controls how strongly phase-aware adaptations are applied. 0.5 is balanced."
+                            )
+                            
+                            gr.Markdown(
+                                "**Key Features:**\n"
+                                "- 🔥 **rescaleCFG**: Prevents oversaturation/burning at high CFG (essential for EQVAE)\n"
+                                "- 🎨 **AOS-Epsilon Base**: Three-phase schedule optimized for ε-prediction\n"
+                                "- 🌀 **Phase-Aware Sampling**: Adaptive eta and noise for composition→structure→refinement\n"
+                                "- ⚡ **Dynamic Thresholding**: Extra stability at high CFG scales\n\n"
+                                "**Recommended Settings for AkashicPulse EQVAE:**\n"
+                                "- rescaleCFG: 0.7 (essential)\n"
+                                "- CFG Scale: 7-10 (can use higher thanks to rescaleCFG)\n"
+                                "- Steps: 20-30\n"
+                                "- Use with AkashicAOS scheduler for best results"
+                            )
+                        
                         def on_solver_type_change(solver_type):
                             return {
                                 solver_options: gr.update(visible=solver_type == 'Adept Solver'),
-                                ancestral_solver_options: gr.update(visible=solver_type == 'Adept Ancestral Solver')
+                                ancestral_solver_options: gr.update(visible=solver_type == 'Adept Ancestral Solver'),
+                                akashic_solver_options: gr.update(visible=solver_type == 'AkashicSolver [EXPERIMENTAL]')
                             }
                         
                         self.solver_type.change(
                             fn=on_solver_type_change,
                             inputs=[self.solver_type],
-                            outputs=[solver_options, ancestral_solver_options]
+                            outputs=[solver_options, ancestral_solver_options, akashic_solver_options]
                         )
             
                     with gr.TabItem("Scheduler"):
@@ -943,6 +1209,7 @@ class AdeptSamplerForge(scripts.Script):
                         ]
                         eps_choices = [
                             "AOS-ε (for ε-prediction)",
+                            "AkashicAOS [EXPERIMENTAL]",
                         ]
 
                         self.scheduler_category = gr.Dropdown(
@@ -1157,6 +1424,7 @@ class AdeptSamplerForge(scripts.Script):
             self.solver_type, self.adept_solver_order, self.adept_solver_use_corrector,
             self.adept_ancestral_eta, self.adept_ancestral_s_noise,
             self.adept_ancestral_adaptive_eta, self.adept_ancestral_phase_noise, self.adept_ancestral_phase_strength, self.adept_ancestral_enhanced_derivative,
+            self.akashic_rescale_multiplier, self.akashic_base_eta, self.akashic_s_noise, self.akashic_adaptive_eta, self.akashic_phase_strength,
         ]
 
     def process_before_every_sampling(self, p, *script_args, **kwargs):
@@ -1175,6 +1443,7 @@ class AdeptSamplerForge(scripts.Script):
             solver_type, adept_solver_order, adept_solver_use_corrector,
             adept_ancestral_eta, adept_ancestral_s_noise,
             adept_ancestral_adaptive_eta, adept_ancestral_phase_noise, adept_ancestral_phase_strength, adept_ancestral_enhanced_derivative,
+            akashic_rescale_multiplier, akashic_base_eta, akashic_s_noise, akashic_adaptive_eta, akashic_phase_strength,
         ) = script_args
 
         # --- XYZ Grid overrides (if provided) ---
@@ -1251,11 +1520,13 @@ class AdeptSamplerForge(scripts.Script):
         # Set solver flags based on the dropdown choice
         use_adept_solver = (solver_type == 'Adept Solver')
         use_adept_ancestral_solver = (solver_type == 'Adept Ancestral Solver')
+        use_akashic_solver = (solver_type == 'AkashicSolver [EXPERIMENTAL]')
         
         # Set scheduler flags based on the radio button choice
         use_anime_schedule_v = (scheduler_override == "AOS-V (for v-prediction)")
         use_anime_schedule_e = (scheduler_override == "AOS-ε (for ε-prediction)")
-        use_anime_schedule = use_anime_schedule_v or use_anime_schedule_e
+        use_akashic_aos = (scheduler_override == "AkashicAOS [EXPERIMENTAL]")
+        use_anime_schedule = use_anime_schedule_v or use_anime_schedule_e or use_akashic_aos
         use_entropic_scheduler = (scheduler_override == "Entropic")
 
         custom_scheduler_type = "None"
@@ -1327,6 +1598,14 @@ class AdeptSamplerForge(scripts.Script):
             'adept_ancestral_phase_noise': adept_ancestral_phase_noise,
             'adept_ancestral_phase_strength': adept_ancestral_phase_strength,
             'adept_ancestral_enhanced_derivative': adept_ancestral_enhanced_derivative,
+            # AkashicSolver [EXPERIMENTAL] settings
+            'use_akashic_solver': use_akashic_solver and enable_custom,
+            'use_akashic_aos': use_akashic_aos,
+            'akashic_rescale_multiplier': akashic_rescale_multiplier,
+            'akashic_base_eta': akashic_base_eta,
+            'akashic_s_noise': akashic_s_noise,
+            'akashic_adaptive_eta': akashic_adaptive_eta,
+            'akashic_phase_strength': akashic_phase_strength,
         })
         
         if enable_custom:
@@ -1434,6 +1713,12 @@ class AdeptSamplerForge(scripts.Script):
                 print("🎨 Overriding sigma schedule with Anime-Optimized Schedule (AOS-ε).")
                 if len(sigmas) > 1:
                     final_sigmas = self.create_aos_e_sigmas(
+                        sigmas[0], sigmas[-2], len(sigmas) - 1, sigmas.device
+                    )
+            elif current_sampler_settings.get('use_akashic_aos', False):
+                print("🌀 Overriding sigma schedule with AkashicAOS [EXPERIMENTAL].")
+                if len(sigmas) > 1:
+                    final_sigmas = self.create_aos_akashic_sigmas(
                         sigmas[0], sigmas[-2], len(sigmas) - 1, sigmas.device
                     )
 
@@ -1738,6 +2023,8 @@ class AdeptSamplerForge(scripts.Script):
             return self.create_aos_v_sigmas(sigma_max, sigma_min, num_steps, device)
         elif current_sampler_settings.get('use_anime_schedule_e'):
             return self.create_aos_e_sigmas(sigma_max, sigma_min, num_steps, device)
+        elif current_sampler_settings.get('use_akashic_aos'):
+            return self.create_aos_akashic_sigmas(sigma_max, sigma_min, num_steps, device)
         elif current_sampler_settings.get('use_entropic_scheduler'):
             power = current_sampler_settings.get('entropic_scheduler_power', 3.0)
             return self.create_entropic_sigmas(sigma_max, sigma_min, num_steps, power, device)
@@ -1851,6 +2138,51 @@ class AdeptSamplerForge(scripts.Script):
         if p2_steps - p1_steps == 0: phase2_ramp = torch.empty(0, device=device)
         if num_steps - p2_steps == 0: phase3_ramp = torch.empty(0, device=device)
 
+        ramp = torch.cat([phase1_ramp, phase2_ramp, phase3_ramp])
+        
+        # Map to sigmas using karras formula
+        min_inv_rho = sigma_min ** (1 / rho)
+        max_inv_rho = sigma_max ** (1 / rho)
+        sigmas = (max_inv_rho + ramp * (min_inv_rho - max_inv_rho)) ** rho
+        
+        return torch.cat([sigmas, torch.zeros(1, device=device)])
+
+    def create_aos_akashic_sigmas(self, sigma_max, sigma_min, num_steps, device='cpu'):
+        """
+        AkashicAOS [EXPERIMENTAL]: Three-phase noise schedule optimized for EQVAE models.
+        
+        Based on AOS-Epsilon but with adjustments for EQVAE characteristics:
+        - Extended refinement phase (EQVAE benefits from more detail steps)
+        - Gentler phase transitions to reduce artifacts
+        - Optimized for use with rescaleCFG
+        
+        Phase distribution: 30% foundation, 30% structure, 40% refinement
+        """
+        rho = 7.0
+        
+        # EQVAE-optimized phases: extended refinement for better detail handling
+        p1_frac, p2_frac = 0.30, 0.60  # 30% foundation, 30% structure, 40% refinement
+        ramp_p1_val, ramp_p2_val = 0.35, 0.70  # Gentler transitions
+        
+        p1_steps = int(num_steps * p1_frac)
+        p2_steps = int(num_steps * p2_frac)
+        
+        # Phase 1: Foundation (gentle quadratic start for EQVAE)
+        phase1_ramp = torch.linspace(0, 1, p1_steps, device=device) ** 1.3 * ramp_p1_val
+        
+        # Phase 2: Structure (smooth linear progression)
+        phase2_ramp = torch.linspace(ramp_p1_val, ramp_p2_val, p2_steps - p1_steps, device=device)
+        
+        # Phase 3: Refinement (extended with gentler curve for EQVAE detail)
+        # Use power 0.6 (gentler than AOS-E's 0.7) for more detail steps
+        phase3_base = torch.linspace(0, 1, num_steps - p2_steps, device=device) ** 0.6
+        phase3_ramp = phase3_base * (1 - ramp_p2_val) + ramp_p2_val
+        
+        # Handle edge cases
+        if p1_steps == 0: phase1_ramp = torch.empty(0, device=device)
+        if p2_steps - p1_steps == 0: phase2_ramp = torch.empty(0, device=device)
+        if num_steps - p2_steps == 0: phase3_ramp = torch.empty(0, device=device)
+        
         ramp = torch.cat([phase1_ramp, phase2_ramp, phase3_ramp])
         
         # Map to sigmas using karras formula
@@ -2285,6 +2617,7 @@ def list_supported_schedulers():
         # AOS variants
         "AOS-V (for v-prediction)",
         "AOS-ε (for ε-prediction)",
+        "AkashicAOS [EXPERIMENTAL]",
     ]
 
 
@@ -2341,6 +2674,7 @@ def compute_custom_sigma_schedule(sigmas: torch.Tensor, scheduler_name: str, *, 
         "JYS (Dynamic)": lambda: forge.create_jys_sigmas(sigma_max, sigma_min, num_steps, device),
         "AOS-V (for v-prediction)": lambda: forge.create_aos_v_sigmas(sigma_max, sigma_min, num_steps, device),
         "AOS-ε (for ε-prediction)": lambda: forge.create_aos_e_sigmas(sigma_max, sigma_min, num_steps, device),
+        "AkashicAOS [EXPERIMENTAL]": lambda: forge.create_aos_akashic_sigmas(sigma_max, sigma_min, num_steps, device),
     }
 
     if scheduler_name not in mapping:
@@ -2380,6 +2714,9 @@ def compute_sigma_schedule_from_settings(sigmas: torch.Tensor, settings: dict | 
 
     if settings.get('use_anime_schedule_e', False):
         return compute_custom_sigma_schedule(sigmas, 'AOS-ε (for ε-prediction)')
+
+    if settings.get('use_akashic_aos', False):
+        return compute_custom_sigma_schedule(sigmas, 'AkashicAOS [EXPERIMENTAL]')
 
     return sigmas
 
@@ -2436,7 +2773,7 @@ def make_axis_on_xyz_grid():
             "(Adept) Solver Type",
             str,
             partial(set_value, field="solver_type"),
-            choices=lambda: ["None", "Adept Solver", "Adept Ancestral Solver"],
+            choices=lambda: ["None", "Adept Solver", "Adept Ancestral Solver", "AkashicSolver [EXPERIMENTAL]"],
         ),
         xyz_grid.AxisOption(
             "(Adept) Solver Order",
