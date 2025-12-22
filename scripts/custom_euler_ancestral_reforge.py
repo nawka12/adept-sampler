@@ -66,7 +66,6 @@ current_sampler_settings = {
     'adept_solver_use_corrector': True,
     # AkashicSolver [EXPERIMENTAL] settings
     'use_akashic_solver': False,
-    'akashic_rescale_multiplier': 0.7,
     'akashic_base_eta': 1.0,
     'akashic_s_noise': 1.0,
     'akashic_adaptive_eta': True,
@@ -638,22 +637,20 @@ def apply_rescale_cfg(cond, uncond, cfg_result, rescale_multiplier=0.7):
 def sample_akashic_solver(model, x, sigmas, extra_args=None, callback=None, 
                           disable=None, generator=None, **kwargs):
     """
-    AkashicSolver [EXPERIMENTAL]: Optimized for SDXL/EQVAE models like AkashicPulse.
+    AkashicSolver [EXPERIMENTAL]: Optimized ancestral sampler for SDXL/EQVAE models.
     
-    This solver combines three key techniques for optimal EQVAE generation:
-    1. Built-in rescaleCFG (default 0.7) to prevent burning at high CFG
-    2. AOS-Epsilon-based schedule optimization for ε-prediction models
-    3. Phase-aware adaptive eta scheduling for controlled noise injection
-    
-    Key innovations:
-    - Integrated rescaleCFG applied after each model call
+    This solver provides phase-aware ancestral sampling optimized for EQVAE models:
     - Three-phase sampling: Foundation (30%) → Structure (30%) → Refinement (40%)
     - Adaptive eta that varies by phase for optimal diversity/detail balance
     - EQVAE-tuned noise scaling for better VAE compatibility
     
+    NOTE: For rescaleCFG, use an external node/extension (e.g., ComfyUI's RescaleCFG).
+    rescaleCFG must be applied at the model/CFG level, not the sampler level.
+    
     Recommended settings for AkashicPulse EQVAE:
-    - rescaleCFG: 0.7 (essential to prevent burning)
-    - CFG Scale: 7-10 (can use higher values thanks to rescaleCFG)
+    - Use with AkashicAOS scheduler
+    - Use external rescaleCFG at 0.7
+    - CFG Scale: 7-10
     - Steps: 20-30
     - Eta: 1.0 (with adaptive eta enabled)
     """
@@ -661,15 +658,15 @@ def sample_akashic_solver(model, x, sigmas, extra_args=None, callback=None,
     s_in = x.new_ones([x.shape[0]])
     
     # Get AkashicSolver settings
-    rescale_multiplier = current_sampler_settings.get('akashic_rescale_multiplier', 0.7)
     base_eta = current_sampler_settings.get('akashic_base_eta', 1.0)
     base_s_noise = current_sampler_settings.get('akashic_s_noise', 1.0)
     enable_adaptive_eta = current_sampler_settings.get('akashic_adaptive_eta', True)
     phase_strength = current_sampler_settings.get('akashic_phase_strength', 0.5)
     
     print(f"🌀 AkashicSolver [EXPERIMENTAL] active")
-    print(f"   rescaleCFG: {rescale_multiplier:.2f}, η: {base_eta:.2f}, s_noise: {base_s_noise:.2f}")
+    print(f"   η: {base_eta:.2f}, s_noise: {base_s_noise:.2f}")
     print(f"   Adaptive Eta: {enable_adaptive_eta}, Phase Strength: {phase_strength:.2f}")
+    print(f"   ⚠️ Use external rescaleCFG (e.g., 0.7) for EQVAE models")
     
     # Get noise sampler for ancestral injection
     noise_sampler = get_noise_sampler(x)
@@ -698,33 +695,11 @@ def sample_akashic_solver(model, x, sigmas, extra_args=None, callback=None,
         else:
             adaptive_eta = base_eta
         
-        # === MODEL PREDICTION WITH RESCALE CFG ===
-        # Get the denoised prediction from the model
+        # === MODEL PREDICTION ===
         denoised = model(x, sigma * s_in, **extra_args)
         
-        # Apply rescaleCFG if CFG scale is being used
-        # Note: In reForge/WebUI, the model wrapper handles CFG internally,
-        # but we can still apply rescaling to the denoised output
+        # Apply dynamic thresholding for stability at high CFG
         cfg_scale = extra_args.get('cond_scale', 1.0)
-        if cfg_scale > 1.0 and rescale_multiplier > 0.0:
-            # For models where we have access to cond/uncond separately,
-            # we apply rescaling. In the wrapper context, we approximate
-            # by rescaling based on the output's own statistics.
-            # This is a simplified version that still prevents burning.
-            std_denoised = torch.std(denoised, dim=(1, 2, 3), keepdim=True)
-            std_x = torch.std(x, dim=(1, 2, 3), keepdim=True)
-            
-            # Gentle rescaling to prevent oversaturation
-            # Scale factor approaches 1.0 as we get closer to the end
-            scale_factor = (std_x / std_denoised.clamp(min=1e-6))
-            # Clamp scale factor to reasonable range
-            scale_factor = scale_factor.clamp(0.5, 2.0)
-            
-            # Apply progressive rescaling (stronger early, gentler late)
-            effective_rescale = rescale_multiplier * (1.0 - progress * 0.3)
-            denoised = denoised * (1.0 + (scale_factor - 1.0) * effective_rescale)
-        
-        # Apply dynamic thresholding for additional stability at high CFG
         if cfg_scale > 7.0:
             denoised = apply_dynamic_thresholding(denoised, percentile=0.995)
         
@@ -1127,13 +1102,7 @@ class AdeptSamplerForge(scripts.Script):
                             )
                         
                         with gr.Group(visible=False) as akashic_solver_options:
-                            gr.Markdown("### AkashicSolver [EXPERIMENTAL]\nOptimized for SDXL/EQVAE models like AkashicPulse. Combines rescaleCFG, AOS-Epsilon schedule, and phase-aware ancestral sampling.")
-                            
-                            self.akashic_rescale_multiplier = gr.Slider(
-                                label='rescaleCFG Multiplier',
-                                minimum=0.0, maximum=1.0, value=0.7, step=0.05,
-                                info="Controls CFG rescaling to prevent burning. 0.7 is recommended for EQVAE. Higher = stronger rescaling, 0 = disabled."
-                            )
+                            gr.Markdown("### AkashicSolver [EXPERIMENTAL]\nOptimized ancestral sampler for SDXL/EQVAE models. Use with **external rescaleCFG** (e.g., 0.7) for EQVAE models.")
                             
                             self.akashic_base_eta = gr.Slider(
                                 label='Base Eta',
@@ -1161,15 +1130,13 @@ class AdeptSamplerForge(scripts.Script):
                             
                             gr.Markdown(
                                 "**Key Features:**\n"
-                                "- 🔥 **rescaleCFG**: Prevents oversaturation/burning at high CFG (essential for EQVAE)\n"
-                                "- 🎨 **AOS-Epsilon Base**: Three-phase schedule optimized for ε-prediction\n"
                                 "- 🌀 **Phase-Aware Sampling**: Adaptive eta and noise for composition→structure→refinement\n"
-                                "- ⚡ **Dynamic Thresholding**: Extra stability at high CFG scales\n\n"
-                                "**Recommended Settings for AkashicPulse EQVAE:**\n"
-                                "- rescaleCFG: 0.7 (essential)\n"
-                                "- CFG Scale: 7-10 (can use higher thanks to rescaleCFG)\n"
-                                "- Steps: 20-30\n"
-                                "- Use with AkashicAOS scheduler for best results"
+                                "- ⚡ **Dynamic Thresholding**: Extra stability at high CFG scales\n"
+                                "- 🎨 **EQVAE Optimized**: Tuned noise injection for better VAE compatibility\n\n"
+                                "**⚠️ IMPORTANT for EQVAE models (e.g., AkashicPulse):**\n"
+                                "- Use **external rescaleCFG at 0.7** (sampler-level rescaleCFG doesn't work)\n"
+                                "- Use with AkashicAOS scheduler\n"
+                                "- CFG Scale: 7-10, Steps: 20-30"
                             )
                         
                         def on_solver_type_change(solver_type):
@@ -1424,7 +1391,7 @@ class AdeptSamplerForge(scripts.Script):
             self.solver_type, self.adept_solver_order, self.adept_solver_use_corrector,
             self.adept_ancestral_eta, self.adept_ancestral_s_noise,
             self.adept_ancestral_adaptive_eta, self.adept_ancestral_phase_noise, self.adept_ancestral_phase_strength, self.adept_ancestral_enhanced_derivative,
-            self.akashic_rescale_multiplier, self.akashic_base_eta, self.akashic_s_noise, self.akashic_adaptive_eta, self.akashic_phase_strength,
+            self.akashic_base_eta, self.akashic_s_noise, self.akashic_adaptive_eta, self.akashic_phase_strength,
         ]
 
     def process_before_every_sampling(self, p, *script_args, **kwargs):
@@ -1443,7 +1410,7 @@ class AdeptSamplerForge(scripts.Script):
             solver_type, adept_solver_order, adept_solver_use_corrector,
             adept_ancestral_eta, adept_ancestral_s_noise,
             adept_ancestral_adaptive_eta, adept_ancestral_phase_noise, adept_ancestral_phase_strength, adept_ancestral_enhanced_derivative,
-            akashic_rescale_multiplier, akashic_base_eta, akashic_s_noise, akashic_adaptive_eta, akashic_phase_strength,
+            akashic_base_eta, akashic_s_noise, akashic_adaptive_eta, akashic_phase_strength,
         ) = script_args
 
         # --- XYZ Grid overrides (if provided) ---
@@ -1601,7 +1568,6 @@ class AdeptSamplerForge(scripts.Script):
             # AkashicSolver [EXPERIMENTAL] settings
             'use_akashic_solver': use_akashic_solver and enable_custom,
             'use_akashic_aos': use_akashic_aos,
-            'akashic_rescale_multiplier': akashic_rescale_multiplier,
             'akashic_base_eta': akashic_base_eta,
             'akashic_s_noise': akashic_s_noise,
             'akashic_adaptive_eta': akashic_adaptive_eta,
