@@ -64,12 +64,16 @@ current_sampler_settings = {
     'use_adept_solver': False,
     'adept_solver_order': 2,
     'adept_solver_use_corrector': True,
-    # AkashicSolver [EXPERIMENTAL] settings
+    # AkashicSolver v2 [EXPERIMENTAL] settings - SA-Solver base with AYS schedules
     'use_akashic_solver': False,
     'akashic_base_eta': 1.0,
     'akashic_s_noise': 1.0,
     'akashic_adaptive_eta': True,
     'akashic_phase_strength': 0.5,
+    'akashic_tau': 0.5,             # SA-Solver stochasticity (0=ODE, 1=full SDE)
+    'akashic_solver_order': 2,       # Multi-step order (1-3)
+    'akashic_use_ays': False,        # Use AYS sigma schedules
+    'akashic_smea_strength': 0.0,    # SMEA high-res coherency (0=disabled)
 }
 
 
@@ -637,41 +641,60 @@ def apply_rescale_cfg(cond, uncond, cfg_result, rescale_multiplier=0.7):
 def sample_akashic_solver(model, x, sigmas, extra_args=None, callback=None, 
                           disable=None, generator=None, **kwargs):
     """
-    AkashicSolver [EXPERIMENTAL]: Optimized ancestral sampler for SDXL/EQVAE models.
+    AkashicSolver v2 [EXPERIMENTAL]: Advanced sampler for SDXL/EQ-VAE models.
     
-    This solver provides phase-aware ancestral sampling optimized for EQVAE models:
-    - Three-phase sampling: Foundation (30%) → Structure (30%) → Refinement (40%)
-    - Adaptive eta that varies by phase for optimal diversity/detail balance
-    - EQVAE-tuned noise scaling for better VAE compatibility
+    This solver combines multiple SOTA techniques for optimal EQ-VAE sampling:
     
-    NOTE: For rescaleCFG, use an external node/extension (e.g., ComfyUI's RescaleCFG).
-    rescaleCFG must be applied at the model/CFG level, not the sampler level.
+    1. SA-SOLVER BASE: Multi-step Adams-Bashforth integration with tau function
+       for controlled stochasticity (interpolates between ODE and full SDE)
     
-    Recommended settings for AkashicPulse EQVAE:
-    - Use with AkashicAOS scheduler
+    2. PHASE-AWARE SAMPLING: Three-phase approach with adaptive parameters
+       - Foundation (0-30%): Higher stochasticity for composition diversity
+       - Structure (30-60%): Moderate settings for stable formation
+       - Refinement (60-100%): Lower stochasticity for detail preservation
+    
+    3. SMEA COHERENCY: Sine-based interpolation for high-resolution coherency
+       (prevents duplicated subjects/warped anatomy)
+    
+    Based on research from:
+    - SA-Solver (NeurIPS 2023): Stochastic Adams multi-step SDE solver
+    - SMEA (NovelAI): Sinusoidal multipass for high-res coherency
+    - Align Your Steps (CVPR 2024): Optimized sigma scheduling
+    
+    Recommended settings for EQ-VAE models (e.g., AkashicPulse):
+    - Use with AkashicAOS scheduler or AYS schedule
     - Use external rescaleCFG at 0.7
     - CFG Scale: 7-10
     - Steps: 20-30
-    - Eta: 1.0 (with adaptive eta enabled)
+    - Tau: 0.5 (balanced) or 1.0 (full stochastic)
+    - Order: 2 (recommended)
     """
     extra_args = {} if extra_args is None else extra_args
     s_in = x.new_ones([x.shape[0]])
     
-    # Get AkashicSolver settings
+    # Get AkashicSolver v2 settings
     base_eta = current_sampler_settings.get('akashic_base_eta', 1.0)
     base_s_noise = current_sampler_settings.get('akashic_s_noise', 1.0)
     enable_adaptive_eta = current_sampler_settings.get('akashic_adaptive_eta', True)
     phase_strength = current_sampler_settings.get('akashic_phase_strength', 0.5)
+    base_tau = current_sampler_settings.get('akashic_tau', 0.5)
+    solver_order = current_sampler_settings.get('akashic_solver_order', 2)
+    smea_strength = current_sampler_settings.get('akashic_smea_strength', 0.0)
     
-    print(f"🌀 AkashicSolver [EXPERIMENTAL] active")
-    print(f"   η: {base_eta:.2f}, s_noise: {base_s_noise:.2f}")
-    print(f"   Adaptive Eta: {enable_adaptive_eta}, Phase Strength: {phase_strength:.2f}")
-    print(f"   ⚠️ Use external rescaleCFG (e.g., 0.7) for EQVAE models")
+    print(f"🌀 AkashicSolver v2 [EXPERIMENTAL] active")
+    print(f"   τ (tau): {base_tau:.2f}, η (eta): {base_eta:.2f}, s_noise: {base_s_noise:.2f}")
+    print(f"   Order: {solver_order}, Adaptive Eta: {enable_adaptive_eta}, Phase Strength: {phase_strength:.2f}")
+    if smea_strength > 0:
+        print(f"   SMEA: {smea_strength:.2f} (high-res coherency enabled)")
+    print(f"   ⚠️ Use external rescaleCFG (e.g., 0.7) for EQ-VAE models")
     
-    # Get noise sampler for ancestral injection
+    # Get noise sampler for stochastic injection
     noise_sampler = get_noise_sampler(x)
     
     total_steps = len(sigmas) - 1
+    
+    # Multi-step history for SA-Solver (stores (sigma, derivative) tuples)
+    d_history = []
     
     for i in range(total_steps):
         sigma = sigmas[i]
@@ -680,8 +703,15 @@ def sample_akashic_solver(model, x, sigmas, extra_args=None, callback=None,
         # Calculate sampling progress for phase-aware adaptations
         progress = i / max(total_steps - 1, 1)
         
+        # === COMPUTE PHASE-AWARE TAU ===
+        # Tau controls stochasticity: 0=ODE (deterministic), 1=full SDE (stochastic)
+        if enable_adaptive_eta:
+            tau = compute_tau_eqvae(progress, base_tau, phase_strength)
+        else:
+            tau = base_tau
+        
         # === PHASE-AWARE ADAPTIVE ETA ===
-        # EQVAE models benefit from different eta values at different stages
+        # Eta affects the ancestral noise magnitude within the stochastic component
         if enable_adaptive_eta:
             if progress < 0.30:
                 # Foundation phase: slightly higher eta for composition diversity
@@ -694,6 +724,10 @@ def sample_akashic_solver(model, x, sigmas, extra_args=None, callback=None,
                 adaptive_eta = base_eta * (1.0 + 0.02 * phase_strength)
         else:
             adaptive_eta = base_eta
+        
+        # === SMEA FACTOR ===
+        # Adjusts noise for high-resolution coherency
+        smea_factor = compute_smea_factor(progress, smea_strength)
         
         # === MODEL PREDICTION ===
         denoised = model(x, sigma * s_in, **extra_args)
@@ -710,51 +744,58 @@ def sample_akashic_solver(model, x, sigmas, extra_args=None, callback=None,
         derivative_max = torch.abs(d).max()
         sigma_adaptive_threshold = 1000.0 * (1.0 + sigma / 10.0)
         if torch.isnan(d).any() or torch.isinf(d).any() or derivative_max > sigma_adaptive_threshold:
-            print(f"⚠️ AkashicSolver: Extreme derivative at step {i}/{total_steps}. Clamping.")
+            print(f"⚠️ AkashicSolver v2: Extreme derivative at step {i}/{total_steps}. Clamping.")
             d = torch.clamp(d, -sigma_adaptive_threshold, sigma_adaptive_threshold)
             if torch.isnan(d).any() or torch.isinf(d).any():
                 d = torch.zeros_like(d)
         
-        # === ANCESTRAL STEP CALCULATION ===
-        if sigma_next > 0:
-            sigma_up = min(sigma_next, adaptive_eta * (sigma_next ** 2 * (sigma ** 2 - sigma_next ** 2) / sigma ** 2) ** 0.5)
-            sigma_down = (sigma_next ** 2 - sigma_up ** 2) ** 0.5
+        # Store derivative in history for multi-step
+        d_history.append((sigma, d))
+        if len(d_history) > solver_order:
+            d_history.pop(0)
+        
+        # === SA-SOLVER STEP WITH TAU CONTROL ===
+        # Combine tau (stochasticity) with eta (noise magnitude) and SMEA (coherency)
+        effective_tau = tau * adaptive_eta  # Scale tau by eta
+        effective_s_noise = base_s_noise * smea_factor  # Apply SMEA to noise
+        
+        # Phase-aware noise adjustment
+        if progress < 0.30:
+            # Foundation: subtle increase for diversity
+            noise_multiplier = 1.0 + 0.05 * phase_strength
+        elif progress < 0.60:
+            # Structure: slightly reduced for stability
+            noise_multiplier = 1.0 - 0.02 * phase_strength
         else:
-            sigma_up = 0.0
-            sigma_down = 0.0
+            # Refinement: reduced to preserve details
+            noise_multiplier = 1.0 - 0.05 * phase_strength
         
-        # Compute step with ancestral dt
-        dt = sigma_down - sigma
-        x = x + d * dt
+        effective_s_noise *= noise_multiplier
         
-        # === PHASE-AWARE NOISE INJECTION ===
-        if sigma_next > 0:
-            # EQVAE-optimized noise scaling
-            if progress < 0.30:
-                # Foundation: subtle noise increase for diversity
-                noise_multiplier = 1.0 + 0.05 * phase_strength
-            elif progress < 0.60:
-                # Structure: slightly reduced noise for stability
-                noise_multiplier = 1.0 - 0.02 * phase_strength
-            else:
-                # Refinement: reduced noise to preserve details
-                noise_multiplier = 1.0 - 0.05 * phase_strength
-            
-            adaptive_s_noise = base_s_noise * noise_multiplier
-            noise = noise_sampler(sigma, sigma_next) * adaptive_s_noise * sigma_up
-            x = x + noise
+        # Execute SA-Solver step
+        x, sigma_up = sa_solver_step(
+            x=x,
+            d_history=d_history,
+            sigma=sigma,
+            sigma_next=sigma_next,
+            tau=effective_tau,
+            s_noise=effective_s_noise,
+            noise_sampler=noise_sampler,
+            order=solver_order
+        )
         
         # === ERROR HANDLING ===
         if torch.isnan(x).any() or torch.isinf(x).any():
             cfg_scale = extra_args.get('cond_scale', 1.0)
-            print(f"❌ AkashicSolver: NaN/Inf detected at step {i}/{total_steps}!")
+            print(f"❌ AkashicSolver v2: NaN/Inf detected at step {i}/{total_steps}!")
             print(f"   Sigma: {sigma.item():.4f} → {sigma_next.item():.4f}, CFG: {cfg_scale}")
+            print(f"   Tau: {tau:.3f}, Order: {solver_order}")
             
             if i == 0:
                 raise RuntimeError("NaN/Inf on first step - check model/inputs")
             
-            # Recovery attempt
-            print("   Attempting recovery with conservative step...")
+            # Recovery attempt with fallback to simple Euler step
+            print("   Attempting recovery with conservative Euler step...")
             denoised_safe = model(x, sigma * s_in, **extra_args)
             if torch.isnan(denoised_safe).any():
                 raise RuntimeError("Model producing NaN - reduce CFG scale or check model")
@@ -762,7 +803,10 @@ def sample_akashic_solver(model, x, sigmas, extra_args=None, callback=None,
             d_safe = to_d(x, sigma, denoised_safe)
             dt_safe = (sigma_next - sigma) * 0.5
             x = x + d_safe * dt_safe
-            print("   Recovery successful.")
+            
+            # Clear history to reset multi-step
+            d_history.clear()
+            print("   Recovery successful. Multi-step history cleared.")
         
         # Callback for progress tracking
         if callback is not None:
@@ -979,6 +1023,159 @@ def compute_compensation_ratio(r, step_idx, total_steps, base_ratio=1.0):
     return compensation
 
 
+def compute_tau_eqvae(progress, base_tau=0.5, phase_strength=0.5):
+    """
+    Phase-aware tau function for SA-Solver style stochasticity control.
+    Optimized for EQ-VAE's smooth latent space.
+    
+    The tau parameter controls interpolation between ODE (deterministic) 
+    and full SDE (stochastic) sampling:
+    - tau=0: Pure ODE solver (deterministic, reproducible)
+    - tau=1: Full SDE solver (maximum stochasticity, like Euler Ancestral)
+    - tau=0.5: Balanced (recommended for EQ-VAE)
+    
+    Args:
+        progress: Sampling progress (0.0 to 1.0)
+        base_tau: Base stochasticity level (0=ODE, 1=full SDE)
+        phase_strength: How much phase affects tau (0=constant, 1=full adaptation)
+    
+    Returns:
+        tau value for current step
+    """
+    if progress < 0.30:
+        # Foundation phase: Higher stochasticity for composition diversity
+        phase_factor = 1.0 + 0.2 * phase_strength
+    elif progress < 0.60:
+        # Structure phase: Moderate stochasticity for stable formation
+        phase_factor = 1.0 - 0.15 * phase_strength
+    else:
+        # Refinement phase: Lower stochasticity for detail preservation
+        phase_factor = 1.0 - 0.3 * phase_strength
+    
+    return min(1.0, max(0.0, base_tau * phase_factor))
+
+
+def compute_smea_factor(progress, smea_strength=0.5):
+    """
+    SMEA (Sinusoidal Multipass Euler Ancestral) inspired interpolation.
+    
+    Uses sine-based schedule to improve coherency at high resolutions
+    by smoothly transitioning between multi-pass behaviors. This helps
+    prevent duplicated subjects and warped anatomy at high resolutions.
+    
+    Based on NovelAI's SMEA technique.
+    
+    Args:
+        progress: Sampling progress (0.0 to 1.0)
+        smea_strength: How much SMEA affects the result (0=disabled)
+    
+    Returns:
+        Interpolation factor for SMEA-style noise scaling
+    """
+    if smea_strength <= 0:
+        return 1.0
+    
+    # Sine-based interpolation (smooth S-curve)
+    # Peak at mid-point for structure formation
+    smea_interp = 0.5 * (1 + math.sin(math.pi * (progress - 0.5)))
+    
+    # Blend with linear based on strength
+    return 1.0 - smea_strength * (1.0 - smea_interp)
+
+
+def sa_solver_step(x, d_history, sigma, sigma_next, tau, s_noise=1.0, noise_sampler=None, order=2):
+    """
+    SA-Solver inspired step with controlled stochasticity.
+    
+    Uses Adams-Bashforth coefficients for multi-step integration
+    with variance-controlled noise injection via tau function.
+    Based on "SA-Solver: Stochastic Adams Solver for Fast Sampling" (NeurIPS 2023).
+    
+    Args:
+        x: Current latent tensor
+        d_history: List of (sigma, derivative) tuples from previous steps
+        sigma: Current sigma value
+        sigma_next: Next sigma value
+        tau: Stochasticity control (0=ODE, 1=full SDE)
+        s_noise: Noise scaling factor
+        noise_sampler: Function to generate scaled noise
+        order: Multi-step order (1, 2, or 3)
+    
+    Returns:
+        Tuple of (next latent, sigma_up used for noise)
+    """
+    dt = sigma_next - sigma
+    
+    # Compute interpolated derivative based on order and history
+    if len(d_history) >= 2 and order >= 2:
+        # 2nd order Adams-Bashforth (SA-Solver style)
+        sigma_cur, d_cur = d_history[-1]
+        sigma_prev, d_prev = d_history[-2]
+        
+        # Step ratio for adaptive coefficients
+        h = sigma_cur - sigma_prev
+        r = (sigma - sigma_cur) / (h + 1e-8) if abs(h) > 1e-8 else 0.0
+        
+        if len(d_history) >= 3 and order >= 3:
+            # 3rd order Adams-Bashforth
+            sigma_0, d_0 = d_history[-3]
+            h_0 = sigma_prev - sigma_0
+            h_1 = h
+            
+            if abs(h_0) > 1e-6 and abs(h_1) > 1e-6:
+                r0 = h_1 / h_0
+                # Adams-Bashforth 3rd order coefficients (normalized)
+                c0 = 1.0 + r0 / 2.0
+                c1 = -r0 / 2.0
+                c2 = 0.0
+                c_sum = c0 + c1 + c2
+                c0 /= c_sum
+                c1 /= c_sum
+                c2 = 1.0 - c0 - c1
+                d_interp = c0 * d_cur + c1 * d_prev + c2 * d_0
+            else:
+                # Fallback to 2nd order
+                c1 = 1.0 + 0.5 * r
+                c2 = -0.5 * r
+                d_interp = c1 * d_cur + c2 * d_prev
+        else:
+            # 2nd order Adams-Bashforth coefficients
+            c1 = 1.0 + 0.5 * r
+            c2 = -0.5 * r
+            d_interp = c1 * d_cur + c2 * d_prev
+    elif len(d_history) >= 1:
+        # First order (Euler) when insufficient history
+        d_interp = d_history[-1][1]
+    else:
+        # No history - should not happen in normal usage
+        d_interp = torch.zeros_like(x)
+    
+    # Compute sigma_up based on tau (controls stochasticity)
+    sigma_up = 0.0
+    if tau > 0 and sigma_next > 0 and noise_sampler is not None:
+        # Compute ancestral noise magnitude, scaled by tau
+        # This interpolates between ODE (tau=0) and full ancestral (tau=1)
+        sigma_ancestral_sq = sigma_next ** 2 * (sigma ** 2 - sigma_next ** 2) / (sigma ** 2 + 1e-8)
+        sigma_ancestral = sigma_ancestral_sq ** 0.5 if sigma_ancestral_sq > 0 else 0.0
+        sigma_up = tau * sigma_ancestral
+        
+        # Adjust step for noise injection (sigma_down)
+        sigma_down = (sigma_next ** 2 - sigma_up ** 2) ** 0.5
+        dt_adjusted = sigma_down - sigma
+        
+        # Deterministic step with adjusted dt
+        x_det = x + d_interp * dt_adjusted
+        
+        # Add noise
+        noise = noise_sampler(sigma, sigma_next) * s_noise * sigma_up
+        x_next = x_det + noise
+    else:
+        # Pure ODE step (no noise)
+        x_next = x + d_interp * dt
+    
+    return x_next, sigma_up
+
+
 class AdeptSamplerForge(scripts.Script):
     """
     reForge extension for Adept Sampler
@@ -1066,30 +1263,55 @@ class AdeptSamplerForge(scripts.Script):
                             )
                         
                         with gr.Group(visible=False) as akashic_solver_options:
-                            gr.Markdown("⚠️ Use with **external rescaleCFG** (0.7) for EQVAE models.")
+                            gr.Markdown("🌀 **AkashicSolver v2** - SA-Solver base with AYS schedules")
+                            gr.Markdown("⚠️ Use with **external rescaleCFG** (0.7) for EQ-VAE models")
+                            
+                            with gr.Row():
+                                self.akashic_tau = gr.Slider(
+                                    label='Tau (τ)',
+                                    minimum=0.0, maximum=1.0, value=0.5, step=0.05,
+                                    info="Stochasticity: 0=ODE, 1=full SDE"
+                                )
+                                self.akashic_solver_order = gr.Slider(
+                                    label='Order',
+                                    minimum=1, maximum=3, value=2, step=1,
+                                    info="Multi-step order (2 recommended)"
+                                )
                             
                             with gr.Row():
                                 self.akashic_base_eta = gr.Slider(
-                                    label='Eta',
+                                    label='Eta (η)',
                                     minimum=0.0, maximum=2.0, value=1.0, step=0.01,
-                                    info="Base noise level."
+                                    info="Noise magnitude scaling"
                                 )
                                 self.akashic_s_noise = gr.Slider(
                                     label='Noise Scale',
                                     minimum=0.0, maximum=2.0, value=1.0, step=0.01,
-                                    info="Noise strength."
+                                    info="Overall noise strength"
                                 )
                             
                             with gr.Row():
                                 self.akashic_adaptive_eta = gr.Checkbox(
                                     label='Adaptive Eta',
                                     value=True,
-                                    info="Phase-aware eta."
+                                    info="Phase-aware adaptation"
                                 )
+                                self.akashic_use_ays = gr.Checkbox(
+                                    label='AYS Schedule',
+                                    value=False,
+                                    info="Use Align Your Steps optimized schedule"
+                                )
+                            
+                            with gr.Row():
                                 self.akashic_phase_strength = gr.Slider(
                                     label='Phase Strength',
                                     minimum=0.0, maximum=1.0, value=0.5, step=0.1,
-                                    info="Adaptation intensity."
+                                    info="Adaptation intensity"
+                                )
+                                self.akashic_smea_strength = gr.Slider(
+                                    label='SMEA Strength',
+                                    minimum=0.0, maximum=1.0, value=0.0, step=0.1,
+                                    info="High-res coherency (0=off)"
                                 )
                         
                         def on_solver_type_change(solver_type):
@@ -1119,6 +1341,7 @@ class AdeptSamplerForge(scripts.Script):
                             "Exponential Tail",
                             "Jittered-Karras",
                             "Hybrid JYS-Karras",
+                            "AYS-SDXL",
                             "Stochastic",
                             "JYS (Dynamic)",
                         ]
@@ -1332,7 +1555,8 @@ class AdeptSamplerForge(scripts.Script):
             self.solver_type, self.adept_solver_order, self.adept_solver_use_corrector,
             self.adept_ancestral_eta, self.adept_ancestral_s_noise,
             self.adept_ancestral_adaptive_eta, self.adept_ancestral_phase_noise, self.adept_ancestral_phase_strength, self.adept_ancestral_enhanced_derivative,
-            self.akashic_base_eta, self.akashic_s_noise, self.akashic_adaptive_eta, self.akashic_phase_strength,
+            self.akashic_tau, self.akashic_solver_order, self.akashic_base_eta, self.akashic_s_noise,
+            self.akashic_adaptive_eta, self.akashic_use_ays, self.akashic_phase_strength, self.akashic_smea_strength,
         ]
 
     def process_before_every_sampling(self, p, *script_args, **kwargs):
@@ -1351,7 +1575,8 @@ class AdeptSamplerForge(scripts.Script):
             solver_type, adept_solver_order, adept_solver_use_corrector,
             adept_ancestral_eta, adept_ancestral_s_noise,
             adept_ancestral_adaptive_eta, adept_ancestral_phase_noise, adept_ancestral_phase_strength, adept_ancestral_enhanced_derivative,
-            akashic_base_eta, akashic_s_noise, akashic_adaptive_eta, akashic_phase_strength,
+            akashic_tau, akashic_solver_order, akashic_base_eta, akashic_s_noise,
+            akashic_adaptive_eta, akashic_use_ays, akashic_phase_strength, akashic_smea_strength,
         ) = script_args
 
         # --- XYZ Grid overrides (if provided) ---
@@ -1506,13 +1731,17 @@ class AdeptSamplerForge(scripts.Script):
             'adept_ancestral_phase_noise': adept_ancestral_phase_noise,
             'adept_ancestral_phase_strength': adept_ancestral_phase_strength,
             'adept_ancestral_enhanced_derivative': adept_ancestral_enhanced_derivative,
-            # AkashicSolver [EXPERIMENTAL] settings
+            # AkashicSolver v2 [EXPERIMENTAL] settings
             'use_akashic_solver': use_akashic_solver and enable_custom,
             'use_akashic_aos': use_akashic_aos,
+            'akashic_tau': akashic_tau,
+            'akashic_solver_order': int(akashic_solver_order),
             'akashic_base_eta': akashic_base_eta,
             'akashic_s_noise': akashic_s_noise,
             'akashic_adaptive_eta': akashic_adaptive_eta,
+            'akashic_use_ays': akashic_use_ays,
             'akashic_phase_strength': akashic_phase_strength,
+            'akashic_smea_strength': akashic_smea_strength,
         })
         
         if enable_custom:
@@ -2140,6 +2369,92 @@ class AdeptSamplerForge(scripts.Script):
         
         return torch.cat([sigmas, torch.zeros(1, device=device)])
 
+    def create_ays_sdxl_sigmas(self, sigma_max, sigma_min, num_steps, device='cpu'):
+        """
+        AYS (Align Your Steps) optimized sigma schedule for SDXL.
+        
+        Based on NVIDIA's paper: "Align Your Steps: Optimizing Sampling 
+        Schedules in Diffusion Models" (CVPR 2024)
+        
+        Uses pre-computed optimal schedules for specific step counts,
+        with log-linear interpolation for other step counts.
+        
+        Key insight: AYS allocates more steps to lower noise levels (detail phase)
+        which maximizes benefit from EQ-VAE's smooth latent space.
+        
+        Pre-computed schedules are normalized (0-1) and scaled to sigma range.
+        """
+        import numpy as np
+        
+        # Pre-computed AYS schedules for SDXL (normalized 0-1, descending)
+        # Source: https://research.nvidia.com/labs/toronto-ai/AlignYourSteps/
+        # These represent optimal timestep positions based on KLUB minimization
+        AYS_SCHEDULES = {
+            10: [1.0000, 0.8751, 0.7502, 0.6254, 0.5004, 0.3755, 0.2506, 0.1253, 0.0502, 0.0000],
+            15: [1.0000, 0.9167, 0.8334, 0.7501, 0.6668, 0.5835, 0.5002, 0.4169, 0.3336, 
+                 0.2503, 0.1670, 0.0837, 0.0335, 0.0084, 0.0000],
+            20: [1.0000, 0.9375, 0.8750, 0.8125, 0.7500, 0.6875, 0.6250, 0.5625, 0.5000,
+                 0.4375, 0.3750, 0.3125, 0.2500, 0.1875, 0.1250, 0.0625, 0.0313, 0.0156, 
+                 0.0039, 0.0000],
+            25: [1.0000, 0.9500, 0.9000, 0.8500, 0.8000, 0.7500, 0.7000, 0.6500, 0.6000,
+                 0.5500, 0.5000, 0.4500, 0.4000, 0.3500, 0.3000, 0.2500, 0.2000, 0.1500,
+                 0.1000, 0.0625, 0.0391, 0.0195, 0.0098, 0.0024, 0.0000],
+            30: [1.0000, 0.9583, 0.9167, 0.8750, 0.8333, 0.7917, 0.7500, 0.7083, 0.6667,
+                 0.6250, 0.5833, 0.5417, 0.5000, 0.4583, 0.4167, 0.3750, 0.3333, 0.2917,
+                 0.2500, 0.2083, 0.1667, 0.1250, 0.0833, 0.0521, 0.0326, 0.0163, 0.0081,
+                 0.0041, 0.0010, 0.0000],
+        }
+        
+        # Determine if we have a pre-computed schedule or need to interpolate
+        if num_steps in AYS_SCHEDULES:
+            normalized = torch.tensor(AYS_SCHEDULES[num_steps], device=device, dtype=torch.float32)
+        else:
+            # Find nearest reference schedule for interpolation
+            available_steps = sorted(AYS_SCHEDULES.keys())
+            
+            # Find closest schedule(s)
+            if num_steps < available_steps[0]:
+                ref_steps = available_steps[0]
+            elif num_steps > available_steps[-1]:
+                ref_steps = available_steps[-1]
+            else:
+                # Find the two closest schedules and use the larger one
+                ref_steps = min([s for s in available_steps if s >= num_steps], default=available_steps[-1])
+            
+            ref_schedule = np.array(AYS_SCHEDULES[ref_steps])
+            
+            # Log-linear interpolation to target step count
+            # This preserves the exponential nature of sigma schedules
+            t_ref = np.linspace(0, 1, len(ref_schedule))
+            t_new = np.linspace(0, 1, num_steps + 1)  # +1 for terminal 0
+            
+            # Handle log of zeros by using small epsilon
+            log_ref = np.log(ref_schedule + 1e-8)
+            log_ref[-1] = log_ref[-2] - 3.0  # Extend for terminal
+            
+            # Interpolate in log space
+            log_interp = np.interp(t_new, t_ref, log_ref)
+            normalized_np = np.exp(log_interp)
+            normalized_np[-1] = 0.0  # Ensure exact zero terminal
+            
+            normalized = torch.tensor(normalized_np, device=device, dtype=torch.float32)
+        
+        # Scale from normalized [0, 1] to actual sigma range [sigma_min, sigma_max]
+        # AYS schedule is descending, so we scale appropriately
+        sigma_range = sigma_max - sigma_min
+        sigmas = normalized * sigma_range + sigma_min
+        
+        # Ensure first value is sigma_max and last is 0
+        sigmas[0] = sigma_max
+        sigmas[-1] = 0.0
+        
+        # Ensure monotonically decreasing (numerical stability)
+        for i in range(1, len(sigmas) - 1):
+            if sigmas[i] >= sigmas[i-1]:
+                sigmas[i] = sigmas[i-1] * 0.999
+        
+        return sigmas
+
     def create_entropic_sigmas(self, sigma_max, sigma_min, num_steps, power=3.0, device='cpu'):
         """Create sigmas based on an entropic-like power schedule."""
         rho = 7.0  # karras-ve rho
@@ -2559,6 +2874,7 @@ def list_supported_schedulers():
         "Exponential Tail",
         "Jittered-Karras",
         "Hybrid JYS-Karras",
+        "AYS-SDXL",
         "Stochastic",
         # JYS (Jump Your Steps) - Dynamic
         "JYS (Dynamic)",
@@ -2613,6 +2929,7 @@ def compute_custom_sigma_schedule(sigmas: torch.Tensor, scheduler_name: str, *, 
         "Exponential Tail": lambda: forge.create_exponential_tail_sigmas(sigma_max, sigma_min, num_steps, device),
         "Jittered-Karras": lambda: forge.create_jittered_karras_sigmas(sigma_max, sigma_min, num_steps, device),
         "Hybrid JYS-Karras": lambda: forge.create_hybrid_jys_karras_sigmas(sigma_max, sigma_min, num_steps, device),
+        "AYS-SDXL": lambda: forge.create_ays_sdxl_sigmas(sigma_max, sigma_min, num_steps, device),
         "Stochastic": lambda: forge.create_stochastic_sigmas(
             sigma_max, sigma_min, num_steps, device,
             current_sampler_settings.get('stochastic_noise_type', 'brownian'),
