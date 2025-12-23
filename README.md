@@ -12,154 +12,143 @@ This extension is developed and tested on **Stable Diffusion WebUI reForge**. Co
 
 ### Sampler/Solver/Scheduler compatibility
 
-- Adept can now run with either the WebUI sampler's native solver or the new Adept Solver.
-  - When the Adept Solver is enabled, it replaces the WebUI solver but still respects the chosen sigma schedule (from WebUI or Adept's Scheduler tab).
-  - When the Adept Solver is disabled, Adept preserves the sampler's native solver and can optionally override only the sigma schedule.
+- Adept can run with the WebUI sampler's native solver or one of the Adept solvers.
+- When an Adept Solver is enabled, it replaces the WebUI solver but still respects the chosen sigma schedule.
+- When the Adept Solver is disabled, Adept preserves the sampler's native solver and can optionally override only the sigma schedule.
 - Not all schedulers are equally stable with every sampler choice. Euler a remains a strong baseline for stability.
 
 ## 🌟 Features
 
-- **Adept Solver (training-free)**: A custom solver that synthesizes improvements from DPM-Solver++, UniPC, DEIS, and DC-Solver. Offers multistep predictor, optional corrector, dynamic thresholding at high CFG, exponential-integrator-inspired stability, and phase-aware adaptive compensation.
-- **Adept Ancestral Solver**: Enhanced ancestral sampling with genuine improvements over standard Euler Ancestral. Features adaptive ancestral step sizing, phase-aware noise injection, enhanced derivative computation, and dynamic eta scheduling for superior sample diversity and quality.
-- **Global Sampler Support**: Works with all k-diffusion samplers. You can use the Adept Solver or preserve the native solver, and you can still apply Adept's custom sigma schedules.
-- **Detail Enhancement**: A unique method to enhance high-frequency details, which can be used with any scheduler. The **Detail Separation Radius** controls what is considered a 'detail,' with higher values sharpening larger features.
-- **Custom Schedulers**: A suite of schedulers to control the denoising process.
-    > **Scheduler Categories:**
-    > - **Universal**: Recommended for all model types. Includes `None (use WebUI sampler schedule)`, `Entropic`, `Constant-Rate`, `Adaptive-Optimized`, `Cosine-Annealed`, `LogSNR-Uniform`, `Tanh Mid-Boost`, `Exponential Tail`, `Jittered-Karras`, `Stochastic`, `JYS (Dynamic)`.
-    > - **V-Prediction**: Specialized for `v-prediction` models. Includes `AOS-V` and `SNR-Optimized`.
-    > - **ε-Prediction**: Specialized for `epsilon-prediction` models. Includes `AOS-ε`.
+### Solvers
 
-    - **Anime-Optimized Schedule for V-Prediction (AOS-V)**: A three-phase scheduler designed to improve composition and detail for anime-style images on **v-prediction** models.
-    - **Anime-Optimized Schedule for Epsilon-Prediction (AOS-ε)**: A three-phase scheduler optimized for **epsilon-prediction** models, with adjusted phase boundaries and power curves.
-      > ⚠️ **Compatibility Warning**: Use the correct AOS variant for your model type. **AOS-V** is for **v-prediction** models, while **AOS-ε** is for **epsilon-prediction** models. Mismatching them may break the generation.
-    - **Entropic Schedule**: A power-based schedule that clusters steps for fine-tuning detail generation. The **Entropic Power** setting controls this clustering, with values greater than 1.0 focusing more steps at the beginning of the sampling process.
-    - **SNR-Optimized**: Concentrates steps around the critical `logSNR = 0` point, where the model transitions from noise-dominant to signal-dominant.
-        - *Based on: [Hang, T., et al. (2024). Improved Noise Schedule for Diffusion Training.](https://arxiv.org/abs/2407.03297)*
-    - **Constant-Rate**: Aims to ensure a constant rate of change in the data's probability distribution, preventing large, unstable jumps in the sampling process.
-        - *Based on: [Okada, S., et al. (2024). Constant Rate Scheduling.](https://arxiv.org/abs/2411.12188)*
-    - **Adaptive-Optimized**: A hybrid approach inspired by data-driven methods, blending multiple strategies for a robust, general-purpose curve.
-        - *Inspired by: [Sabour, A., et al. (2024). Align Your Steps: Optimizing Sampling Schedules in Diffusion Models.](https://arxiv.org/abs/2404.14507)*
-    - **Cosine-Annealed**: Smooth start with a strong early drop and gentle tail; a great general default.
-    - **LogSNR-Uniform**: Uniform in log-SNR space; neutral, theory-aligned schedule.
-    - **Tanh Mid-Boost**: Concentrates steps around mid-range sigmas to refine structure before detail.
-    - **Exponential Tail**: Faster early lock-in with extra resolution in the last steps for detail polish.
-    - **Jittered-Karras**: Karras-style spacing with stratified jitter to reduce resonance/banding and improve stability.
-    - **Stochastic**: Adds controlled randomness to timestep selection to reduce repetitive patterns and improve sample diversity. Configurable noise type (Brownian, Uniform, Normal) and scale.
-    - **JYS (Jump Your Steps)**: A non-uniform sampling scheduler that enables skipping redundant timesteps ("jumps") to reduce inference steps while preserving sample quality. Uses dynamic jump sequence calculation to optimize timestep selection during sampling. Can reduce the number of denoising calls by up to 60%.
-- **Content-Aware Pacing (AOS Only)**: Dynamically adjusts the sampling process, switching from composition to detail focus based on image coherence. The **Coherence Sensitivity** slider controls when this switch occurs. Works with both AOS-V and AOS-ε variants.
-- **Full UI Integration**: All features are configurable through a custom accordion panel in the WebUI or reForge interface.
+| Solver | Description |
+|--------|-------------|
+| **Adept Solver** | Training-free deterministic solver synthesizing DPM-Solver++, UniPC, DEIS, and DC-Solver. Features multistep predictor, optional corrector, dynamic thresholding, and phase-aware adaptive compensation. |
+| **Adept Ancestral Solver** | Enhanced ancestral sampling with adaptive step sizing, phase-aware noise injection, enhanced derivative computation, and dynamic eta scheduling. |
+| **AkashicSolver [EXPERIMENTAL]** | Advanced solver optimized for EQ-VAE SDXL models (e.g., AkashicPulse). Combines SA-Solver multi-step integration, phase-aware tau control, and Native Detail Boost. |
+
+### Schedulers
+
+Organized by category for easy selection:
+
+| Category | Schedulers |
+|----------|------------|
+| **Universal** | `None`, `Entropic`, `SNR-Optimized`, `Constant-Rate`, `Adaptive-Optimized`, `Cosine-Annealed`, `LogSNR-Uniform`, `Tanh Mid-Boost`, `Exponential Tail`, `Jittered-Karras`, `Hybrid JYS-Karras`, `AYS-SDXL`, `Stochastic`, `JYS (Dynamic)` |
+| **V-Prediction** | `AOS-V (for v-prediction)` |
+| **ε-Prediction** | `AOS-ε (for ε-prediction)` |
+| **Experimental** | `AkashicAOS [EXPERIMENTAL]` |
+
+#### AkashicAOS v2 [EXPERIMENTAL]
+
+Detail-progressive schedule designed specifically for EQ-VAE SDXL models:
+- **Single continuous curve** — no discrete phase boundaries, smooth step ratios
+- **Detail-progressive** — ~18% more steps in detail region (exploits EQ-VAE's fine detail capability)  
+- **Mid-range enhancement** — subtle boost around logSNR ≈ 0 for structure formation
+- **AkashicSolver compatible** — designed for stable multi-step integration
+
+### Enhancement Features
+
+| Feature | Description |
+|---------|-------------|
+| **Detail Enhancement** | High-frequency detail boosting using frequency separation. Configurable strength and separation radius. |
+| **Native Detail Boost** | AkashicSolver-exclusive feature that boosts high-frequency noise components for enhanced detail emergence at native resolution (without the blur that SMEA causes). |
+| **SMEA** | High-resolution coherency feature (for >1024px) that prevents duplicated subjects and warped anatomy. |
+| **Content-Aware Pacing** | Dynamically switches from composition to detail focus based on image coherence (AOS only). |
+
+### Other Features
+
+- **Full XYZ Grid Support** — All settings available for parameter sweeps
+- **Complete Metadata** — All settings saved to image metadata and restored on load
+- **Global Sampler Support** — Works with all k-diffusion samplers
 
 ## 🛠️ Installation
 
-There are two ways to install the extension:
-
 **Method 1: Using the `Install from URL` Feature**
 
-1.  Navigate to the **Extensions** tab in your WebUI.
-2.  Click on the **Install from URL** sub-tab.
-3.  Paste the following URL into the **URL for extension's git repository** field:
-    ```
-    https://github.com/nawka12/adept-sampler
-    ```
-4.  Click **Install**.
-5.  Once installation is complete, navigate to the **Installed** tab and click **Apply and restart UI**.
+1. Navigate to the **Extensions** tab in your WebUI.
+2. Click on the **Install from URL** sub-tab.
+3. Paste the following URL:
+   ```
+   https://github.com/nawka12/adept-sampler
+   ```
+4. Click **Install**.
+5. Navigate to **Installed** tab and click **Apply and restart UI**.
 
-**Method 2: Manual Installation (git clone)**
+**Method 2: Manual Installation**
 
-1.  Clone this repository into your `extensions` directory in your Stable Diffusion WebUI reForge installation.
-    ```bash
-    git clone https://github.com/nawka12/adept-sampler extensions/adept-sampler
-    ```
-2.  Restart your Stable Diffusion WebUI reForge.
+```bash
+git clone https://github.com/nawka12/adept-sampler extensions/adept-sampler
+```
 
 ## 📖 Usage
 
-1.  In the main sampler dropdown, select your base sampling method (e.g., **Euler a**, **DPM++ 2M SDE**, etc.).
-2.  Navigate to the "Scripts" section at the bottom of the `txt2img` or `img2img` tabs.
-3.  Select **"Adept Sampler"** from the script dropdown.
-4.  Enable the **"Enable Adept Sampler"** checkbox to activate the custom features. Once enabled, Adept works alongside your selected sampling method, preserving its solver while only overriding the sigma schedule.
-5.  The settings are organized into tabs for easy configuration (in this order):
-    - **Solver**:
-        - Choose **Solver Type** from dropdown: `None` (uses WebUI native solver), `Adept Solver` (deterministic multistep), or `Adept Ancestral Solver` (with noise injection).
-        - For **Adept Solver**: Configure **Solver Order** (1–3) and **Enable Corrector Step**.
-        - For **Adept Ancestral Solver**: Adjust **Eta (Ancestral)** and **Noise Scale** to control noise injection behavior (uses fixed Order 1 + no Corrector for compatibility with noise injection).
-        - Key features: Dynamic Thresholding (stability at high CFG), Predictor-Corrector (accuracy), Adaptive Compensation (phase-aware), Exponential-Integrator-inspired stability, Ancestral Noise Injection (diversity).
-    - **Scheduler**:
-        - Choose a **Scheduler Category** (Universal / V-Prediction / ε-Prediction), then pick a **Scheduler**:
-            - **Universal**: `None (use WebUI sampler schedule)`, `Entropic`, `Constant-Rate`, `Adaptive-Optimized`, `Cosine-Annealed`, `LogSNR-Uniform`, `Tanh Mid-Boost`, `Exponential Tail`, `Jittered-Karras`, `Stochastic`, `JYS (Dynamic)`
-            - **V-Prediction**: `AOS-V (for v-prediction)`, `SNR-Optimized`
-            - **ε-Prediction**: `AOS-ε (for ε-prediction)`
-        - Note: `None (use WebUI sampler schedule)` means Adept will not override your sigma schedule; it will use whatever the WebUI sampler provides.
-        - **AOS (V/ε) Options**:
-            - **Content-Aware Pacing (AOS Only)**: Dynamically switches from composition to detail. Recommended with higher step counts (~1.5× model-recommended) for effective phasing.
-            - **Coherence Sensitivity**: Controls how early the switch occurs.
-            - **Manual Pacing Override (JSON)**: Optional. Examples: `{ "composition": 0.4 }` (fraction of steps) or `{ "composition": 10 }` (absolute steps).
-            - **[Debug] Stop after coherence**: Halts after composition when coherence is reached.
-        - **Entropic**:
-            - **Entropic Power**: Controls timestep clustering. Higher values focus more steps earlier for detail formation.
-        - **Stochastic**:
-            - **Noise Type**: `brownian`, `uniform`, or `normal`
-            - **Noise Scale**: 0.0–1.0 (higher = more randomness)
-            - **Base Schedule**: `karras`, `uniform`, or `cosine`
-        - **JYS (Dynamic)**: Dynamically optimizes timestep spacing to skip redundant steps; no additional controls.
-        - **Hybrid JYS-Karras**: Good for low step counts with higher CFG. Keeps exposure tame like Karras but still adds JYS detail.
-    - **Detail Enhancement**:
-        - Toggle the detail enhancer and adjust its `Strength`.
-        - Use the `Detail Separation Radius` to define what counts as a "detail." Higher values sharpen larger features.
-    - **Advanced**:
-        - Fine-tune `Eta` and `Noise Scale` for different ancestral noise effects.
-        - Option to automatically disable the sampler for the Hires. fix pass.
-      > ℹ️ **Note**: When using a custom scheduler, you may often need to **lower your CFG Scale** (e.g., by 1-2 points) to prevent oversaturated or 'burnt' images.
-    - **Experimental**:
-        - Optional features that may affect stability, e.g., CFG-to-zero after 40% of steps.
+1. Select your base sampling method (e.g., **Euler a**, **DPM++ 2M SDE**, etc.).
+2. Navigate to "Scripts" and select **"Adept Sampler"**.
+3. Enable the **"Enable Adept Sampler"** checkbox.
 
-### Adept Solver: Recommended Settings
+### UI Tabs
 
-- **Quality-first**: Order 2–3, Corrector On
-- **Speed-first**: Order 1, Corrector Off
-- **High CFG (≥ 7)**: Dynamic Thresholding auto-activates; use Order 2+ and Corrector On for stability
+| Tab | Options |
+|-----|---------|
+| **Solver** | Solver Type, Order, Corrector, Ancestral settings, AkashicSolver settings |
+| **Scheduler** | Category selection, Scheduler dropdown, Scheduler-specific options |
+| **Detail Enhancement** | Enable toggle, Strength, Separation Radius |
+| **Advanced** | Eta, Noise Scale, Disable for HR |
+| **Experimental** | CFG-to-zero after 40% |
 
-### Enhanced Adept Ancestral Solver: Recommended Settings
+## 🔧 Recommended Settings
 
-- **Classic Mode (Default)**: η=1.0, s_noise=1.0, Adaptive Eta=Off, Phase Noise=Off, Enhanced Derivative=Off (similar to standard Euler Ancestral)
-- **Balanced**: η=1.0, s_noise=1.0, Adaptive Eta=On, Phase Noise=On, Enhanced Derivative=On
-- **High Diversity**: η=1.1, s_noise=1.05, Adaptive Eta=On, Phase Noise=On, Enhanced Derivative=On
-- **Stable**: η=0.9, s_noise=0.95, Adaptive Eta=On, Phase Noise=On, Enhanced Derivative=On
-- **Experimental**: η=1.3, s_noise=1.1, Adaptive Eta=On, Phase Noise=On, Enhanced Derivative=On
+### AkashicSolver with AkashicAOS (for EQ-VAE models)
 
-**Enhanced Features**: The new adaptive features make Adept Ancestral genuinely different from Euler Ancestral while maintaining image quality:
-- **Adaptive Eta**: Dynamically adjusts eta throughout sampling phases (composition→structure→detail) with conservative tuning
-- **Phase-Aware Noise**: Subtly adjusts noise injection based on sampling phase for optimal diversity without excessive noisiness
-- **Enhanced Derivatives**: Ancestral-specific derivative computation with subtle adaptive corrections for better noise handling
+```
+Solver: AkashicSolver [EXPERIMENTAL]
+Scheduler: AkashicAOS [EXPERIMENTAL]
+τ (tau): 0.5
+Order: 2
+η (eta): 1.0
+Noise Scale: 1.0
+Adaptive Eta: On
+Phase Strength: 0.5
+SMEA: 0.0 (off for native res) / 0.1-0.2 (for >1.5x native)
+Native Detail Boost: 0.3-0.5 (for native res detail)
+```
 
-### Notes
+**Important**: Use external rescaleCFG at 0.7 for EQ-VAE models.
 
-- Adept Solver is training-free and compatible with all sigma schedules (including WebUI native, AOS, Entropic, etc.).
-- You can enable Adept Solver and still choose `None (use WebUI sampler schedule)` in Scheduler to keep the WebUI’s native schedule while using Adept’s solver.
+### Adept Solver
 
-## 🔍 Sampling Method Comparison
+| Goal | Settings |
+|------|----------|
+| **Quality-first** | Order 2–3, Corrector On |
+| **Speed-first** | Order 1, Corrector Off |
+| **High CFG (≥7)** | Order 2+, Corrector On (dynamic thresholding auto-activates) |
 
-| **Method** | **Key Characteristics** | **Best For** | **Key Settings** | **Sample Image** | **Notes** |
-|------------|------------------------|--------------|------------------|------------------|-----------|
-| **Euler Ancestral** | Standard sampling with noise injection | General purpose, baseline comparison | CFG Scale: Standard values | ![image](https://github.com/user-attachments/assets/10f7087e-0b79-4b34-bd7b-73cd1263e24b) | Default sampler, good baseline performance |
-| **Adept + AOS + Content-Aware Pacing** | Three-phase scheduler with dynamic composition-to-detail switching | Anime/illustration style, complex compositions | AOS-V/AOS-ε (match model type)<br/>Coherence Sensitivity<br/>CFG Scale: -1 to -2 from normal | ![image](https://github.com/user-attachments/assets/f0a036e1-1fa6-4941-a08e-1e364979f05e) | Automatically adapts focus from composition to details based on image coherence |
-| **Adept + Entropic** | Power-based clustering with concentrated early steps | Fine detail work, texture enhancement | Entropic Power: >1.0 for early focus<br/>Detail Enhancement<br/>CFG Scale: -1 to -2 from normal | ![image](https://github.com/user-attachments/assets/0a62c159-43c9-4dd5-9579-78a231d1e5d6) | Clusters more steps at beginning for better detail control |
-| **Adept + SNR-Optimized** | Concentrates steps around the critical `logSNR = 0` point for balanced sampling | Balanced compositions, preventing over/under-exposure | CFG Scale: -1 to -2 from normal | Image not available | Based on recent research to improve stability. Now supports experimental Content-Aware Pacing for dynamic phase switching. |
-| **Adept + Constant-Rate** | Ensures a constant rate of change, preventing unstable jumps in sampling | Smooth, stable, and predictable generations | CFG Scale: -1 to -2 from normal | Image not available | Ideal for preventing artifacts from sudden changes in sampling speed |
-| **Adept + Adaptive-Optimized** | Hybrid approach blending multiple strategies for a robust, general-purpose curve | General-purpose use across a wide variety of models | CFG Scale: -1 to -2 from normal | Image not available | A "best-of-all-worlds" approach inspired by data-driven methods |
-| **Adept + Cosine-Annealed** | Smooth start, strong early drop, gentle tail | General default across many prompts | CFG Scale: -1 to -2 from normal | Image not available | Good all-rounder; often a safe first choice |
-| **Adept + LogSNR-Uniform** | Uniform spacing in log-SNR domain | Neutral, theory-aligned behavior | CFG Scale: -1 to -2 from normal | Image not available | Balanced transitions; predictable dynamics |
-| **Adept + Tanh Mid-Boost** | Concentrates steps near mid-range sigmas | Refining structure before high-frequency detail | CFG Scale: -1 to -2 from normal | Image not available | Emphasizes composition/structure consolidation |
-| **Adept + Exponential Tail** | Faster early lock-in, extra late-step resolution | Polishing fine detail and textures | CFG Scale: -1 to -2 from normal | Image not available | Stronger tail for late-stage refinement |
-| **Adept + Jittered-Karras** | Karras spacing with stratified jitter | Reducing resonance/banding on repetitive patterns | CFG Scale: -1 to -2 from normal | Image not available | Adds robustness via blue-noise-like jitter |
-| **Adept + Hybrid JYS-Karras** | Good for low steps with higher CFG (≈6–8) | Adept Ancestral runs around 24–36 steps | CFG Scale: 6–7, Steps: 28–36 | Image not available | Keeps exposure controlled like Karras while injecting JYS-style detail in mid/late stages |
-| **Adept + Stochastic** | Controlled randomness in timestep selection | Reducing repetitive patterns, improving diversity | CFG Scale: -1 to -2 from normal<br/>Noise Type: Brownian/Uniform/Normal<br/>Noise Scale: 0.1-0.5 | Image not available | Adds strategic randomness for better sample variety |
-| **Adept + JYS** | Non-uniform timestep skipping with dynamic jump sequence calculation | Faster inference with maintained quality, efficiency optimization | CFG Scale: -1 to -2 from normal<br/>Dynamic timestep optimization | Image not available | Reduces denoising calls by up to 60% while preserving sample quality through dynamic timestep selection |
-| **Adept Ancestral Solver** | Advanced solver with controlled noise injection | High-quality samples with improved diversity and creativity | Order: 1, Corrector: Off<br/>η: 1.0-1.2, s_noise: 1.0-1.1<br/>CFG Scale: -1 to -2 from normal | Image not available | Combines Adept Solver's stability features with ancestral noise injection (Order 1 + no Corrector required for noise compatibility) |
+### Adept Ancestral Solver
 
-## Samples using AkashicPulse v4.0
+| Preset | η | s_noise | Adaptive Eta | Phase Noise | Enhanced Derivative |
+|--------|---|---------|--------------|-------------|---------------------|
+| **Classic** | 1.0 | 1.0 | Off | Off | Off |
+| **Balanced** | 1.0 | 1.0 | On | On | On |
+| **High Diversity** | 1.1 | 1.05 | On | On | On |
+| **Stable** | 0.9 | 0.95 | On | On | On |
+
+## 🔍 AkashicSolver Settings Reference
+
+| Setting | Range | Default | Description |
+|---------|-------|---------|-------------|
+| **Tau (τ)** | 0.0–1.0 | 0.5 | Stochasticity control. 0=ODE (deterministic), 1=full SDE (stochastic) |
+| **Order** | 1–3 | 2 | Multi-step integration order. Higher = more accurate but less stable |
+| **Eta (η)** | 0.5–1.5 | 1.0 | Noise magnitude within the stochastic component |
+| **Noise Scale** | 0.5–1.5 | 1.0 | Overall noise scaling factor |
+| **Adaptive Eta** | On/Off | On | Phase-aware eta adjustment |
+| **Phase Strength** | 0.0–1.0 | 0.5 | Intensity of phase-aware adaptations |
+| **SMEA Strength** | 0.0–1.0 | 0.0 | High-res coherency (use for >1024px only) |
+| **Native Detail Boost** | 0.0–1.0 | 0.0 | High-frequency noise boost for native res detail |
+
+## 📊 Samples
+
+### Using AkashicPulse v4.0
 ![xyz_grid-0010-185404508](https://github.com/user-attachments/assets/b5a4d8d3-2b30-4a2e-861e-c02a95f16c93)
-
 
 ## 📄 License
 
@@ -167,31 +156,20 @@ This project is licensed under the **GNU General Public License v3.0 (GPL-3.0)**
 
 ### License Summary
 
-- ✅ **Commercial use** - You may use this software commercially
-- ✅ **Modification** - You may modify the software  
-- ✅ **Distribution** - You may distribute the software
-- ✅ **Patent use** - You may use any patents that contributors grant you
-- ✅ **Private use** - You may use the software privately
+- ✅ Commercial use, Modification, Distribution, Patent use, Private use
 
 **Requirements:**
-- 📋 **License and copyright notice** - Include the license and copyright notice with the software
-- 📋 **State changes** - Indicate significant changes made to the software
-- 📋 **Disclose source** - You must make the source code available when you distribute the software
-- 📋 **Same license** - You must license derivative works under the same license
+- 📋 License and copyright notice, State changes, Disclose source, Same license
 
 **Limitations:**
-- ❌ **Liability** - The software is provided without warranty
-- ❌ **Warranty** - No warranties are provided with the software
+- ❌ No Liability or Warranty
 
 ### Why GPL-3.0?
 
-This license was chosen to ensure compatibility with **Stable Diffusion WebUI reForge** and its ecosystem, while protecting the open-source nature of the project. It ensures that improvements and modifications remain available to the community.
+This license ensures compatibility with **Stable Diffusion WebUI reForge** and its ecosystem, while protecting the open-source nature of the project.
 
-### Full License Text
-
-The complete license text can be found at: https://www.gnu.org/licenses/gpl-3.0.html
+Full license text: https://www.gnu.org/licenses/gpl-3.0.html
 
 ---
 
 Copyright (C) 2025 nawka12/KayfaHaarukku. This program comes with ABSOLUTELY NO WARRANTY. This is free software, and you are welcome to redistribute it under certain conditions as specified in the GPL-3.0 license.
-
