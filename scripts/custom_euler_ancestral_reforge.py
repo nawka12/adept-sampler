@@ -1570,6 +1570,19 @@ class AdeptSamplerForge(scripts.Script):
             (self.adept_ancestral_phase_noise, lambda p: str(p.get('adept_ancestral_phase_noise', 'false')).lower() == 'true' if 'adept_ancestral_phase_noise' in p else gr.update()),
             (self.adept_ancestral_phase_strength, lambda p: gr.update() if p.get('adept_ancestral_phase_strength') in (None, 'N/A') else float(p['adept_ancestral_phase_strength'])),
             (self.adept_ancestral_enhanced_derivative, lambda p: str(p.get('adept_ancestral_enhanced_derivative', 'false')).lower() == 'true' if 'adept_ancestral_enhanced_derivative' in p else gr.update()),
+            # Stochastic scheduler settings
+            (self.stochastic_noise_type, lambda p: p.get('stochastic_noise_type', 'brownian') if 'stochastic_noise_type' in p else gr.update()),
+            (self.stochastic_noise_scale, lambda p: gr.update() if p.get('stochastic_noise_scale') in (None, 'N/A') else float(p['stochastic_noise_scale'])),
+            (self.stochastic_base_schedule, lambda p: p.get('stochastic_base_schedule', 'karras') if 'stochastic_base_schedule' in p else gr.update()),
+            # AkashicSolver settings
+            (self.akashic_tau, lambda p: gr.update() if p.get('akashic_tau') in (None, 'N/A') else float(p['akashic_tau'])),
+            (self.akashic_solver_order, lambda p: gr.update() if p.get('akashic_solver_order') in (None, 'N/A') else int(p['akashic_solver_order'])),
+            (self.akashic_base_eta, lambda p: gr.update() if p.get('akashic_base_eta') in (None, 'N/A') else float(p['akashic_base_eta'])),
+            (self.akashic_s_noise, lambda p: gr.update() if p.get('akashic_s_noise') in (None, 'N/A') else float(p['akashic_s_noise'])),
+            (self.akashic_adaptive_eta, lambda p: str(p.get('akashic_adaptive_eta', 'true')).lower() == 'true' if 'akashic_adaptive_eta' in p else gr.update()),
+            (self.akashic_use_ays, lambda p: str(p.get('akashic_use_ays', 'false')).lower() == 'true' if 'akashic_use_ays' in p else gr.update()),
+            (self.akashic_phase_strength, lambda p: gr.update() if p.get('akashic_phase_strength') in (None, 'N/A') else float(p['akashic_phase_strength'])),
+            (self.akashic_smea_strength, lambda p: gr.update() if p.get('akashic_smea_strength') in (None, 'N/A') else float(p['akashic_smea_strength'])),
         ]
 
         def scheduler_getter(params):
@@ -1702,6 +1715,29 @@ class AdeptSamplerForge(scripts.Script):
                     adept_ancestral_phase_strength = 0.5
             if "adept_ancestral_enhanced_derivative" in xyz:
                 adept_ancestral_enhanced_derivative = str(xyz["adept_ancestral_enhanced_derivative"]) == "True"
+            # AkashicSolver XYZ overrides
+            if "akashic_tau" in xyz:
+                try: akashic_tau = float(xyz["akashic_tau"])
+                except Exception: pass
+            if "akashic_solver_order" in xyz:
+                try: akashic_solver_order = int(xyz["akashic_solver_order"])
+                except Exception: pass
+            if "akashic_base_eta" in xyz:
+                try: akashic_base_eta = float(xyz["akashic_base_eta"])
+                except Exception: pass
+            if "akashic_s_noise" in xyz:
+                try: akashic_s_noise = float(xyz["akashic_s_noise"])
+                except Exception: pass
+            if "akashic_adaptive_eta" in xyz:
+                akashic_adaptive_eta = str(xyz["akashic_adaptive_eta"]) == "True"
+            if "akashic_use_ays" in xyz:
+                akashic_use_ays = str(xyz["akashic_use_ays"]) == "True"
+            if "akashic_phase_strength" in xyz:
+                try: akashic_phase_strength = float(xyz["akashic_phase_strength"])
+                except Exception: pass
+            if "akashic_smea_strength" in xyz:
+                try: akashic_smea_strength = float(xyz["akashic_smea_strength"])
+                except Exception: pass
 
         # Set solver flags based on the dropdown choice
         use_adept_solver = (solver_type == 'Adept Solver')
@@ -1838,6 +1874,19 @@ class AdeptSamplerForge(scripts.Script):
                 'adept_ancestral_phase_noise': adept_ancestral_phase_noise if use_adept_ancestral_solver else False,
                 'adept_ancestral_phase_strength': adept_ancestral_phase_strength if use_adept_ancestral_solver else 0.5,
                 'adept_ancestral_enhanced_derivative': adept_ancestral_enhanced_derivative if use_adept_ancestral_solver else False,
+                # Stochastic scheduler settings
+                'stochastic_noise_type': stochastic_noise_type if custom_scheduler_type == 'Stochastic' else 'N/A',
+                'stochastic_noise_scale': stochastic_noise_scale if custom_scheduler_type == 'Stochastic' else 'N/A',
+                'stochastic_base_schedule': stochastic_base_schedule if custom_scheduler_type == 'Stochastic' else 'N/A',
+                # AkashicSolver settings
+                'akashic_tau': akashic_tau if use_akashic_solver else 'N/A',
+                'akashic_solver_order': int(akashic_solver_order) if use_akashic_solver else 'N/A',
+                'akashic_base_eta': akashic_base_eta if use_akashic_solver else 'N/A',
+                'akashic_s_noise': akashic_s_noise if use_akashic_solver else 'N/A',
+                'akashic_adaptive_eta': akashic_adaptive_eta if use_akashic_solver else 'N/A',
+                'akashic_use_ays': akashic_use_ays if use_akashic_solver else 'N/A',
+                'akashic_phase_strength': akashic_phase_strength if use_akashic_solver else 'N/A',
+                'akashic_smea_strength': akashic_smea_strength if use_akashic_solver else 'N/A',
             })
         else:
             print("🔄 Using standard sampler")
@@ -3048,15 +3097,19 @@ def set_value(p, x: Any, xs: Any, *, field: str):
         if field in ("enabled", "use_content_aware_pacing", "debug_stop_after_coherence",
                      "use_enhanced_detail_phase", "disable_for_hr", "exp_cfg_to_zero",
                      "adept_solver_use_corrector", "adept_ancestral_adaptive_eta",
-                     "adept_ancestral_phase_noise", "adept_ancestral_enhanced_derivative"):
+                     "adept_ancestral_phase_noise", "adept_ancestral_enhanced_derivative",
+                     "akashic_adaptive_eta", "akashic_use_ays"):
             # Boolean fields
             x = str(x).strip().lower() == "true"
         elif field in ("eta", "s_noise", "entropic_scheduler_power", "detail_enhancement_strength",
                        "detail_separation_radius", "pacing_coherence_sensitivity",
-                       "adept_ancestral_eta", "adept_ancestral_s_noise", "adept_ancestral_phase_strength", "stochastic_noise_scale"):
+                       "adept_ancestral_eta", "adept_ancestral_s_noise", "adept_ancestral_phase_strength", 
+                       "stochastic_noise_scale",
+                       "akashic_tau", "akashic_base_eta", "akashic_s_noise", 
+                       "akashic_phase_strength", "akashic_smea_strength"):
             # Float fields
             x = float(x)
-        elif field == "adept_solver_order":
+        elif field in ("adept_solver_order", "akashic_solver_order"):
             # Integer field
             x = int(x)
             if x not in (1, 2, 3):
@@ -3196,6 +3249,44 @@ def make_axis_on_xyz_grid():
             "(Adept) Ancestral Noise Scale",
             float,
             partial(set_value, field="adept_ancestral_s_noise"),
+        ),
+        # AkashicSolver settings
+        xyz_grid.AxisOption(
+            "(Adept) Akashic Tau",
+            float,
+            partial(set_value, field="akashic_tau"),
+        ),
+        xyz_grid.AxisOption(
+            "(Adept) Akashic Order",
+            int,
+            partial(set_value, field="akashic_solver_order"),
+            choices=lambda: ["1", "2", "3"],
+        ),
+        xyz_grid.AxisOption(
+            "(Adept) Akashic Eta",
+            float,
+            partial(set_value, field="akashic_base_eta"),
+        ),
+        xyz_grid.AxisOption(
+            "(Adept) Akashic Noise Scale",
+            float,
+            partial(set_value, field="akashic_s_noise"),
+        ),
+        xyz_grid.AxisOption(
+            "(Adept) Akashic Adaptive Eta",
+            str,
+            partial(set_value, field="akashic_adaptive_eta"),
+            choices=lambda: ["True", "False"],
+        ),
+        xyz_grid.AxisOption(
+            "(Adept) Akashic Phase Strength",
+            float,
+            partial(set_value, field="akashic_phase_strength"),
+        ),
+        xyz_grid.AxisOption(
+            "(Adept) Akashic SMEA Strength",
+            float,
+            partial(set_value, field="akashic_smea_strength"),
         ),
     ]
 
