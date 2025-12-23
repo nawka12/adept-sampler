@@ -680,12 +680,15 @@ def sample_akashic_solver(model, x, sigmas, extra_args=None, callback=None,
     base_tau = current_sampler_settings.get('akashic_tau', 0.5)
     solver_order = current_sampler_settings.get('akashic_solver_order', 2)
     smea_strength = current_sampler_settings.get('akashic_smea_strength', 0.0)
+    ndb_strength = current_sampler_settings.get('akashic_ndb_strength', 0.0)
     
     print(f"🌀 AkashicSolver v2 [EXPERIMENTAL] active")
     print(f"   τ (tau): {base_tau:.2f}, η (eta): {base_eta:.2f}, s_noise: {base_s_noise:.2f}")
     print(f"   Order: {solver_order}, Adaptive Eta: {enable_adaptive_eta}, Phase Strength: {phase_strength:.2f}")
     if smea_strength > 0:
-        print(f"   SMEA: {smea_strength:.2f} (high-res coherency enabled)")
+        print(f"   SMEA: {smea_strength:.2f} (high-res coherency)")
+    if ndb_strength > 0:
+        print(f"   Native Detail Boost: {ndb_strength:.2f} (detail enhancement)")
     print(f"   ⚠️ Use external rescaleCFG (e.g., 0.7) for EQ-VAE models")
     
     # Get noise sampler for stochastic injection
@@ -783,7 +786,9 @@ def sample_akashic_solver(model, x, sigmas, extra_args=None, callback=None,
             tau=effective_tau,
             s_noise=effective_s_noise,
             noise_sampler=noise_sampler,
-            order=solver_order
+            order=solver_order,
+            ndb_strength=ndb_strength,
+            progress=progress
         )
         
         # === ERROR HANDLING ===
@@ -1085,7 +1090,52 @@ def compute_smea_factor(progress, smea_strength=0.5):
     return 1.0 - smea_strength * (1.0 - smea_interp)
 
 
-def sa_solver_step(x, d_history, sigma, sigma_next, tau, s_noise=1.0, noise_sampler=None, order=2):
+def compute_native_detail_boost(progress, ndb_strength=0.0):
+    """
+    Native Detail Boost (NDB): Enhances detail emergence at native resolution.
+    
+    Unlike SMEA (which reduces noise variation for high-res coherency),
+    NDB selectively boosts high-frequency noise components to enhance
+    fine detail emergence without adding blur.
+    
+    Phase-aware approach:
+    - Foundation (0-30%): Minimal intervention — let composition form naturally
+    - Structure (30-60%): Moderate boost — encourage structure detail
+    - Refinement (60-100%): Strong emphasis — maximize fine detail emergence
+    
+    Args:
+        progress: Sampling progress (0.0 to 1.0)
+        ndb_strength: How much boost to apply (0=disabled, 1=maximum)
+    
+    Returns:
+        Tuple of (base_scale, high_freq_boost):
+        - base_scale: Multiplier for base noise (always 1.0)
+        - high_freq_boost: Additional high-frequency component strength
+    """
+    if ndb_strength <= 0:
+        return 1.0, 0.0
+    
+    # Phase-aware enhancement with smooth transitions
+    if progress < 0.30:
+        # Foundation phase: minimal intervention to preserve composition
+        # Gradual ramp from 0 to small boost
+        phase_progress = progress / 0.30
+        high_freq_boost = 0.03 * ndb_strength * phase_progress
+    elif progress < 0.60:
+        # Structure phase: moderate boost for structure detail
+        # Linear ramp from 0.03 to 0.10
+        phase_progress = (progress - 0.30) / 0.30
+        high_freq_boost = (0.03 + 0.07 * phase_progress) * ndb_strength
+    else:
+        # Refinement phase: strong emphasis for fine detail
+        # Ramp from 0.10 to 0.18
+        phase_progress = (progress - 0.60) / 0.40
+        high_freq_boost = (0.10 + 0.08 * phase_progress) * ndb_strength
+    
+    return 1.0, high_freq_boost
+
+
+def sa_solver_step(x, d_history, sigma, sigma_next, tau, s_noise=1.0, noise_sampler=None, order=2, ndb_strength=0.0, progress=0.0):
     """
     SA-Solver inspired step with controlled stochasticity.
     
@@ -1102,6 +1152,8 @@ def sa_solver_step(x, d_history, sigma, sigma_next, tau, s_noise=1.0, noise_samp
         s_noise: Noise scaling factor
         noise_sampler: Function to generate scaled noise
         order: Multi-step order (1, 2, or 3)
+        ndb_strength: Native Detail Boost strength (0=disabled)
+        progress: Sampling progress (0.0 to 1.0) for NDB phase calculation
     
     Returns:
         Tuple of (next latent, sigma_up used for noise)
@@ -1219,8 +1271,24 @@ def sa_solver_step(x, d_history, sigma, sigma_next, tau, s_noise=1.0, noise_samp
         # Deterministic step with adjusted dt
         x_det = x + d_interp * dt_adjusted
         
-        # Add noise
+        # Generate base noise
         noise = noise_sampler(sigma, sigma_next) * s_noise * sigma_up
+        
+        # Apply Native Detail Boost if enabled
+        if ndb_strength > 0 and TORCHVISION_AVAILABLE:
+            base_scale, high_freq_boost = compute_native_detail_boost(progress, ndb_strength)
+            
+            # Extract high-frequency component from noise using Gaussian blur
+            # Low-freq = blur, High-freq = original - blur
+            try:
+                low_freq_noise = gaussian_blur(noise, kernel_size=3, sigma=0.5)
+                high_freq_noise = noise - low_freq_noise
+                
+                # Boost high-frequency component
+                noise = noise + high_freq_noise * high_freq_boost
+            except Exception:
+                pass  # Fallback: use original noise if blur fails
+        
         x_next = x_det + noise
     else:
         # Pure ODE step (no noise)
@@ -1365,6 +1433,13 @@ class AdeptSamplerForge(scripts.Script):
                                     label='SMEA Strength',
                                     minimum=0.0, maximum=1.0, value=0.0, step=0.1,
                                     info="High-res coherency (0=off)"
+                                )
+                            
+                            with gr.Row():
+                                self.akashic_ndb_strength = gr.Slider(
+                                    label='Native Detail Boost',
+                                    minimum=0.0, maximum=1.0, value=0.0, step=0.05,
+                                    info="Enhances detail at native res (0=off)"
                                 )
                         
                         def on_solver_type_change(solver_type):
@@ -1583,6 +1658,7 @@ class AdeptSamplerForge(scripts.Script):
             (self.akashic_use_ays, lambda p: str(p.get('akashic_use_ays', 'false')).lower() == 'true' if 'akashic_use_ays' in p else gr.update()),
             (self.akashic_phase_strength, lambda p: gr.update() if p.get('akashic_phase_strength') in (None, 'N/A') else float(p['akashic_phase_strength'])),
             (self.akashic_smea_strength, lambda p: gr.update() if p.get('akashic_smea_strength') in (None, 'N/A') else float(p['akashic_smea_strength'])),
+            (self.akashic_ndb_strength, lambda p: gr.update() if p.get('akashic_ndb_strength') in (None, 'N/A') else float(p['akashic_ndb_strength'])),
         ]
 
         def scheduler_getter(params):
@@ -1623,6 +1699,7 @@ class AdeptSamplerForge(scripts.Script):
             self.adept_ancestral_adaptive_eta, self.adept_ancestral_phase_noise, self.adept_ancestral_phase_strength, self.adept_ancestral_enhanced_derivative,
             self.akashic_tau, self.akashic_solver_order, self.akashic_base_eta, self.akashic_s_noise,
             self.akashic_adaptive_eta, self.akashic_use_ays, self.akashic_phase_strength, self.akashic_smea_strength,
+            self.akashic_ndb_strength,
         ]
 
     def process_before_every_sampling(self, p, *script_args, **kwargs):
@@ -1643,6 +1720,7 @@ class AdeptSamplerForge(scripts.Script):
             adept_ancestral_adaptive_eta, adept_ancestral_phase_noise, adept_ancestral_phase_strength, adept_ancestral_enhanced_derivative,
             akashic_tau, akashic_solver_order, akashic_base_eta, akashic_s_noise,
             akashic_adaptive_eta, akashic_use_ays, akashic_phase_strength, akashic_smea_strength,
+            akashic_ndb_strength,
         ) = script_args
 
         # --- XYZ Grid overrides (if provided) ---
@@ -1737,6 +1815,9 @@ class AdeptSamplerForge(scripts.Script):
                 except Exception: pass
             if "akashic_smea_strength" in xyz:
                 try: akashic_smea_strength = float(xyz["akashic_smea_strength"])
+                except Exception: pass
+            if "akashic_ndb_strength" in xyz:
+                try: akashic_ndb_strength = float(xyz["akashic_ndb_strength"])
                 except Exception: pass
 
         # Set solver flags based on the dropdown choice
@@ -1834,6 +1915,7 @@ class AdeptSamplerForge(scripts.Script):
             'akashic_use_ays': akashic_use_ays,
             'akashic_phase_strength': akashic_phase_strength,
             'akashic_smea_strength': akashic_smea_strength,
+            'akashic_ndb_strength': akashic_ndb_strength,
         })
         
         if enable_custom:
@@ -1887,6 +1969,7 @@ class AdeptSamplerForge(scripts.Script):
                 'akashic_use_ays': akashic_use_ays if use_akashic_solver else 'N/A',
                 'akashic_phase_strength': akashic_phase_strength if use_akashic_solver else 'N/A',
                 'akashic_smea_strength': akashic_smea_strength if use_akashic_solver else 'N/A',
+                'akashic_ndb_strength': akashic_ndb_strength if use_akashic_solver else 'N/A',
             })
         else:
             print("🔄 Using standard sampler")
@@ -3106,7 +3189,7 @@ def set_value(p, x: Any, xs: Any, *, field: str):
                        "adept_ancestral_eta", "adept_ancestral_s_noise", "adept_ancestral_phase_strength", 
                        "stochastic_noise_scale",
                        "akashic_tau", "akashic_base_eta", "akashic_s_noise", 
-                       "akashic_phase_strength", "akashic_smea_strength"):
+                       "akashic_phase_strength", "akashic_smea_strength", "akashic_ndb_strength"):
             # Float fields
             x = float(x)
         elif field in ("adept_solver_order", "akashic_solver_order"):
@@ -3287,6 +3370,11 @@ def make_axis_on_xyz_grid():
             "(Adept) Akashic SMEA Strength",
             float,
             partial(set_value, field="akashic_smea_strength"),
+        ),
+        xyz_grid.AxisOption(
+            "(Adept) Akashic Native Detail Boost",
+            float,
+            partial(set_value, field="akashic_ndb_strength"),
         ),
     ]
 
