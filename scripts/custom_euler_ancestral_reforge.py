@@ -1136,9 +1136,15 @@ def sa_solver_step(x, d_history, sigma, sigma_next, tau, s_noise=1.0, noise_samp
                 # Adams-Bashforth 3rd order coefficients for non-uniform steps
                 # Standard AB3: x_{n+1} = x_n + dt * (23/12 * f_n - 16/12 * f_{n-1} + 5/12 * f_{n-2})
                 # Adapted for non-uniform steps using step ratios
-                c0 = 1.0 + (1.0 + r0) * r1 / 2.0  # weight for d_cur (most recent)
-                c1 = -(1.0 + r0) * r1 / 2.0       # weight for d_prev
-                c2 = r0 * r1 / 2.0                 # weight for d_0 (oldest)
+                # BUGFIX: Blend towards Euler (c0=1, c1=0, c2=0) as tau increases
+                # This prevents multi-step extrapolation from amplifying noise at high stochasticity
+                tau_blend = 1.0 - tau  # 1.0 when tau=0 (full AB3), 0.0 when tau=1 (full Euler)
+                c0_ab3 = 1.0 + (1.0 + r0) * r1 / 2.0  # Full AB3 weight for d_cur
+                c1_ab3 = -(1.0 + r0) * r1 / 2.0       # Full AB3 weight for d_prev
+                c2_ab3 = r0 * r1 / 2.0                 # Full AB3 weight for d_0
+                c0 = tau_blend * c0_ab3 + (1.0 - tau_blend) * 1.0  # Blend towards 1.0
+                c1 = tau_blend * c1_ab3  # Blend towards 0.0
+                c2 = tau_blend * c2_ab3  # Blend towards 0.0
                 
                 # Normalize coefficients to sum to 1 for stability
                 c_sum = c0 + c1 + c2
@@ -1156,8 +1162,12 @@ def sa_solver_step(x, d_history, sigma, sigma_next, tau, s_noise=1.0, noise_samp
                 # Adams-Bashforth 2nd order coefficients
                 # Standard AB2: x_{n+1} = x_n + dt * (3/2 * f_n - 1/2 * f_{n-1})
                 # Adapted for non-uniform steps
-                c1 = 1.0 + 0.5 * r  # weight for d_cur
-                c2 = -0.5 * r       # weight for d_prev
+                # BUGFIX: Blend towards Euler as tau increases
+                tau_blend = 1.0 - tau
+                c1_ab2 = 1.0 + 0.5 * r  # Full AB2 weight for d_cur
+                c2_ab2 = -0.5 * r       # Full AB2 weight for d_prev
+                c1 = tau_blend * c1_ab2 + (1.0 - tau_blend) * 1.0  # Blend towards 1.0
+                c2 = tau_blend * c2_ab2  # Blend towards 0.0
                 # Normalize
                 c_sum = c1 + c2
                 if abs(c_sum) > 1e-8:
@@ -1168,8 +1178,13 @@ def sa_solver_step(x, d_history, sigma, sigma_next, tau, s_noise=1.0, noise_samp
             # 2nd order Adams-Bashforth coefficients
             # Standard AB2: x_{n+1} = x_n + dt * (3/2 * f_n - 1/2 * f_{n-1})
             # For non-uniform steps, adapt using step ratio r = dt / h_prev
-            c1 = 1.0 + 0.5 * r  # weight for d_cur (more recent gets higher weight)
-            c2 = -0.5 * r       # weight for d_prev
+            # BUGFIX: Blend towards Euler (c1=1, c2=0) as tau increases
+            # This prevents multi-step extrapolation from amplifying noise at high stochasticity
+            tau_blend = 1.0 - tau  # 1.0 when tau=0 (full AB2), 0.0 when tau=1 (full Euler)
+            c1_ab2 = 1.0 + 0.5 * r  # Full AB2 weight for d_cur
+            c2_ab2 = -0.5 * r       # Full AB2 weight for d_prev
+            c1 = tau_blend * c1_ab2 + (1.0 - tau_blend) * 1.0  # Blend towards 1.0
+            c2 = tau_blend * c2_ab2  # Blend towards 0.0
             # Normalize for stability
             c_sum = c1 + c2
             if abs(c_sum) > 1e-8:
