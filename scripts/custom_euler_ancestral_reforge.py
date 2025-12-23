@@ -1114,36 +1114,67 @@ def sa_solver_step(x, d_history, sigma, sigma_next, tau, s_noise=1.0, noise_samp
         sigma_cur, d_cur = d_history[-1]
         sigma_prev, d_prev = d_history[-2]
         
-        # Step ratio for adaptive coefficients
-        h = sigma_cur - sigma_prev
-        r = (sigma - sigma_cur) / (h + 1e-8) if abs(h) > 1e-8 else 0.0
+        # Compute step sizes for adaptive coefficients
+        # h_prev = previous step size (sigma_prev → sigma_cur)
+        # dt = current step size (sigma_cur → sigma_next) = sigma_next - sigma
+        h_prev = sigma_cur - sigma_prev
+        # Use the step size ratio for non-uniform step adaptation
+        # r = dt / h_prev (ratio of current to previous step size)
+        r = abs(dt / (h_prev + 1e-8)) if abs(h_prev) > 1e-8 else 1.0
         
         if len(d_history) >= 3 and order >= 3:
             # 3rd order Adams-Bashforth
             sigma_0, d_0 = d_history[-3]
-            h_0 = sigma_prev - sigma_0
-            h_1 = h
+            h_0 = sigma_prev - sigma_0  # step size from sigma_0 → sigma_prev
+            h_1 = h_prev  # step size from sigma_prev → sigma_cur
             
             if abs(h_0) > 1e-6 and abs(h_1) > 1e-6:
-                r0 = h_1 / h_0
-                # Adams-Bashforth 3rd order coefficients (normalized)
-                c0 = 1.0 + r0 / 2.0
-                c1 = -r0 / 2.0
-                c2 = 0.0
+                # Compute step size ratios for 3rd order
+                r0 = abs(h_1 / h_0)  # ratio of recent step sizes
+                r1 = abs(dt / (h_1 + 1e-8))  # ratio of current to previous
+                
+                # Adams-Bashforth 3rd order coefficients for non-uniform steps
+                # Standard AB3: x_{n+1} = x_n + dt * (23/12 * f_n - 16/12 * f_{n-1} + 5/12 * f_{n-2})
+                # Adapted for non-uniform steps using step ratios
+                c0 = 1.0 + (1.0 + r0) * r1 / 2.0  # weight for d_cur (most recent)
+                c1 = -(1.0 + r0) * r1 / 2.0       # weight for d_prev
+                c2 = r0 * r1 / 2.0                 # weight for d_0 (oldest)
+                
+                # Normalize coefficients to sum to 1 for stability
                 c_sum = c0 + c1 + c2
-                c0 /= c_sum
-                c1 /= c_sum
-                c2 = 1.0 - c0 - c1
+                if abs(c_sum) > 1e-8:
+                    c0 /= c_sum
+                    c1 /= c_sum
+                    c2 /= c_sum
+                else:
+                    # Fallback to equal weights if normalization fails
+                    c0, c1, c2 = 1.0, 0.0, 0.0
+                
                 d_interp = c0 * d_cur + c1 * d_prev + c2 * d_0
             else:
-                # Fallback to 2nd order
-                c1 = 1.0 + 0.5 * r
-                c2 = -0.5 * r
+                # Fallback to 2nd order if step sizes are too small
+                # Adams-Bashforth 2nd order coefficients
+                # Standard AB2: x_{n+1} = x_n + dt * (3/2 * f_n - 1/2 * f_{n-1})
+                # Adapted for non-uniform steps
+                c1 = 1.0 + 0.5 * r  # weight for d_cur
+                c2 = -0.5 * r       # weight for d_prev
+                # Normalize
+                c_sum = c1 + c2
+                if abs(c_sum) > 1e-8:
+                    c1 /= c_sum
+                    c2 /= c_sum
                 d_interp = c1 * d_cur + c2 * d_prev
         else:
             # 2nd order Adams-Bashforth coefficients
-            c1 = 1.0 + 0.5 * r
-            c2 = -0.5 * r
+            # Standard AB2: x_{n+1} = x_n + dt * (3/2 * f_n - 1/2 * f_{n-1})
+            # For non-uniform steps, adapt using step ratio r = dt / h_prev
+            c1 = 1.0 + 0.5 * r  # weight for d_cur (more recent gets higher weight)
+            c2 = -0.5 * r       # weight for d_prev
+            # Normalize for stability
+            c_sum = c1 + c2
+            if abs(c_sum) > 1e-8:
+                c1 /= c_sum
+                c2 /= c_sum
             d_interp = c1 * d_cur + c2 * d_prev
     elif len(d_history) >= 1:
         # First order (Euler) when insufficient history
