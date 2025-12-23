@@ -1121,6 +1121,8 @@ def sa_solver_step(x, d_history, sigma, sigma_next, tau, s_noise=1.0, noise_samp
         # Use the step size ratio for non-uniform step adaptation
         # r = dt / h_prev (ratio of current to previous step size)
         r = abs(dt / (h_prev + 1e-8)) if abs(h_prev) > 1e-8 else 1.0
+        # SAFETY: Clamp r to prevent explosive coefficients with irregular schedules (e.g. AkashicAOS)
+        r = min(r, 2.0)
         
         if len(d_history) >= 3 and order >= 3:
             # 3rd order Adams-Bashforth
@@ -1132,6 +1134,9 @@ def sa_solver_step(x, d_history, sigma, sigma_next, tau, s_noise=1.0, noise_samp
                 # Compute step size ratios for 3rd order
                 r0 = abs(h_1 / h_0)  # ratio of recent step sizes
                 r1 = abs(dt / (h_1 + 1e-8))  # ratio of current to previous
+                # SAFETY: Clamp ratios
+                r0 = min(r0, 2.0)
+                r1 = min(r1, 2.0)
                 
                 # Adams-Bashforth 3rd order coefficients for non-uniform steps
                 # Standard AB3: x_{n+1} = x_n + dt * (23/12 * f_n - 16/12 * f_{n-1} + 5/12 * f_{n-2})
@@ -1722,6 +1727,9 @@ class AdeptSamplerForge(scripts.Script):
             "Jittered-Karras",
             "Stochastic",
             "JYS (Dynamic)",
+            "AOS-V (for v-prediction)",
+            "AOS-ε (for ε-prediction)",
+            "AkashicAOS [EXPERIMENTAL]",
         ]:
             custom_scheduler_type = scheduler_override
 
