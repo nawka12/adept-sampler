@@ -1,6 +1,6 @@
 # Adept Sampler
 
-This repository contains an advanced, highly customizable sampler for Stable Diffusion WebUI reForge. It integrates state-of-the-art techniques to provide enhanced detail, flexible scheduling, and improved image composition.
+This repository integrates multiple research implementations—including **SA-Solver**, **UniPC**, and **SMEA**—into a unified, highly customizable sampler pipeline for Stable Diffusion WebUI reForge. It optimizes these methods for reForge, providing a tunable sampler that combines the stability of predictor-correctors with the texture retention of stochastic sampling.
 
 ## 📝 Disclaimer
 
@@ -25,9 +25,9 @@ This extension is developed and tested on **Stable Diffusion WebUI reForge**. Co
 
 | Solver | Description |
 |--------|-------------|
-| **Adept Solver** | Training-free deterministic solver synthesizing DPM-Solver++, UniPC, DEIS, and DC-Solver. Features multistep predictor, optional corrector, dynamic thresholding, and phase-aware adaptive compensation. |
+| **Adept Solver** | A hybrid **Predictor-Corrector** pipeline. It utilizes a multi-step Adams-Bashforth integrator (derived from **DEIS**) for prediction and a **UniPC**-style corrector step. It integrates **DC-Solver**'s compensation logic to align predictor-corrector steps and uses **DPM-Solver++** dynamic thresholding for high-CFG stability. |
 | **Adept Ancestral Solver** | Enhanced ancestral sampling with adaptive step sizing, phase-aware noise injection, enhanced derivative computation, and dynamic eta scheduling. |
-| **AkashicSolver [EXPERIMENTAL]** | Advanced solver optimized for EQ-VAE SDXL models (e.g., AkashicPulse). Combines SA-Solver multi-step integration, phase-aware tau control, and Native Detail Boost. |
+| **AkashicSolver [EXPERIMENTAL]** | An optimized implementation of the **Stochastic Adams Solver (SA-Solver)** tailored for SDXL/EQ-VAE. It augments the standard SA-Solver with **SMEA** (Sinusoidal Multipass) interpolation for high-res coherence and adds phase-aware stochasticity control (Tau) to interpolate between ODE and SDE behaviors. |
 
 ### Schedulers
 
@@ -42,10 +42,10 @@ Organized by category for easy selection:
 
 #### AkashicAOS v2 [EXPERIMENTAL]
 
-Detail-progressive schedule designed specifically for EQ-VAE SDXL models:
-- **Single continuous curve** — no discrete phase boundaries, smooth step ratios
-- **Detail-progressive** — ~18% more steps in detail region (exploits EQ-VAE's fine detail capability)  
-- **Mid-range enhancement** — subtle boost around logSNR ≈ 0 for structure formation
+A continuous power-function schedule designed for the smooth latent space of EQ-VAE:
+- **Single continuous curve** — unlike stepwise schedules, uses a single continuous curve with no discrete phase boundaries
+- **Detail-progressive** — shifts ~18% more steps into the low-sigma (detail) region
+- **Mid-range enhancement** — applies a sinusoidal density boost at logSNR ≈ 0 to enhance mid-range structure formation
 - **AkashicSolver compatible** — designed for stable multi-step integration
 
 ### Enhancement Features
@@ -53,9 +53,9 @@ Detail-progressive schedule designed specifically for EQ-VAE SDXL models:
 | Feature | Description |
 |---------|-------------|
 | **Detail Enhancement** | High-frequency detail boosting using frequency separation. Configurable strength and separation radius. |
-| **Native Detail Boost** | AkashicSolver-exclusive feature that boosts high-frequency noise components for enhanced detail emergence at native resolution (without the blur that SMEA causes). |
+| **Native Detail Boost** | A frequency-separation tool for the AkashicSolver. It applies a Gaussian blur to the input noise to isolate high-frequency components, then selectively boosts them during the sampling process to maximize texture emergence at native resolutions. |
 | **SMEA** | High-resolution coherency feature (for >1024px) that prevents duplicated subjects and warped anatomy. |
-| **Content-Aware Pacing** | Dynamically switches from composition to detail focus based on image coherence (AOS only). |
+| **Content-Aware Pacing** | An adaptive scheduling algorithm for Euler Ancestral. It monitors the variance of the latent derivative at every step; once variance drops below a stability threshold (indicating structure coherence), it automatically switches the sampler from the composition phase to the detail refinement phase. |
 
 ### Other Features
 
