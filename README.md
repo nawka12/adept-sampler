@@ -10,6 +10,8 @@ While this sampler implements advanced techniques to improve generation, the fie
 
 This extension is developed and tested on **Stable Diffusion WebUI reForge**. Compatibility with other versions, such as the original WebUI or WebUI Forge, is not guaranteed.
 
+> Also available for ComfyUI: https://github.com/nawka12/ComfyUI-Adept-Sampler
+
 ### Sampler/Solver/Scheduler compatibility
 
 - Adept can run with the WebUI sampler's native solver or one of the Adept solvers.
