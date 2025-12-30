@@ -1431,7 +1431,7 @@ class AdeptSamplerForge(scripts.Script):
                                 )
                                 self.akashic_smea_strength = gr.Slider(
                                     label='SMEA Strength',
-                                    minimum=0.0, maximum=1.0, value=0.0, step=0.1,
+                                    minimum=0.0, maximum=1.0, value=0.0, step=0.05,
                                     info="High-res coherency (0=off)"
                                 )
                             
