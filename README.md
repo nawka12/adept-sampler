@@ -27,7 +27,7 @@ This extension is developed and tested on **Stable Diffusion WebUI reForge**. Co
 |--------|-------------|
 | **Adept Solver** | A hybrid **Predictor-Corrector** pipeline. It utilizes a multi-step Adams-Bashforth integrator (derived from **DEIS**) for prediction and a **UniPC**-style corrector step. It integrates **DC-Solver**'s compensation logic to align predictor-corrector steps and uses **DPM-Solver++** dynamic thresholding for high-CFG stability. |
 | **Adept Ancestral Solver** | Enhanced ancestral sampling with adaptive step sizing, phase-aware noise injection, enhanced derivative computation, and dynamic eta scheduling. |
-| **AkashicSolver [EXPERIMENTAL]** | An optimized implementation of the **Stochastic Adams Solver (SA-Solver)** tailored for SDXL/EQ-VAE. It augments the standard SA-Solver with **SMEA** (Sinusoidal Multipass) interpolation for high-res coherence and adds phase-aware stochasticity control (Tau) to interpolate between ODE and SDE behaviors. |
+| **AkashicSolver [EXPERIMENTAL]** | An optimized implementation of the **Stochastic Adams Solver (SA-Solver)** tailored for SDXL/EQ-VAE. It augments the standard SA-Solver with **SMEA** (Sinusoidal Multipass) interpolation for high-res coherence, phase-aware stochasticity control (Tau) to interpolate between ODE and SDE behaviors, and an **EQ-VAE Mode** with optimized noise scaling for EQ-VAE's cleaner latent space. |
 
 ### Schedulers
 
@@ -55,6 +55,7 @@ A continuous power-function schedule designed for the smooth latent space of EQ-
 | **Detail Enhancement** | High-frequency detail boosting using frequency separation. Configurable strength and separation radius. |
 | **Native Detail Boost** | A frequency-separation tool for the AkashicSolver. It applies a Gaussian blur to the input noise to isolate high-frequency components, then selectively boosts them during the sampling process to maximize texture emergence at native resolutions. |
 | **SMEA** | High-resolution coherency feature (for >1024px) that prevents duplicated subjects and warped anatomy. |
+| **EQ-VAE Mode** | Optimizes AkashicSolver for EQ-VAE's cleaner latent space (~56% lower latent noise). Applies balanced noise scaling, shifted phase boundaries, and tuned frequency separation for optimal sharpness. |
 | **Content-Aware Pacing** | An adaptive scheduling algorithm for Euler Ancestral. It monitors the variance of the latent derivative at every step; once variance drops below a stability threshold (indicating structure coherence), it automatically switches the sampler from the composition phase to the detail refinement phase. |
 
 ### Other Features
@@ -105,14 +106,15 @@ git clone https://github.com/nawka12/adept-sampler extensions/adept-sampler
 ```
 Solver: AkashicSolver [EXPERIMENTAL]
 Scheduler: AkashicAOS [EXPERIMENTAL]
-τ (tau): 0.5
+τ (tau): 0.5-0.6
 Order: 2
 η (eta): 1.0
 Noise Scale: 1.0
 Adaptive Eta: On
-Phase Strength: 0.5
+Phase Strength: 0.5-0.6
 SMEA: 0.0 (off for native res) / 0.1-0.2 (for >1.5x native)
 Native Detail Boost: 0.3-0.5 (for native res detail)
+EQ-VAE Mode: Balanced
 ```
 
 **Important**: Use external rescaleCFG at 0.7 for EQ-VAE models.
@@ -146,6 +148,7 @@ Native Detail Boost: 0.3-0.5 (for native res detail)
 | **Phase Strength** | 0.0–1.0 | 0.5 | Intensity of phase-aware adaptations |
 | **SMEA Strength** | 0.0–1.0 | 0.0 | High-res coherency (use for >1024px only) |
 | **Native Detail Boost** | 0.0–1.0 | 0.0 | High-frequency noise boost for native res detail |
+| **EQ-VAE Mode** | Off/Balanced | Off | Optimizes noise scaling and phase boundaries for EQ-VAE models |
 
 ## 📊 Samples
 
