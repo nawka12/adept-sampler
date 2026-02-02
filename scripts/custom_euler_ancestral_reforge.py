@@ -44,6 +44,89 @@ original_samplers = {}
 # Track patching state
 _patching_enabled = False
 
+# VAE Reflection: Track original Conv2d padding modes for restoration
+_vae_reflection_active = False
+_vae_original_padding_modes = {}
+
+
+def apply_vae_reflection(vae_model):
+    """
+    Patch VAE Conv2d layers to use reflect padding mode.
+
+    This fixes edge artifacts in images generated with VAEs trained using
+    reflect padding (e.g., Anzhc's EQ-VAE). Without this patch, standard
+    'zeros' padding can cause visible seams at image boundaries.
+
+    Args:
+        vae_model: The VAE model (first_stage_model) to patch
+
+    Returns:
+        True if patching was successful, False otherwise
+    """
+    global _vae_reflection_active, _vae_original_padding_modes
+
+    if _vae_reflection_active:
+        return True  # Already patched
+
+    if vae_model is None:
+        print("⚠️ VAE Reflection: No VAE model available")
+        return False
+
+    _vae_original_padding_modes.clear()
+    patched_count = 0
+
+    try:
+        for name, module in vae_model.named_modules():
+            if isinstance(module, torch.nn.Conv2d):
+                # Store original padding mode
+                _vae_original_padding_modes[name] = module.padding_mode
+                # Set to reflect mode
+                module.padding_mode = 'reflect'
+                patched_count += 1
+
+        _vae_reflection_active = True
+        print(f"🪞 VAE Reflection: Patched {patched_count} Conv2d layers to reflect mode")
+        return True
+    except Exception as e:
+        print(f"❌ VAE Reflection: Failed to patch - {e}")
+        # Attempt to restore any partially patched layers
+        restore_vae_reflection(vae_model)
+        return False
+
+
+def restore_vae_reflection(vae_model):
+    """
+    Restore VAE Conv2d layers to their original padding modes.
+
+    Args:
+        vae_model: The VAE model (first_stage_model) to restore
+    """
+    global _vae_reflection_active, _vae_original_padding_modes
+
+    if not _vae_reflection_active and not _vae_original_padding_modes:
+        return  # Nothing to restore
+
+    if vae_model is None:
+        _vae_reflection_active = False
+        _vae_original_padding_modes.clear()
+        return
+
+    restored_count = 0
+
+    try:
+        for name, module in vae_model.named_modules():
+            if isinstance(module, torch.nn.Conv2d) and name in _vae_original_padding_modes:
+                module.padding_mode = _vae_original_padding_modes[name]
+                restored_count += 1
+
+        if restored_count > 0:
+            print(f"🪞 VAE Reflection: Restored {restored_count} Conv2d layers to original padding")
+    except Exception as e:
+        print(f"⚠️ VAE Reflection: Error during restore - {e}")
+    finally:
+        _vae_reflection_active = False
+        _vae_original_padding_modes.clear()
+
 # JYS (Jump Your Steps) Dynamic Schedule Computation
 # Computes optimized timestep sequences dynamically based on user-specified step count
 # Strategy: Large jumps early (composition), dense clustering in detail formation region (200-400), fine steps at end
@@ -87,6 +170,7 @@ current_sampler_settings = {
     'akashic_smea_strength': 0.0,    # SMEA high-res coherency (0=disabled)
     'akashic_ndb_strength': 0.0,     # Native Detail Boost (0=disabled)
     'akashic_eqvae_mode': 'Off',     # EQ-VAE optimized mode: 'Off', 'Balanced'
+    'vae_reflection': False,         # VAE reflection padding for EQ-VAE edge artifact fix
 }
 
 
@@ -1722,9 +1806,16 @@ class AdeptSamplerForge(scripts.Script):
                         with gr.Row():
                             self.eta = gr.Slider(label='Eta', minimum=0.0, maximum=2.0, value=1.0, step=0.01, info="Ancestral noise amount.")
                             self.s_noise = gr.Slider(label='Noise Scale', minimum=0.0, maximum=2.0, value=1.0, step=0.01, info="Noise strength.")
-                        
+
                         self.disable_for_hr = gr.Checkbox(label="Disable for Hires. fix", value=True, info="Turns off during hi-res pass.")
                         self.debug_reproducibility = gr.Checkbox(label='Debug Reproducibility', value=False, info="Disables advanced features.")
+
+                        gr.Markdown("**VAE Options**")
+                        self.vae_reflection = gr.Checkbox(
+                            label='VAE Reflection Padding',
+                            value=False,
+                            info="Fix edge artifacts for VAEs trained with reflect padding (e.g., Anzhc's EQ-VAE)"
+                        )
             
                     with gr.TabItem("Experimental"):
                         self.exp_cfg_to_zero = gr.Checkbox(
@@ -1780,6 +1871,7 @@ class AdeptSamplerForge(scripts.Script):
             (self.akashic_smea_strength, lambda p: gr.update() if p.get('akashic_smea_strength') in (None, 'N/A') else float(p['akashic_smea_strength'])),
             (self.akashic_ndb_strength, lambda p: gr.update() if p.get('akashic_ndb_strength') in (None, 'N/A') else float(p['akashic_ndb_strength'])),
             (self.akashic_eqvae_mode, lambda p: p.get('akashic_eqvae_mode', 'Off') if 'akashic_eqvae_mode' in p else gr.update()),
+            (self.vae_reflection, lambda p: str(p.get('vae_reflection', 'false')).lower() == 'true' if 'vae_reflection' in p else gr.update()),
         ]
 
         def scheduler_getter(params):
@@ -1822,6 +1914,7 @@ class AdeptSamplerForge(scripts.Script):
             self.akashic_adaptive_eta, self.akashic_use_ays, self.akashic_phase_strength, self.akashic_smea_strength,
             self.akashic_ndb_strength,
             self.akashic_eqvae_mode,
+            self.vae_reflection,
         ]
 
     def process_before_every_sampling(self, p, *script_args, **kwargs):
@@ -1842,7 +1935,7 @@ class AdeptSamplerForge(scripts.Script):
             adept_ancestral_adaptive_eta, adept_ancestral_phase_noise, adept_ancestral_phase_strength, adept_ancestral_enhanced_derivative,
             akashic_tau, akashic_solver_order, akashic_base_eta, akashic_s_noise,
             akashic_adaptive_eta, akashic_use_ays, akashic_phase_strength, akashic_smea_strength,
-            akashic_ndb_strength, akashic_eqvae_mode,
+            akashic_ndb_strength, akashic_eqvae_mode, vae_reflection,
         ) = script_args
 
         # --- XYZ Grid overrides (if provided) ---
@@ -1943,6 +2036,8 @@ class AdeptSamplerForge(scripts.Script):
                 except Exception: pass
             if "akashic_eqvae_mode" in xyz:
                 akashic_eqvae_mode = str(xyz["akashic_eqvae_mode"])
+            if "vae_reflection" in xyz:
+                vae_reflection = str(xyz["vae_reflection"]) == "True"
 
         # Set solver flags based on the dropdown choice
         use_adept_solver = (solver_type == 'Adept Solver')
@@ -2043,8 +2138,19 @@ class AdeptSamplerForge(scripts.Script):
             'akashic_smea_strength': akashic_smea_strength,
             'akashic_ndb_strength': akashic_ndb_strength,
             'akashic_eqvae_mode': akashic_eqvae_mode,
+            'vae_reflection': vae_reflection,
         })
-        
+
+        # --- VAE Reflection Handling ---
+        # Apply or restore VAE reflection based on setting
+        if WEBUI_AVAILABLE and hasattr(shared, 'sd_model') and shared.sd_model is not None:
+            vae_model = getattr(shared.sd_model, 'first_stage_model', None)
+            if vae_model is not None:
+                if vae_reflection:
+                    apply_vae_reflection(vae_model)
+                else:
+                    restore_vae_reflection(vae_model)
+
         if enable_custom:
             if disable_reason:
                 print(f"🔄 Adept Sampler disabled for {disable_reason}. Using standard Euler Ancestral.")
@@ -2098,6 +2204,7 @@ class AdeptSamplerForge(scripts.Script):
                 'akashic_smea_strength': akashic_smea_strength if use_akashic_solver else 'N/A',
                 'akashic_ndb_strength': akashic_ndb_strength if use_akashic_solver else 'N/A',
                 'akashic_eqvae_mode': akashic_eqvae_mode if use_akashic_solver else 'N/A',
+                'vae_reflection': vae_reflection,
             })
         else:
             print("🔄 Using standard sampler")
@@ -3315,7 +3422,7 @@ def set_value(p, x: Any, xs: Any, *, field: str):
                      "use_enhanced_detail_phase", "disable_for_hr", "exp_cfg_to_zero",
                      "adept_solver_use_corrector", "adept_ancestral_adaptive_eta",
                      "adept_ancestral_phase_noise", "adept_ancestral_enhanced_derivative",
-                     "akashic_adaptive_eta", "akashic_use_ays"):
+                     "akashic_adaptive_eta", "akashic_use_ays", "vae_reflection"):
             # Boolean fields
             x = str(x).strip().lower() == "true"
         elif field == "akashic_eqvae_mode":
@@ -3518,6 +3625,12 @@ def make_axis_on_xyz_grid():
             str,
             partial(set_value, field="akashic_eqvae_mode"),
             choices=lambda: ["Off", "Balanced"],
+        ),
+        xyz_grid.AxisOption(
+            "(Adept) VAE Reflection",
+            str,
+            partial(set_value, field="vae_reflection"),
+            choices=lambda: ["True", "False"],
         ),
     ]
 
