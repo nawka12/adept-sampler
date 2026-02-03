@@ -173,8 +173,8 @@ current_sampler_settings = {
     'vae_reflection': False,         # VAE reflection padding for EQ-VAE edge artifact fix
     # Built-in CFG Enhancement techniques (eliminates need for external rescaleCFG)
     'akashic_cfg_method': 'Off',     # CFG method: 'Off', 'APG', 'RescaleCFG', 'APG+Rescale'
-    'akashic_apg_eta': 0.0,          # APG parallel component weight (0=full removal, 1=standard CFG)
-    'akashic_apg_momentum': -0.5,    # APG momentum for smoothing (-1 to 1, negative = reverse)
+    'akashic_apg_eta': 1.0,          # APG parallel component weight (0=full removal, 1=standard CFG). Ref default: 1.0
+    'akashic_apg_momentum': 0.5,     # APG momentum for smoothing (-1.5 to 1.0). Ref default: 0.5
     'akashic_rescale_phi': 0.7,      # RescaleCFG interpolation (0=original, 1=fully rescaled)
     'akashic_spectral_mod': False,   # Enable spectral modulation for frequency correction
     'akashic_spectral_percentile': 5.0,  # Spectral modulation percentile threshold
@@ -1213,6 +1213,12 @@ def create_apg_cfg_function(eta=1.0, momentum=0.5, adaptive_momentum=0.180, norm
 
     By reducing the parallel component (via eta < 1), we reduce oversaturation.
 
+    Reference defaults from reForge APG extension:
+        eta: 1.0 (no APG effect - standard CFG behavior)
+        momentum: 0.5
+        adaptive_momentum: 0.180
+        norm_threshold: 15.0
+
     Args:
         eta: Parallel component weight (0=full removal, 1=standard CFG). Default: 1.0
         momentum: Guidance smoothing across steps (-1.5 to 1.0). Default: 0.5
@@ -1233,18 +1239,24 @@ def create_apg_cfg_function(eta=1.0, momentum=0.5, adaptive_momentum=0.180, norm
         model = args["model"]
 
         # Get timestep for adaptive momentum
+        # Reference: model.model_sampling.timestep(sigma)[0].item()
         try:
-            t = model.inner_model.model_sampling.timestep(sigma)[0].item()
+            t = model.model_sampling.timestep(sigma)[0].item()
         except:
-            t = 500  # Fallback mid-point
+            try:
+                # Fallback for wrapped models
+                t = model.inner_model.model_sampling.timestep(sigma)[0].item()
+            except:
+                t = 500  # Fallback mid-point
 
         momentum_buf = extras[0]
         mom = extras[1]
         adaptive_mom = extras[2]
 
         # Reset momentum buffer on new generation or resolution change
+        # Reference uses t == 999 (first timestep)
         if (torch.is_tensor(momentum_buf.running_average) and
-            cond.shape[3] != momentum_buf.running_average.shape[3]) or t >= 999:
+            cond.shape[3] != momentum_buf.running_average.shape[3]) or t == 999:
             momentum_buf = APGMomentumBuffer(mom)
             extras[0] = momentum_buf
         else:
@@ -1292,56 +1304,42 @@ def create_apg_cfg_function(eta=1.0, momentum=0.5, adaptive_momentum=0.180, norm
     return apg_cfg_function
 
 
-def create_rescale_cfg_function(phi=0.7):
+def create_rescale_cfg_function(multiplier=0.7):
     """
-    Create a RescaleCFG function.
+    Create a RescaleCFG function - EXACT copy of reForge reference implementation.
 
-    Based on the SDXL paper (arXiv:2305.08891) and reForge reference implementation.
-
-    This technique rescales the CFG output to match the standard deviation
-    of the conditional prediction, reducing oversaturation while maintaining
-    prompt adherence.
+    Based on reForge's extensions-builtin/reForge-RescaleCFG/RescaleCFG/nodes_RescaleCFG.py
 
     Args:
-        phi: Interpolation factor (0=no rescaling, 1=full rescaling). Default: 0.7
+        multiplier: Interpolation factor (0=no rescaling, 1=full rescaling). Default: 0.7
 
     Returns:
         CFG function compatible with set_model_sampler_cfg_function
     """
-    def rescale_cfg_function(args):
+    def rescale_cfg(args):
         cond = args["cond"]
         uncond = args["uncond"]
         cond_scale = args["cond_scale"]
         sigma = args["sigma"]
+        sigma = sigma.view(sigma.shape[:1] + (1,) * (cond.ndim - 1))
         x_orig = args["input"]
 
-        # Reshape sigma for broadcasting
-        sigma = sigma.view(sigma.shape[:1] + (1,) * (cond.ndim - 1))
-
-        # Convert to v-prediction space for proper rescaling
-        # x = x_orig / (sigma^2 + 1)
+        # rescale cfg has to be done on v-pred model output
         x = x_orig / (sigma * sigma + 1.0)
-        # Convert predictions to v-space
-        cond_v = ((x - (x_orig - cond)) * (sigma ** 2 + 1.0) ** 0.5) / sigma
-        uncond_v = ((x - (x_orig - uncond)) * (sigma ** 2 + 1.0) ** 0.5) / sigma
+        cond = ((x - (x_orig - cond)) * (sigma ** 2 + 1.0) ** 0.5) / (sigma)
+        uncond = ((x - (x_orig - uncond)) * (sigma ** 2 + 1.0) ** 0.5) / (sigma)
 
-        # Standard CFG in v-space
-        x_cfg = uncond_v + cond_scale * (cond_v - uncond_v)
+        # rescalecfg
+        x_cfg = uncond + cond_scale * (cond - uncond)
+        ro_pos = torch.std(cond, dim=(1,2,3), keepdim=True)
+        ro_cfg = torch.std(x_cfg, dim=(1,2,3), keepdim=True)
 
-        # Compute standard deviations
-        ro_pos = torch.std(cond_v, dim=(1, 2, 3), keepdim=True)
-        ro_cfg = torch.std(x_cfg, dim=(1, 2, 3), keepdim=True)
-
-        # Rescale CFG output to match cond std
         x_rescaled = x_cfg * (ro_pos / ro_cfg)
+        x_final = multiplier * x_rescaled + (1.0 - multiplier) * x_cfg
 
-        # Interpolate between rescaled and original CFG
-        x_final = phi * x_rescaled + (1.0 - phi) * x_cfg
-
-        # Convert back from v-space
         return x_orig - (x - x_final * sigma / (sigma * sigma + 1.0) ** 0.5)
 
-    return rescale_cfg_function
+    return rescale_cfg
 
 
 def create_combined_apg_rescale_function(apg_eta=1.0, apg_momentum=0.5, apg_adaptive_momentum=0.180,
@@ -1375,16 +1373,19 @@ def create_combined_apg_rescale_function(apg_eta=1.0, apg_momentum=0.5, apg_adap
 
         # === APG PHASE ===
         try:
-            t = model.inner_model.model_sampling.timestep(sigma)[0].item()
+            t = model.model_sampling.timestep(sigma)[0].item()
         except:
-            t = 500
+            try:
+                t = model.inner_model.model_sampling.timestep(sigma)[0].item()
+            except:
+                t = 500
 
         momentum_buf = extras[0]
         mom = extras[1]
         adaptive_mom = extras[2]
 
         if (torch.is_tensor(momentum_buf.running_average) and
-            cond.shape[3] != momentum_buf.running_average.shape[3]) or t >= 999:
+            cond.shape[3] != momentum_buf.running_average.shape[3]) or t == 999:
             momentum_buf = APGMomentumBuffer(mom)
             extras[0] = momentum_buf
         else:
@@ -1480,7 +1481,7 @@ def wrap_model_with_cfg_enhancement(model, cfg_settings):
         elif cfg_method == 'RescaleCFG':
             rescale_phi = cfg_settings.get('akashic_rescale_phi', 0.7)
 
-            cfg_func = create_rescale_cfg_function(phi=rescale_phi)
+            cfg_func = create_rescale_cfg_function(multiplier=rescale_phi)
             wrapped_model.set_model_sampler_cfg_function(cfg_func)
 
         elif cfg_method == 'APG+Rescale':
@@ -2345,13 +2346,13 @@ class AdeptSamplerForge(scripts.Script):
                                 with gr.Row():
                                     self.akashic_apg_eta = gr.Slider(
                                         label='APG Eta (η)',
-                                        minimum=0.0, maximum=1.0, value=0.0, step=0.05,
-                                        info="Parallel component weight (0=max APG effect, 1=standard CFG)"
+                                        minimum=0.0, maximum=1.0, value=1.0, step=0.1,
+                                        info="Parallel weight (0=max APG, 1=standard CFG). Reference default: 1.0"
                                     )
                                     self.akashic_apg_momentum = gr.Slider(
                                         label='APG Momentum',
-                                        minimum=-1.0, maximum=1.0, value=-0.5, step=0.1,
-                                        info="Guidance smoothing (-1 to 1, negative=reverse)"
+                                        minimum=-1.5, maximum=1.0, value=0.5, step=0.01,
+                                        info="Guidance smoothing (-1.5 to 1.0). Reference default: 0.5"
                                     )
 
                             with gr.Group(visible=False) as cfg_rescale_options:
