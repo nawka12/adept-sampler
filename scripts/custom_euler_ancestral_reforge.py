@@ -172,9 +172,7 @@ current_sampler_settings = {
     'akashic_eqvae_mode': 'Off',     # EQ-VAE optimized mode: 'Off', 'Balanced'
     'vae_reflection': False,         # VAE reflection padding for EQ-VAE edge artifact fix
     # Built-in CFG Enhancement techniques (eliminates need for external rescaleCFG)
-    'akashic_cfg_method': 'Off',     # CFG method: 'Off', 'APG', 'RescaleCFG', 'APG+Rescale'
-    'akashic_apg_eta': 1.0,          # APG parallel component weight (0=full removal, 1=standard CFG). Ref default: 1.0
-    'akashic_apg_momentum': 0.5,     # APG momentum for smoothing (-1.5 to 1.0). Ref default: 0.5
+    'akashic_cfg_method': 'Off',     # CFG method: 'Off', 'RescaleCFG'
     'akashic_rescale_phi': 0.7,      # RescaleCFG interpolation (0=original, 1=fully rescaled)
     'akashic_spectral_mod': False,   # Enable spectral modulation for frequency correction
     'akashic_spectral_percentile': 5.0,  # Spectral modulation percentile threshold
@@ -730,16 +728,14 @@ def sample_akashic_solver(model, x, sigmas, extra_args=None, callback=None,
     
     Recommended settings for EQ-VAE models (e.g., AkashicPulse):
     - Use with AkashicAOS scheduler or AYS schedule
-    - Enable built-in CFG Enhancement (APG or APG+Rescale) - no external rescaleCFG needed
+    - Enable built-in CFG Enhancement (RescaleCFG) - no external rescaleCFG needed
     - CFG Scale: 7-10
     - Steps: 20-30
     - Tau: 0.5 (balanced) or 1.0 (full stochastic)
     - Order: 2 (recommended)
 
     Built-in CFG Enhancement Methods:
-    - APG: Adaptive Projected Guidance - removes parallel component causing oversaturation
-    - RescaleCFG: Standard deviation normalization
-    - APG+Rescale: Both techniques combined for maximum effect
+    - RescaleCFG: Standard deviation normalization to reduce oversaturation
     """
     extra_args = {} if extra_args is None else extra_args
     s_in = x.new_ones([x.shape[0]])
@@ -759,8 +755,6 @@ def sample_akashic_solver(model, x, sigmas, extra_args=None, callback=None,
     cfg_method = current_sampler_settings.get('akashic_cfg_method', 'Off')
     cfg_settings = {
         'akashic_cfg_method': cfg_method,
-        'akashic_apg_eta': current_sampler_settings.get('akashic_apg_eta', 0.0),
-        'akashic_apg_momentum': current_sampler_settings.get('akashic_apg_momentum', -0.5),
         'akashic_rescale_phi': current_sampler_settings.get('akashic_rescale_phi', 0.7),
         'akashic_spectral_mod': current_sampler_settings.get('akashic_spectral_mod', False),
         'akashic_spectral_percentile': current_sampler_settings.get('akashic_spectral_percentile', 5.0),
@@ -792,9 +786,7 @@ def sample_akashic_solver(model, x, sigmas, extra_args=None, callback=None,
     # CFG Enhancement status
     if cfg_enhancement_active:
         print(f"   ✨ CFG Enhancement: {cfg_method} (no external rescaleCFG needed)")
-        if cfg_method in ['APG', 'APG+Rescale']:
-            print(f"      APG η: {cfg_settings['akashic_apg_eta']:.2f}, momentum: {cfg_settings['akashic_apg_momentum']:.2f}")
-        if cfg_method in ['RescaleCFG', 'APG+Rescale']:
+        if cfg_method == 'RescaleCFG':
             print(f"      Rescale φ: {cfg_settings['akashic_rescale_phi']:.2f}")
         extras = []
         if cfg_settings['akashic_spectral_mod']:
@@ -806,9 +798,9 @@ def sample_akashic_solver(model, x, sigmas, extra_args=None, callback=None,
         if extras:
             print(f"      Additional: {', '.join(extras)}")
     elif not eqvae_mode:
-        print(f"   ⚠️ Consider enabling CFG Enhancement (APG/Rescale) for EQ-VAE models")
+        print(f"   ⚠️ Consider enabling CFG Enhancement (RescaleCFG) for EQ-VAE models")
 
-    # Note: CFG Enhancement (APG/RescaleCFG) is now hooked at the model level
+    # Note: CFG Enhancement (RescaleCFG) is now hooked at the model level
     # in process_before_every_sampling() via p.sd_model.forge_objects.unet
     # The model passed here already has CFG hooks applied if enabled
 
@@ -819,9 +811,6 @@ def sample_akashic_solver(model, x, sigmas, extra_args=None, callback=None,
 
     # Multi-step history for SA-Solver (stores (sigma, derivative) tuples)
     d_history = []
-
-    # Legacy APG momentum buffer (for fallback post-hoc correction only)
-    apg_momentum_buffer = None
 
     for i in range(total_steps):
         sigma = sigmas[i]
@@ -870,7 +859,7 @@ def sample_akashic_solver(model, x, sigmas, extra_args=None, callback=None,
         smea_factor = compute_smea_factor(progress, smea_strength)
 
         # === MODEL PREDICTION ===
-        # CFG enhancement (APG/RescaleCFG) is hooked at model level via forge_objects.unet
+        # CFG enhancement (RescaleCFG) is hooked at model level via forge_objects.unet
         denoised = model(x, sigma * s_in, **extra_args)
 
         # Apply dynamic thresholding for stability at high CFG
@@ -879,10 +868,10 @@ def sample_akashic_solver(model, x, sigmas, extra_args=None, callback=None,
             denoised = apply_dynamic_thresholding(denoised, percentile=0.995)
 
         # === POST-HOC CFG TECHNIQUES (Spectral, Divisive Norm, Combat Drift) ===
-        # Note: APG and RescaleCFG are now handled via model hook (above)
+        # Note: RescaleCFG is handled via model hook (above)
         # These additional techniques can still be applied post-hoc
         if cfg_enhancement_active:
-            # Apply only the additional post-hoc techniques (not APG/RescaleCFG)
+            # Apply the additional post-hoc techniques
             if cfg_settings.get('akashic_spectral_mod', False):
                 denoised = apply_spectral_modulation(
                     denoised,
@@ -1167,136 +1156,6 @@ def apply_dynamic_thresholding(x, percentile=0.995, clamp_range=1.0):
 # separate cond/uncond predictions, matching the reference implementations.
 # =============================================================================
 
-class APGMomentumBuffer:
-    """Momentum buffer for APG guidance smoothing across steps."""
-    def __init__(self, momentum: float):
-        self.momentum = momentum
-        self.running_average = 0
-
-    def update(self, update_value: torch.Tensor):
-        new_average = self.momentum * self.running_average
-        self.running_average = update_value + new_average
-
-
-def _apg_project(v0: torch.Tensor, v1: torch.Tensor):
-    """
-    Project v0 onto v1, returning parallel and orthogonal components.
-    Based on the reference APG implementation.
-    """
-    dtype = v0.dtype
-    # Normalize v1 for projection
-    v1 = torch.nn.functional.normalize(v1, dim=[-1, -2, -3])
-    # Compute parallel component via dot product
-    v0_parallel = (v0 * v1).sum(dim=[-1, -2, -3], keepdim=True) * v1
-    # Orthogonal is the remainder
-    v0_orthogonal = v0 - v0_parallel
-    return v0_parallel.to(dtype), v0_orthogonal.to(dtype)
-
-
-def create_apg_cfg_function(eta=1.0, momentum=0.5, adaptive_momentum=0.180, norm_threshold=15.0):
-    """
-    Create an APG (Adaptive Projected Guidance) CFG function.
-
-    Based on "Eliminating Oversaturation and Artifacts of High Guidance Scales
-    in Diffusion Models" (arXiv:2410.02416) and the reForge reference implementation.
-
-    The key insight: CFG direction (cond - uncond) can be decomposed into:
-    - Parallel component (in direction of cond): causes oversaturation
-    - Orthogonal component: enhances image quality
-
-    By reducing the parallel component (via eta < 1), we reduce oversaturation.
-
-    Reference defaults from reForge APG extension:
-        eta: 1.0 (no APG effect - standard CFG behavior)
-        momentum: 0.5
-        adaptive_momentum: 0.180
-        norm_threshold: 15.0
-
-    Args:
-        eta: Parallel component weight (0=full removal, 1=standard CFG). Default: 1.0
-        momentum: Guidance smoothing across steps (-1.5 to 1.0). Default: 0.5
-        adaptive_momentum: Momentum decay rate (0-1). Default: 0.180
-        norm_threshold: Max norm for guidance (0=disabled). Default: 15.0
-
-    Returns:
-        CFG function compatible with set_model_sampler_cfg_function
-    """
-    momentum_buffer = APGMomentumBuffer(momentum)
-    extras = [momentum_buffer, momentum, adaptive_momentum]
-
-    def apg_cfg_function(args):
-        cond = args["cond"]
-        uncond = args["uncond"]
-        cond_scale = args["cond_scale"]
-        sigma = args["sigma"]
-        model = args["model"]
-
-        # Get timestep for adaptive momentum
-        # Reference: model.model_sampling.timestep(sigma)[0].item()
-        try:
-            t = model.model_sampling.timestep(sigma)[0].item()
-        except:
-            try:
-                # Fallback for wrapped models
-                t = model.inner_model.model_sampling.timestep(sigma)[0].item()
-            except:
-                t = 500  # Fallback mid-point
-
-        momentum_buf = extras[0]
-        mom = extras[1]
-        adaptive_mom = extras[2]
-
-        # Reset momentum buffer on new generation or resolution change
-        # Reference uses t == 999 (first timestep)
-        if (torch.is_tensor(momentum_buf.running_average) and
-            cond.shape[3] != momentum_buf.running_average.shape[3]) or t == 999:
-            momentum_buf = APGMomentumBuffer(mom)
-            extras[0] = momentum_buf
-        else:
-            # Adaptive momentum: decay over time
-            signal_scale = mom
-            if adaptive_mom > 0:
-                if mom < 0:
-                    signal_scale += -mom * (adaptive_mom ** 4) * (1000 - t)
-                    if signal_scale > 0:
-                        signal_scale = 0
-                else:
-                    signal_scale -= mom * (adaptive_mom ** 4) * (1000 - t)
-                    if signal_scale < 0:
-                        signal_scale = 0
-            momentum_buf.momentum = signal_scale
-
-        # Compute guidance direction
-        diff = cond - uncond
-
-        # Apply momentum smoothing
-        if momentum_buf is not None:
-            momentum_buf.update(diff)
-            diff = momentum_buf.running_average
-
-        # Apply norm threshold if enabled
-        if norm_threshold > 0:
-            ones = torch.ones_like(diff)
-            diff_norm = diff.norm(p=2, dim=[-1, -2, -3], keepdim=True)
-            scale_factor = torch.minimum(ones, norm_threshold / diff_norm)
-            diff = diff * scale_factor
-
-        # Project onto cond direction to separate parallel/orthogonal
-        diff_parallel, diff_orthogonal = _apg_project(diff, cond)
-
-        # APG: keep orthogonal, reduce parallel by eta
-        normalized_update = diff_orthogonal + eta * diff_parallel
-
-        # Final guided prediction
-        # Note: standard CFG is: uncond + cond_scale * (cond - uncond)
-        # APG modifies this to: cond + (cond_scale - 1) * normalized_update
-        pred_guided = cond + (cond_scale - 1) * normalized_update
-
-        return pred_guided
-
-    return apg_cfg_function
-
-
 def create_rescale_cfg_function(multiplier=0.7):
     """
     Create a RescaleCFG function - EXACT copy of reForge reference implementation.
@@ -1335,105 +1194,9 @@ def create_rescale_cfg_function(multiplier=0.7):
     return rescale_cfg
 
 
-def create_combined_apg_rescale_function(apg_eta=1.0, apg_momentum=0.5, apg_adaptive_momentum=0.180,
-                                          apg_norm_threshold=15.0, rescale_phi=0.7):
-    """
-    Create a combined APG + RescaleCFG function.
-
-    Applies APG first (to decompose and reduce parallel guidance),
-    then RescaleCFG (to normalize the result).
-
-    Args:
-        apg_eta: APG parallel component weight (0-1)
-        apg_momentum: APG momentum (-1.5 to 1.0)
-        apg_adaptive_momentum: APG momentum decay rate
-        apg_norm_threshold: APG max guidance norm
-        rescale_phi: RescaleCFG interpolation factor
-
-    Returns:
-        CFG function compatible with set_model_sampler_cfg_function
-    """
-    momentum_buffer = APGMomentumBuffer(apg_momentum)
-    extras = [momentum_buffer, apg_momentum, apg_adaptive_momentum]
-
-    def combined_cfg_function(args):
-        cond = args["cond"]
-        uncond = args["uncond"]
-        cond_scale = args["cond_scale"]
-        sigma = args["sigma"]
-        model = args["model"]
-        x_orig = args["input"]
-
-        # === APG PHASE ===
-        try:
-            t = model.model_sampling.timestep(sigma)[0].item()
-        except:
-            try:
-                t = model.inner_model.model_sampling.timestep(sigma)[0].item()
-            except:
-                t = 500
-
-        momentum_buf = extras[0]
-        mom = extras[1]
-        adaptive_mom = extras[2]
-
-        if (torch.is_tensor(momentum_buf.running_average) and
-            cond.shape[3] != momentum_buf.running_average.shape[3]) or t == 999:
-            momentum_buf = APGMomentumBuffer(mom)
-            extras[0] = momentum_buf
-        else:
-            signal_scale = mom
-            if adaptive_mom > 0:
-                if mom < 0:
-                    signal_scale += -mom * (adaptive_mom ** 4) * (1000 - t)
-                    if signal_scale > 0:
-                        signal_scale = 0
-                else:
-                    signal_scale -= mom * (adaptive_mom ** 4) * (1000 - t)
-                    if signal_scale < 0:
-                        signal_scale = 0
-            momentum_buf.momentum = signal_scale
-
-        diff = cond - uncond
-
-        if momentum_buf is not None:
-            momentum_buf.update(diff)
-            diff = momentum_buf.running_average
-
-        if apg_norm_threshold > 0:
-            ones = torch.ones_like(diff)
-            diff_norm = diff.norm(p=2, dim=[-1, -2, -3], keepdim=True)
-            scale_factor = torch.minimum(ones, apg_norm_threshold / diff_norm)
-            diff = diff * scale_factor
-
-        diff_parallel, diff_orthogonal = _apg_project(diff, cond)
-        normalized_update = diff_orthogonal + apg_eta * diff_parallel
-
-        # Get APG result (this replaces standard CFG)
-        apg_result = cond + (cond_scale - 1) * normalized_update
-
-        # === RESCALECFG PHASE ===
-        # Apply rescaling to the APG result
-        sigma_reshaped = sigma.view(sigma.shape[:1] + (1,) * (cond.ndim - 1))
-
-        # Compute std of cond (reference) and apg_result
-        ro_pos = torch.std(cond, dim=(1, 2, 3), keepdim=True)
-        ro_cfg = torch.std(apg_result, dim=(1, 2, 3), keepdim=True)
-
-        # Rescale
-        x_rescaled = apg_result * (ro_pos / ro_cfg.clamp(min=1e-8))
-
-        # Interpolate
-        result = rescale_phi * x_rescaled + (1.0 - rescale_phi) * apg_result
-
-        return result
-
-    return combined_cfg_function
-
-
 def wrap_model_with_cfg_enhancement(model, cfg_settings):
     """
-    Wrap the model with CFG enhancement (APG and/or RescaleCFG).
+    Wrap the model with CFG enhancement (RescaleCFG).
 
     This uses set_model_sampler_cfg_function to hook into the CFG computation
     with access to separate cond/uncond predictions.
@@ -1447,7 +1210,7 @@ def wrap_model_with_cfg_enhancement(model, cfg_settings):
     """
     cfg_method = cfg_settings.get('akashic_cfg_method', 'None')
 
-    if cfg_method == 'None':
+    if cfg_method == 'None' or cfg_method == 'Off':
         return model
 
     # Check if model supports the required methods
@@ -1459,36 +1222,10 @@ def wrap_model_with_cfg_enhancement(model, cfg_settings):
         # Clone the model to avoid modifying the original
         wrapped_model = model.clone()
 
-        if cfg_method == 'APG':
-            apg_eta = cfg_settings.get('akashic_apg_eta', 1.0)
-            apg_momentum = cfg_settings.get('akashic_apg_momentum', 0.5)
-
-            cfg_func = create_apg_cfg_function(
-                eta=apg_eta,
-                momentum=apg_momentum,
-                adaptive_momentum=0.180,
-                norm_threshold=15.0
-            )
-            wrapped_model.set_model_sampler_cfg_function(cfg_func)
-
-        elif cfg_method == 'RescaleCFG':
+        if cfg_method == 'RescaleCFG':
             rescale_phi = cfg_settings.get('akashic_rescale_phi', 0.7)
 
             cfg_func = create_rescale_cfg_function(multiplier=rescale_phi)
-            wrapped_model.set_model_sampler_cfg_function(cfg_func)
-
-        elif cfg_method == 'APG+Rescale':
-            apg_eta = cfg_settings.get('akashic_apg_eta', 1.0)
-            apg_momentum = cfg_settings.get('akashic_apg_momentum', 0.5)
-            rescale_phi = cfg_settings.get('akashic_rescale_phi', 0.7)
-
-            cfg_func = create_combined_apg_rescale_function(
-                apg_eta=apg_eta,
-                apg_momentum=apg_momentum,
-                apg_adaptive_momentum=0.180,
-                apg_norm_threshold=15.0,
-                rescale_phi=rescale_phi
-            )
             wrapped_model.set_model_sampler_cfg_function(cfg_func)
 
         return wrapped_model
@@ -1502,16 +1239,6 @@ def wrap_model_with_cfg_enhancement(model, cfg_settings):
 # LEGACY POST-HOC CFG FUNCTIONS (Fallback when model hooks unavailable)
 # These are less accurate but work without model-level access
 # =============================================================================
-
-def apply_apg(denoised, x, sigma, cfg_scale, eta=0.0, momentum=None, momentum_buffer=None):
-    """
-    Legacy post-hoc APG approximation. Used as fallback when model hooks unavailable.
-    For proper APG, use wrap_model_with_cfg_enhancement() instead.
-    """
-    # This is now a no-op since proper APG requires model-level hooks
-    # Return unchanged to avoid the previous broken implementation
-    return denoised, momentum_buffer
-
 
 def apply_rescale_cfg(denoised, x, sigma, phi=0.7):
     """
@@ -1706,7 +1433,7 @@ def compute_phase_aware_cfg_scale(base_scale, progress, alpha=2.0, beta=2.0):
         return base_scale
 
 
-def apply_cfg_techniques(denoised, x, sigma, cfg_scale, progress, settings, momentum_buffer=None):
+def apply_cfg_techniques(denoised, x, sigma, cfg_scale, progress, settings):
     """
     Master function to apply all enabled CFG enhancement techniques.
 
@@ -1719,32 +1446,19 @@ def apply_cfg_techniques(denoised, x, sigma, cfg_scale, progress, settings, mome
         cfg_scale: CFG scale being used
         progress: Sampling progress (0.0 to 1.0)
         settings: Dictionary with CFG technique settings
-        momentum_buffer: Previous APG momentum buffer (for APG momentum)
 
     Returns:
-        Tuple of (enhanced_denoised, new_momentum_buffer)
+        Enhanced denoised result
     """
     result = denoised
-    new_momentum_buffer = momentum_buffer
 
     cfg_method = settings.get('akashic_cfg_method', 'Off')
 
     if cfg_method == 'Off':
-        return result, new_momentum_buffer
-
-    # Apply APG if enabled
-    if cfg_method in ['APG', 'APG+Rescale']:
-        apg_eta = settings.get('akashic_apg_eta', 0.0)
-        apg_momentum = settings.get('akashic_apg_momentum', -0.5)
-        result, new_momentum_buffer = apply_apg(
-            result, x, sigma, cfg_scale,
-            eta=apg_eta,
-            momentum=apg_momentum,
-            momentum_buffer=momentum_buffer
-        )
+        return result
 
     # Apply RescaleCFG if enabled
-    if cfg_method in ['RescaleCFG', 'APG+Rescale']:
+    if cfg_method == 'RescaleCFG':
         rescale_phi = settings.get('akashic_rescale_phi', 0.7)
         result = apply_rescale_cfg(result, x, sigma, phi=rescale_phi)
 
@@ -1762,7 +1476,7 @@ def apply_cfg_techniques(denoised, x, sigma, cfg_scale, progress, settings, mome
     if settings.get('akashic_combat_cfg_drift', False):
         result = apply_combat_cfg_drift(result, method='mean')
 
-    return result, new_momentum_buffer
+    return result
 
 
 def compute_compensation_ratio(r, step_idx, total_steps, base_ratio=1.0):
@@ -2330,23 +2044,10 @@ class AdeptSamplerForge(scripts.Script):
                             with gr.Row():
                                 self.akashic_cfg_method = gr.Dropdown(
                                     label='CFG Method',
-                                    choices=['Off', 'APG', 'RescaleCFG', 'APG+Rescale'],
+                                    choices=['Off', 'RescaleCFG'],
                                     value='Off',
-                                    info="APG: Removes oversaturation. RescaleCFG: Std normalization."
+                                    info="RescaleCFG: Std normalization to reduce oversaturation"
                                 )
-
-                            with gr.Group(visible=False) as cfg_apg_options:
-                                with gr.Row():
-                                    self.akashic_apg_eta = gr.Slider(
-                                        label='APG Eta (η)',
-                                        minimum=0.0, maximum=1.0, value=1.0, step=0.1,
-                                        info="Parallel weight (0=max APG, 1=standard CFG). Reference default: 1.0"
-                                    )
-                                    self.akashic_apg_momentum = gr.Slider(
-                                        label='APG Momentum',
-                                        minimum=-1.5, maximum=1.0, value=0.5, step=0.01,
-                                        info="Guidance smoothing (-1.5 to 1.0). Reference default: 0.5"
-                                    )
 
                             with gr.Group(visible=False) as cfg_rescale_options:
                                 self.akashic_rescale_phi = gr.Slider(
@@ -2387,19 +2088,14 @@ class AdeptSamplerForge(scripts.Script):
                                     info="Normalization strength"
                                 )
 
-                            # Visibility handlers for CFG options
+                            # Visibility handler for CFG options
                             def on_cfg_method_change(method):
-                                show_apg = method in ['APG', 'APG+Rescale']
-                                show_rescale = method in ['RescaleCFG', 'APG+Rescale']
-                                return {
-                                    cfg_apg_options: gr.update(visible=show_apg),
-                                    cfg_rescale_options: gr.update(visible=show_rescale)
-                                }
+                                return gr.update(visible=method == 'RescaleCFG')
 
                             self.akashic_cfg_method.change(
                                 fn=on_cfg_method_change,
                                 inputs=[self.akashic_cfg_method],
-                                outputs=[cfg_apg_options, cfg_rescale_options]
+                                outputs=[cfg_rescale_options]
                             )
 
                             self.akashic_spectral_mod.change(
@@ -2641,8 +2337,6 @@ class AdeptSamplerForge(scripts.Script):
             (self.akashic_eqvae_mode, lambda p: p.get('akashic_eqvae_mode', 'Off') if 'akashic_eqvae_mode' in p else gr.update()),
             # CFG Enhancement settings
             (self.akashic_cfg_method, lambda p: p.get('akashic_cfg_method', 'Off') if 'akashic_cfg_method' in p else gr.update()),
-            (self.akashic_apg_eta, lambda p: gr.update() if p.get('akashic_apg_eta') in (None, 'N/A') else float(p['akashic_apg_eta'])),
-            (self.akashic_apg_momentum, lambda p: gr.update() if p.get('akashic_apg_momentum') in (None, 'N/A') else float(p['akashic_apg_momentum'])),
             (self.akashic_rescale_phi, lambda p: gr.update() if p.get('akashic_rescale_phi') in (None, 'N/A') else float(p['akashic_rescale_phi'])),
             (self.akashic_spectral_mod, lambda p: str(p.get('akashic_spectral_mod', 'false')).lower() == 'true' if 'akashic_spectral_mod' in p else gr.update()),
             (self.akashic_spectral_percentile, lambda p: gr.update() if p.get('akashic_spectral_percentile') in (None, 'N/A') else float(p['akashic_spectral_percentile'])),
@@ -2694,8 +2388,6 @@ class AdeptSamplerForge(scripts.Script):
             self.akashic_eqvae_mode,
             # CFG Enhancement settings
             self.akashic_cfg_method,
-            self.akashic_apg_eta,
-            self.akashic_apg_momentum,
             self.akashic_rescale_phi,
             self.akashic_spectral_mod,
             self.akashic_spectral_percentile,
@@ -2725,7 +2417,7 @@ class AdeptSamplerForge(scripts.Script):
             akashic_adaptive_eta, akashic_use_ays, akashic_phase_strength, akashic_smea_strength,
             akashic_ndb_strength, akashic_eqvae_mode,
             # CFG Enhancement settings
-            akashic_cfg_method, akashic_apg_eta, akashic_apg_momentum, akashic_rescale_phi,
+            akashic_cfg_method, akashic_rescale_phi,
             akashic_spectral_mod, akashic_spectral_percentile,
             akashic_divisive_norm, akashic_divisive_intensity, akashic_combat_cfg_drift,
             vae_reflection,
@@ -2832,12 +2524,6 @@ class AdeptSamplerForge(scripts.Script):
             # CFG Enhancement XYZ overrides
             if "akashic_cfg_method" in xyz:
                 akashic_cfg_method = str(xyz["akashic_cfg_method"])
-            if "akashic_apg_eta" in xyz:
-                try: akashic_apg_eta = float(xyz["akashic_apg_eta"])
-                except Exception: pass
-            if "akashic_apg_momentum" in xyz:
-                try: akashic_apg_momentum = float(xyz["akashic_apg_momentum"])
-                except Exception: pass
             if "akashic_rescale_phi" in xyz:
                 try: akashic_rescale_phi = float(xyz["akashic_rescale_phi"])
                 except Exception: pass
@@ -2957,8 +2643,6 @@ class AdeptSamplerForge(scripts.Script):
             'akashic_eqvae_mode': akashic_eqvae_mode,
             # CFG Enhancement settings
             'akashic_cfg_method': akashic_cfg_method,
-            'akashic_apg_eta': akashic_apg_eta,
-            'akashic_apg_momentum': akashic_apg_momentum,
             'akashic_rescale_phi': akashic_rescale_phi,
             'akashic_spectral_mod': akashic_spectral_mod,
             'akashic_spectral_percentile': akashic_spectral_percentile,
@@ -2979,43 +2663,9 @@ class AdeptSamplerForge(scripts.Script):
                     restore_vae_reflection(vae_model)
 
         # --- CFG Enhancement via Model Hook (Proper Implementation) ---
-        # Hook into the model's CFG function at the correct level
+        # Hook into sampling_prepare to inject CFG function at the right time
         if enable_custom and use_akashic_solver and akashic_cfg_method != 'Off':
-            try:
-                # Access the UNet patcher via forge_objects
-                if hasattr(p, 'sd_model') and hasattr(p.sd_model, 'forge_objects'):
-                    unet_patcher = p.sd_model.forge_objects.unet
-                    if unet_patcher is not None and hasattr(unet_patcher, 'set_model_sampler_cfg_function'):
-                        # Create the appropriate CFG function
-                        if akashic_cfg_method == 'APG':
-                            cfg_func = create_apg_cfg_function(
-                                eta=akashic_apg_eta,
-                                momentum=akashic_apg_momentum,
-                                adaptive_momentum=0.180,
-                                norm_threshold=15.0
-                            )
-                            unet_patcher.set_model_sampler_cfg_function(cfg_func)
-                            print(f"   🔗 APG hooked at model level (eta={akashic_apg_eta}, momentum={akashic_apg_momentum})")
-                        elif akashic_cfg_method == 'RescaleCFG':
-                            cfg_func = create_rescale_cfg_function(multiplier=akashic_rescale_phi)
-                            unet_patcher.set_model_sampler_cfg_function(cfg_func)
-                            print(f"   🔗 RescaleCFG hooked at model level (multiplier={akashic_rescale_phi})")
-                        elif akashic_cfg_method == 'APG+Rescale':
-                            cfg_func = create_combined_apg_rescale_function(
-                                apg_eta=akashic_apg_eta,
-                                apg_momentum=akashic_apg_momentum,
-                                apg_adaptive_momentum=0.180,
-                                apg_norm_threshold=15.0,
-                                rescale_phi=akashic_rescale_phi
-                            )
-                            unet_patcher.set_model_sampler_cfg_function(cfg_func)
-                            print(f"   🔗 APG+Rescale hooked at model level")
-                    else:
-                        print(f"   ⚠️ UNet patcher doesn't support CFG hooks")
-                else:
-                    print(f"   ⚠️ forge_objects not available for CFG hook")
-            except Exception as e:
-                print(f"   ⚠️ Failed to hook CFG at model level: {e}")
+            self._setup_cfg_hook(akashic_cfg_method, akashic_rescale_phi)
 
         if enable_custom:
             if disable_reason:
@@ -3072,9 +2722,7 @@ class AdeptSamplerForge(scripts.Script):
                 'akashic_eqvae_mode': akashic_eqvae_mode if use_akashic_solver else 'N/A',
                 # CFG Enhancement parameters
                 'akashic_cfg_method': akashic_cfg_method if use_akashic_solver else 'N/A',
-                'akashic_apg_eta': akashic_apg_eta if use_akashic_solver and akashic_cfg_method in ['APG', 'APG+Rescale'] else 'N/A',
-                'akashic_apg_momentum': akashic_apg_momentum if use_akashic_solver and akashic_cfg_method in ['APG', 'APG+Rescale'] else 'N/A',
-                'akashic_rescale_phi': akashic_rescale_phi if use_akashic_solver and akashic_cfg_method in ['RescaleCFG', 'APG+Rescale'] else 'N/A',
+                'akashic_rescale_phi': akashic_rescale_phi if use_akashic_solver and akashic_cfg_method == 'RescaleCFG' else 'N/A',
                 'akashic_spectral_mod': akashic_spectral_mod if use_akashic_solver else False,
                 'akashic_divisive_norm': akashic_divisive_norm if use_akashic_solver else False,
                 'akashic_combat_cfg_drift': akashic_combat_cfg_drift if use_akashic_solver else False,
@@ -3083,7 +2731,58 @@ class AdeptSamplerForge(scripts.Script):
         else:
             print("🔄 Using standard sampler")
             return
-    
+
+    def _setup_cfg_hook(self, cfg_method, rescale_phi):
+        """
+        Set up CFG enhancement by patching sampling_prepare to inject CFG function.
+        This ensures the CFG function is applied right before sampling starts,
+        when forge_objects.unet is available.
+        """
+        try:
+            from modules_forge import forge_sampler
+
+            # Store original function (only once)
+            if not hasattr(forge_sampler, '_adept_original_sampling_prepare'):
+                forge_sampler._adept_original_sampling_prepare = forge_sampler.sampling_prepare
+
+            # Create the appropriate CFG function based on method
+            if cfg_method == 'RescaleCFG':
+                cfg_func = create_rescale_cfg_function(multiplier=rescale_phi)
+                cfg_desc = f"RescaleCFG (multiplier={rescale_phi})"
+            else:
+                return
+
+            original_prepare = forge_sampler._adept_original_sampling_prepare
+            # Use a unique flag to track if we've already hooked this generation
+            hook_applied = [False]
+
+            def patched_sampling_prepare(unet, x):
+                # Apply our CFG function to the unet before sampling (only once per generation)
+                if not hook_applied[0] and hasattr(unet, 'set_model_sampler_cfg_function'):
+                    unet.set_model_sampler_cfg_function(cfg_func)
+                    hook_applied[0] = True
+                    print(f"   🔗 {cfg_desc} hooked at model level")
+                # Call original function
+                return original_prepare(unet, x)
+
+            # Patch the function
+            forge_sampler.sampling_prepare = patched_sampling_prepare
+            print(f"   📋 CFG Enhancement ({cfg_method}) ready")
+
+        except ImportError:
+            print(f"   ⚠️ modules_forge not available for CFG hook")
+        except Exception as e:
+            print(f"   ⚠️ Failed to setup CFG hook: {e}")
+
+    def _restore_cfg_hook(self):
+        """Restore original sampling_prepare function."""
+        try:
+            from modules_forge import forge_sampler
+            if hasattr(forge_sampler, '_adept_original_sampling_prepare'):
+                forge_sampler.sampling_prepare = forge_sampler._adept_original_sampling_prepare
+        except:
+            pass
+
     def sample_enhanced_euler_ancestral(self, model, x, sigmas, extra_args=None, callback=None, disable=None, eta=1., s_noise=1., generator=None, skip_schedule_override=False):
         """Simplified custom Euler Ancestral with dynamic thresholding, focused on AOS."""
         # --- Read settings from global config to ensure they are always correct ---
