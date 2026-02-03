@@ -808,16 +808,9 @@ def sample_akashic_solver(model, x, sigmas, extra_args=None, callback=None,
     elif not eqvae_mode:
         print(f"   ⚠️ Consider enabling CFG Enhancement (APG/Rescale) for EQ-VAE models")
 
-    # === WRAP MODEL WITH CFG ENHANCEMENT (PROPER IMPLEMENTATION) ===
-    # This hooks into the CFG computation with access to separate cond/uncond predictions
-    active_model = model
-    if cfg_enhancement_active:
-        wrapped = wrap_model_with_cfg_enhancement(model, cfg_settings)
-        if wrapped is not model:
-            active_model = wrapped
-            print(f"   🔗 Model wrapped with {cfg_method} CFG hook (proper implementation)")
-        else:
-            print(f"   ⚠️ Model wrapping failed, CFG enhancement may be limited")
+    # Note: CFG Enhancement (APG/RescaleCFG) is now hooked at the model level
+    # in process_before_every_sampling() via p.sd_model.forge_objects.unet
+    # The model passed here already has CFG hooks applied if enabled
 
     # Get noise sampler for stochastic injection
     noise_sampler = get_noise_sampler(x)
@@ -877,8 +870,8 @@ def sample_akashic_solver(model, x, sigmas, extra_args=None, callback=None,
         smea_factor = compute_smea_factor(progress, smea_strength)
 
         # === MODEL PREDICTION ===
-        # Use active_model (which may be wrapped with CFG enhancement)
-        denoised = active_model(x, sigma * s_in, **extra_args)
+        # CFG enhancement (APG/RescaleCFG) is hooked at model level via forge_objects.unet
+        denoised = model(x, sigma * s_in, **extra_args)
 
         # Apply dynamic thresholding for stability at high CFG
         cfg_scale = extra_args.get('cond_scale', 1.0)
@@ -2984,6 +2977,45 @@ class AdeptSamplerForge(scripts.Script):
                     apply_vae_reflection(vae_model)
                 else:
                     restore_vae_reflection(vae_model)
+
+        # --- CFG Enhancement via Model Hook (Proper Implementation) ---
+        # Hook into the model's CFG function at the correct level
+        if enable_custom and use_akashic_solver and akashic_cfg_method != 'Off':
+            try:
+                # Access the UNet patcher via forge_objects
+                if hasattr(p, 'sd_model') and hasattr(p.sd_model, 'forge_objects'):
+                    unet_patcher = p.sd_model.forge_objects.unet
+                    if unet_patcher is not None and hasattr(unet_patcher, 'set_model_sampler_cfg_function'):
+                        # Create the appropriate CFG function
+                        if akashic_cfg_method == 'APG':
+                            cfg_func = create_apg_cfg_function(
+                                eta=akashic_apg_eta,
+                                momentum=akashic_apg_momentum,
+                                adaptive_momentum=0.180,
+                                norm_threshold=15.0
+                            )
+                            unet_patcher.set_model_sampler_cfg_function(cfg_func)
+                            print(f"   🔗 APG hooked at model level (eta={akashic_apg_eta}, momentum={akashic_apg_momentum})")
+                        elif akashic_cfg_method == 'RescaleCFG':
+                            cfg_func = create_rescale_cfg_function(multiplier=akashic_rescale_phi)
+                            unet_patcher.set_model_sampler_cfg_function(cfg_func)
+                            print(f"   🔗 RescaleCFG hooked at model level (multiplier={akashic_rescale_phi})")
+                        elif akashic_cfg_method == 'APG+Rescale':
+                            cfg_func = create_combined_apg_rescale_function(
+                                apg_eta=akashic_apg_eta,
+                                apg_momentum=akashic_apg_momentum,
+                                apg_adaptive_momentum=0.180,
+                                apg_norm_threshold=15.0,
+                                rescale_phi=akashic_rescale_phi
+                            )
+                            unet_patcher.set_model_sampler_cfg_function(cfg_func)
+                            print(f"   🔗 APG+Rescale hooked at model level")
+                    else:
+                        print(f"   ⚠️ UNet patcher doesn't support CFG hooks")
+                else:
+                    print(f"   ⚠️ forge_objects not available for CFG hook")
+            except Exception as e:
+                print(f"   ⚠️ Failed to hook CFG at model level: {e}")
 
         if enable_custom:
             if disable_reason:
