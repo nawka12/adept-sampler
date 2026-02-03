@@ -1158,101 +1158,110 @@ def apply_dynamic_thresholding(x, percentile=0.995, clamp_range=1.0):
 
 def apply_apg(denoised, x, sigma, cfg_scale, eta=0.0, momentum=None, momentum_buffer=None):
     """
-    APG (Adaptive Projected Guidance): Decomposes CFG into parallel and orthogonal
-    components, down-weighting the parallel component that causes oversaturation.
+    APG-style CFG correction: Reduces oversaturation from high CFG by softly
+    clamping extreme values while preserving structure.
 
-    Based on "Eliminating Oversaturation and Artifacts of High Guidance Scales
-    in Diffusion Models" (arXiv:2410.02416)
+    This is an approximation of Adaptive Projected Guidance that works without
+    access to separate cond/uncond predictions. It achieves similar results by:
+    1. Identifying extreme values that indicate CFG oversaturation
+    2. Soft-clamping them toward the mean
+    3. Applying momentum for temporal consistency
 
-    The key insight is that the parallel component (in the direction of the
-    conditional prediction) causes oversaturation, while the orthogonal component
-    enhances image quality.
+    The eta parameter controls the strength:
+    - eta=0: Maximum correction (most aggressive oversaturation removal)
+    - eta=1: No correction (standard CFG behavior)
 
     Args:
         denoised: The denoised prediction (after CFG is applied by the model)
-        x: Current latent
+        x: Current latent (unused, kept for API compatibility)
         sigma: Current sigma value
         cfg_scale: CFG scale used
-        eta: Parallel component weight (0=full removal for max effect, 1=standard CFG)
-        momentum: Momentum value for smoothing (-1 to 1, negative = reverse momentum)
-        momentum_buffer: Previous guidance direction for momentum calculation
+        eta: Correction strength (0=max correction, 1=no correction)
+        momentum: Momentum for temporal smoothing (-1 to 1)
+        momentum_buffer: Previous correction buffer
 
     Returns:
         Tuple of (adjusted_denoised, new_momentum_buffer)
     """
-    if cfg_scale <= 1.0:
+    if cfg_scale <= 1.0 or eta >= 1.0:
         return denoised, momentum_buffer
 
     try:
-        # We need to estimate the guidance direction from the denoised output
-        # The guidance direction is approximately proportional to: denoised - x/sigma
-        # This is because CFG amplifies the conditional prediction
-
-        # Estimate the "base" prediction (what uncond would produce)
-        # and the "guidance" direction (what CFG added)
-        # Since denoised = uncond + cfg_scale * (cond - uncond)
-        # The guidance direction ≈ (denoised - estimated_uncond) / cfg_scale
-
-        # For APG, we work on the denoised prediction directly
-        # Project onto the denoised direction and separate components
         batch_size = denoised.shape[0]
-        denoised_flat = denoised.view(batch_size, -1)
+        num_channels = denoised.shape[1]
 
-        # Normalize for projection
-        denoised_norm = torch.norm(denoised_flat, dim=1, keepdim=True).clamp(min=1e-8)
-        denoised_unit = denoised_flat / denoised_norm
+        # Work per-channel to preserve color balance
+        result = denoised.clone()
 
-        # Estimate guidance direction from the latent-denoised relationship
-        # The "guidance" effect is what moves the latent toward the denoised state
-        x_flat = x.view(batch_size, -1)
-        guidance_direction = denoised_flat - x_flat / sigma.view(-1, 1).clamp(min=1e-8)
+        for c in range(num_channels):
+            channel = denoised[:, c:c+1, :, :]
+            channel_flat = channel.view(batch_size, -1)
 
-        # Project guidance onto denoised direction (parallel component)
-        parallel_magnitude = torch.sum(guidance_direction * denoised_unit, dim=1, keepdim=True)
-        parallel_component = parallel_magnitude * denoised_unit
+            # Compute channel statistics
+            channel_mean = channel_flat.mean(dim=1, keepdim=True)
+            channel_std = channel_flat.std(dim=1, keepdim=True).clamp(min=1e-8)
 
-        # Orthogonal component (quality-enhancing)
-        orthogonal_component = guidance_direction - parallel_component
+            # Identify how far each value is from the mean (in std units)
+            normalized = (channel_flat - channel_mean) / channel_std
 
-        # Apply APG: down-weight parallel, keep orthogonal
-        # eta=0 means full removal of parallel (maximum APG effect)
-        # eta=1 means keep parallel (standard CFG behavior)
-        adjusted_guidance = eta * parallel_component + orthogonal_component
+            # Soft clamp: values beyond threshold get pulled back
+            # The threshold scales with CFG - higher CFG needs more correction
+            threshold = 2.5 + (1.0 - eta) * 1.5  # Range: 2.5 to 4.0
 
-        # Apply momentum if specified (smooths guidance across steps)
+            # Soft clamping function: tanh-based to smoothly reduce extremes
+            # correction_strength is how much we pull extreme values back
+            correction_strength = (1.0 - eta) * 0.3  # Max 30% correction at eta=0
+
+            # Apply soft correction to values beyond threshold
+            abs_normalized = torch.abs(normalized)
+            correction_mask = abs_normalized > threshold
+
+            if correction_mask.any():
+                # Calculate how much to pull back: more for more extreme values
+                excess = (abs_normalized - threshold).clamp(min=0)
+                # Tanh for smooth asymptotic behavior
+                correction = torch.tanh(excess * 0.5) * correction_strength
+
+                # Apply correction (pull toward mean)
+                corrected_normalized = normalized * (1.0 - correction * correction_mask.float())
+
+                # Reconstruct channel
+                corrected = corrected_normalized * channel_std + channel_mean
+                result[:, c:c+1, :, :] = corrected.view(channel.shape)
+
+        # Apply momentum if specified (smooths corrections across steps)
         if momentum is not None and momentum != 0 and momentum_buffer is not None:
-            # Momentum can be negative (reverse momentum) which focuses on current direction
-            adjusted_guidance = adjusted_guidance + momentum * momentum_buffer
-
-        # Reconstruct the adjusted denoised
-        adjusted_denoised = x_flat / sigma.view(-1, 1).clamp(min=1e-8) + adjusted_guidance
-        adjusted_denoised = adjusted_denoised.view(denoised.shape)
+            # Blend with previous result for temporal consistency
+            blend = abs(momentum) * 0.3  # Max 30% blend with previous
+            result = (1.0 - blend) * result + blend * momentum_buffer
 
         # Update momentum buffer
-        new_momentum_buffer = adjusted_guidance.detach().clone() if momentum is not None else None
+        new_momentum_buffer = result.detach().clone() if momentum is not None else None
 
-        return adjusted_denoised, new_momentum_buffer
+        return result, new_momentum_buffer
 
     except Exception as e:
-        print(f"⚠️ APG failed: {e}")
+        print(f"⚠️ APG correction failed: {e}")
         return denoised, momentum_buffer
 
 
 def apply_rescale_cfg(denoised, x, sigma, phi=0.7):
     """
-    RescaleCFG: Normalize CFG output by the ratio of standard deviations.
+    RescaleCFG: Normalize CFG output to reduce oversaturation.
 
     Based on the SDXL paper (arXiv:2305.08891).
 
-    This technique rescales the CFG output to match the standard deviation
-    of what the conditional prediction alone would produce, reducing
-    oversaturation while maintaining prompt adherence.
+    Since we don't have access to the original conditional prediction,
+    this implementation normalizes each channel to a target standard deviation,
+    effectively reducing the amplification caused by high CFG.
+
+    The target std is estimated based on typical latent statistics.
 
     Args:
         denoised: The denoised prediction (after CFG is applied)
-        x: Current latent (used as reference for "unconditioned" std)
+        x: Current latent (used for reference statistics)
         sigma: Current sigma value
-        phi: Interpolation factor (0=original CFG, 1=fully rescaled). Default: 0.7
+        phi: Interpolation factor (0=no rescaling, 1=full rescaling). Default: 0.7
 
     Returns:
         Rescaled denoised prediction
@@ -1262,27 +1271,41 @@ def apply_rescale_cfg(denoised, x, sigma, phi=0.7):
 
     try:
         batch_size = denoised.shape[0]
+        num_channels = denoised.shape[1]
 
-        # Compute std of the denoised (CFG) output
-        denoised_flat = denoised.view(batch_size, -1)
-        std_denoised = torch.std(denoised_flat, dim=1, keepdim=True).clamp(min=1e-8)
+        result = denoised.clone()
 
-        # Estimate the "natural" std - what the prediction should be without CFG amplification
-        # Use the input latent scaled by sigma as reference
-        x_flat = x.view(batch_size, -1)
-        # The expected std scales with sigma during denoising
-        std_reference = torch.std(x_flat, dim=1, keepdim=True).clamp(min=1e-8)
+        for c in range(num_channels):
+            channel = denoised[:, c:c+1, :, :]
+            channel_flat = channel.view(batch_size, -1)
 
-        # For better estimation, we use a running estimate based on the ratio
-        # The idea is that CFG amplifies std, so we want to bring it back
-        # Use a conservative approach: only rescale if std_denoised > std_reference
-        rescale_factor = std_reference / std_denoised
+            # Current channel statistics
+            current_std = channel_flat.std(dim=1, keepdim=True).clamp(min=1e-8)
+            current_mean = channel_flat.mean(dim=1, keepdim=True)
 
-        # Apply rescaling with interpolation
-        # phi=1 means full rescaling, phi=0 means no change
-        denoised_rescaled = denoised_flat * (1.0 + phi * (rescale_factor - 1.0))
+            # Reference: use the noisy latent's channel std as target
+            # This tends to be more "natural" than the CFG-amplified prediction
+            x_channel = x[:, c:c+1, :, :]
+            x_channel_flat = x_channel.view(batch_size, -1)
+            target_std = x_channel_flat.std(dim=1, keepdim=True).clamp(min=1e-8)
 
-        return denoised_rescaled.view(denoised.shape)
+            # Only rescale if current std is larger than target (CFG amplification)
+            # This prevents over-correction when std is already low
+            rescale_factor = torch.where(
+                current_std > target_std,
+                target_std / current_std,
+                torch.ones_like(current_std)
+            )
+
+            # Apply rescaling with interpolation (phi controls strength)
+            # Rescale around the mean to preserve color
+            centered = channel_flat - current_mean
+            rescaled = centered * (1.0 + phi * (rescale_factor - 1.0))
+            rescaled = rescaled + current_mean
+
+            result[:, c:c+1, :, :] = rescaled.view(channel.shape)
+
+        return result
 
     except Exception as e:
         print(f"⚠️ RescaleCFG failed: {e}")
