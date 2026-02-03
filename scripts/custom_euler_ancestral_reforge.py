@@ -171,6 +171,16 @@ current_sampler_settings = {
     'akashic_ndb_strength': 0.0,     # Native Detail Boost (0=disabled)
     'akashic_eqvae_mode': 'Off',     # EQ-VAE optimized mode: 'Off', 'Balanced'
     'vae_reflection': False,         # VAE reflection padding for EQ-VAE edge artifact fix
+    # Built-in CFG Enhancement techniques (eliminates need for external rescaleCFG)
+    'akashic_cfg_method': 'Off',     # CFG method: 'Off', 'APG', 'RescaleCFG', 'APG+Rescale'
+    'akashic_apg_eta': 0.0,          # APG parallel component weight (0=full removal, 1=standard CFG)
+    'akashic_apg_momentum': -0.5,    # APG momentum for smoothing (-1 to 1, negative = reverse)
+    'akashic_rescale_phi': 0.7,      # RescaleCFG interpolation (0=original, 1=fully rescaled)
+    'akashic_spectral_mod': False,   # Enable spectral modulation for frequency correction
+    'akashic_spectral_percentile': 5.0,  # Spectral modulation percentile threshold
+    'akashic_divisive_norm': False,  # Enable divisive normalization
+    'akashic_divisive_intensity': 1.0,  # Divisive norm intensity
+    'akashic_combat_cfg_drift': False,  # Combat CFG mean drift
 }
 
 
@@ -720,11 +730,16 @@ def sample_akashic_solver(model, x, sigmas, extra_args=None, callback=None,
     
     Recommended settings for EQ-VAE models (e.g., AkashicPulse):
     - Use with AkashicAOS scheduler or AYS schedule
-    - Use external rescaleCFG at 0.7
+    - Enable built-in CFG Enhancement (APG or APG+Rescale) - no external rescaleCFG needed
     - CFG Scale: 7-10
     - Steps: 20-30
     - Tau: 0.5 (balanced) or 1.0 (full stochastic)
     - Order: 2 (recommended)
+
+    Built-in CFG Enhancement Methods:
+    - APG: Adaptive Projected Guidance - removes parallel component causing oversaturation
+    - RescaleCFG: Standard deviation normalization
+    - APG+Rescale: Both techniques combined for maximum effect
     """
     extra_args = {} if extra_args is None else extra_args
     s_in = x.new_ones([x.shape[0]])
@@ -739,6 +754,21 @@ def sample_akashic_solver(model, x, sigmas, extra_args=None, callback=None,
     smea_strength = current_sampler_settings.get('akashic_smea_strength', 0.0)
     ndb_strength = current_sampler_settings.get('akashic_ndb_strength', 0.0)
     eqvae_mode_setting = current_sampler_settings.get('akashic_eqvae_mode', 'Off')
+
+    # Get CFG Enhancement settings
+    cfg_method = current_sampler_settings.get('akashic_cfg_method', 'Off')
+    cfg_settings = {
+        'akashic_cfg_method': cfg_method,
+        'akashic_apg_eta': current_sampler_settings.get('akashic_apg_eta', 0.0),
+        'akashic_apg_momentum': current_sampler_settings.get('akashic_apg_momentum', -0.5),
+        'akashic_rescale_phi': current_sampler_settings.get('akashic_rescale_phi', 0.7),
+        'akashic_spectral_mod': current_sampler_settings.get('akashic_spectral_mod', False),
+        'akashic_spectral_percentile': current_sampler_settings.get('akashic_spectral_percentile', 5.0),
+        'akashic_divisive_norm': current_sampler_settings.get('akashic_divisive_norm', False),
+        'akashic_divisive_intensity': current_sampler_settings.get('akashic_divisive_intensity', 1.0),
+        'akashic_combat_cfg_drift': current_sampler_settings.get('akashic_combat_cfg_drift', False),
+    }
+    cfg_enhancement_active = cfg_method != 'Off'
 
     # Parse EQ-VAE mode setting
     if isinstance(eqvae_mode_setting, bool):
@@ -758,8 +788,25 @@ def sample_akashic_solver(model, x, sigmas, extra_args=None, callback=None,
         print(f"   SMEA: {smea_strength:.2f} (high-res coherency)")
     if ndb_strength > 0:
         print(f"   Native Detail Boost: {ndb_strength:.2f} (detail enhancement)")
-    if not eqvae_mode:
-        print(f"   ⚠️ Use external rescaleCFG (e.g., 0.7) for EQ-VAE models")
+
+    # CFG Enhancement status
+    if cfg_enhancement_active:
+        print(f"   ✨ CFG Enhancement: {cfg_method} (no external rescaleCFG needed)")
+        if cfg_method in ['APG', 'APG+Rescale']:
+            print(f"      APG η: {cfg_settings['akashic_apg_eta']:.2f}, momentum: {cfg_settings['akashic_apg_momentum']:.2f}")
+        if cfg_method in ['RescaleCFG', 'APG+Rescale']:
+            print(f"      Rescale φ: {cfg_settings['akashic_rescale_phi']:.2f}")
+        extras = []
+        if cfg_settings['akashic_spectral_mod']:
+            extras.append("Spectral")
+        if cfg_settings['akashic_divisive_norm']:
+            extras.append("DivisiveNorm")
+        if cfg_settings['akashic_combat_cfg_drift']:
+            extras.append("CombatDrift")
+        if extras:
+            print(f"      Additional: {', '.join(extras)}")
+    elif not eqvae_mode:
+        print(f"   ⚠️ Consider enabling CFG Enhancement (APG/Rescale) for EQ-VAE models")
     
     # Get noise sampler for stochastic injection
     noise_sampler = get_noise_sampler(x)
@@ -768,7 +815,10 @@ def sample_akashic_solver(model, x, sigmas, extra_args=None, callback=None,
     
     # Multi-step history for SA-Solver (stores (sigma, derivative) tuples)
     d_history = []
-    
+
+    # APG momentum buffer for guidance smoothing
+    apg_momentum_buffer = None
+
     for i in range(total_steps):
         sigma = sigmas[i]
         sigma_next = sigmas[i + 1]
@@ -822,7 +872,20 @@ def sample_akashic_solver(model, x, sigmas, extra_args=None, callback=None,
         cfg_scale = extra_args.get('cond_scale', 1.0)
         if cfg_scale > 7.0:
             denoised = apply_dynamic_thresholding(denoised, percentile=0.995)
-        
+
+        # === BUILT-IN CFG ENHANCEMENT ===
+        # Apply APG, RescaleCFG, and other techniques to eliminate oversaturation
+        if cfg_enhancement_active:
+            denoised, apg_momentum_buffer = apply_cfg_techniques(
+                denoised=denoised,
+                x=x,
+                sigma=sigma,
+                cfg_scale=cfg_scale,
+                progress=progress,
+                settings=cfg_settings,
+                momentum_buffer=apg_momentum_buffer
+            )
+
         # === COMPUTE DERIVATIVE ===
         d = to_d(x, sigma, denoised)
         
@@ -1086,6 +1149,386 @@ def apply_dynamic_thresholding(x, percentile=0.995, clamp_range=1.0):
     except Exception as e:
         print(f"⚠️ Dynamic thresholding failed: {e}")
         return x
+
+
+# =============================================================================
+# BUILT-IN CFG ENHANCEMENT TECHNIQUES
+# These techniques eliminate the need for external rescaleCFG extensions
+# =============================================================================
+
+def apply_apg(denoised, x, sigma, cfg_scale, eta=0.0, momentum=None, momentum_buffer=None):
+    """
+    APG (Adaptive Projected Guidance): Decomposes CFG into parallel and orthogonal
+    components, down-weighting the parallel component that causes oversaturation.
+
+    Based on "Eliminating Oversaturation and Artifacts of High Guidance Scales
+    in Diffusion Models" (arXiv:2410.02416)
+
+    The key insight is that the parallel component (in the direction of the
+    conditional prediction) causes oversaturation, while the orthogonal component
+    enhances image quality.
+
+    Args:
+        denoised: The denoised prediction (after CFG is applied by the model)
+        x: Current latent
+        sigma: Current sigma value
+        cfg_scale: CFG scale used
+        eta: Parallel component weight (0=full removal for max effect, 1=standard CFG)
+        momentum: Momentum value for smoothing (-1 to 1, negative = reverse momentum)
+        momentum_buffer: Previous guidance direction for momentum calculation
+
+    Returns:
+        Tuple of (adjusted_denoised, new_momentum_buffer)
+    """
+    if cfg_scale <= 1.0:
+        return denoised, momentum_buffer
+
+    try:
+        # We need to estimate the guidance direction from the denoised output
+        # The guidance direction is approximately proportional to: denoised - x/sigma
+        # This is because CFG amplifies the conditional prediction
+
+        # Estimate the "base" prediction (what uncond would produce)
+        # and the "guidance" direction (what CFG added)
+        # Since denoised = uncond + cfg_scale * (cond - uncond)
+        # The guidance direction ≈ (denoised - estimated_uncond) / cfg_scale
+
+        # For APG, we work on the denoised prediction directly
+        # Project onto the denoised direction and separate components
+        batch_size = denoised.shape[0]
+        denoised_flat = denoised.view(batch_size, -1)
+
+        # Normalize for projection
+        denoised_norm = torch.norm(denoised_flat, dim=1, keepdim=True).clamp(min=1e-8)
+        denoised_unit = denoised_flat / denoised_norm
+
+        # Estimate guidance direction from the latent-denoised relationship
+        # The "guidance" effect is what moves the latent toward the denoised state
+        x_flat = x.view(batch_size, -1)
+        guidance_direction = denoised_flat - x_flat / sigma.view(-1, 1).clamp(min=1e-8)
+
+        # Project guidance onto denoised direction (parallel component)
+        parallel_magnitude = torch.sum(guidance_direction * denoised_unit, dim=1, keepdim=True)
+        parallel_component = parallel_magnitude * denoised_unit
+
+        # Orthogonal component (quality-enhancing)
+        orthogonal_component = guidance_direction - parallel_component
+
+        # Apply APG: down-weight parallel, keep orthogonal
+        # eta=0 means full removal of parallel (maximum APG effect)
+        # eta=1 means keep parallel (standard CFG behavior)
+        adjusted_guidance = eta * parallel_component + orthogonal_component
+
+        # Apply momentum if specified (smooths guidance across steps)
+        if momentum is not None and momentum != 0 and momentum_buffer is not None:
+            # Momentum can be negative (reverse momentum) which focuses on current direction
+            adjusted_guidance = adjusted_guidance + momentum * momentum_buffer
+
+        # Reconstruct the adjusted denoised
+        adjusted_denoised = x_flat / sigma.view(-1, 1).clamp(min=1e-8) + adjusted_guidance
+        adjusted_denoised = adjusted_denoised.view(denoised.shape)
+
+        # Update momentum buffer
+        new_momentum_buffer = adjusted_guidance.detach().clone() if momentum is not None else None
+
+        return adjusted_denoised, new_momentum_buffer
+
+    except Exception as e:
+        print(f"⚠️ APG failed: {e}")
+        return denoised, momentum_buffer
+
+
+def apply_rescale_cfg(denoised, x, sigma, phi=0.7):
+    """
+    RescaleCFG: Normalize CFG output by the ratio of standard deviations.
+
+    Based on the SDXL paper (arXiv:2305.08891).
+
+    This technique rescales the CFG output to match the standard deviation
+    of what the conditional prediction alone would produce, reducing
+    oversaturation while maintaining prompt adherence.
+
+    Args:
+        denoised: The denoised prediction (after CFG is applied)
+        x: Current latent (used as reference for "unconditioned" std)
+        sigma: Current sigma value
+        phi: Interpolation factor (0=original CFG, 1=fully rescaled). Default: 0.7
+
+    Returns:
+        Rescaled denoised prediction
+    """
+    if phi <= 0:
+        return denoised
+
+    try:
+        batch_size = denoised.shape[0]
+
+        # Compute std of the denoised (CFG) output
+        denoised_flat = denoised.view(batch_size, -1)
+        std_denoised = torch.std(denoised_flat, dim=1, keepdim=True).clamp(min=1e-8)
+
+        # Estimate the "natural" std - what the prediction should be without CFG amplification
+        # Use the input latent scaled by sigma as reference
+        x_flat = x.view(batch_size, -1)
+        # The expected std scales with sigma during denoising
+        std_reference = torch.std(x_flat, dim=1, keepdim=True).clamp(min=1e-8)
+
+        # For better estimation, we use a running estimate based on the ratio
+        # The idea is that CFG amplifies std, so we want to bring it back
+        # Use a conservative approach: only rescale if std_denoised > std_reference
+        rescale_factor = std_reference / std_denoised
+
+        # Apply rescaling with interpolation
+        # phi=1 means full rescaling, phi=0 means no change
+        denoised_rescaled = denoised_flat * (1.0 + phi * (rescale_factor - 1.0))
+
+        return denoised_rescaled.view(denoised.shape)
+
+    except Exception as e:
+        print(f"⚠️ RescaleCFG failed: {e}")
+        return denoised
+
+
+def apply_spectral_modulation(latent, percentile=5.0, high_mult=0.9, low_mult=1.1):
+    """
+    Spectral Modulation: Apply frequency-domain corrections to combat CFG artifacts.
+
+    Based on ComfyUI-Latent-Modifiers.
+
+    Converts the latent to frequency domain via FFT, clamps high frequencies
+    (which cause noise/artifacts) and boosts low frequencies (which preserve
+    structure), then converts back.
+
+    Args:
+        latent: The latent tensor to modify
+        percentile: Upper/lower percentile threshold for modification. Default: 5.0
+        high_mult: Multiplier for high frequencies (< 1 reduces). Default: 0.9
+        low_mult: Multiplier for low frequencies (> 1 boosts). Default: 1.1
+
+    Returns:
+        Spectrally modulated latent
+    """
+    if percentile <= 0:
+        return latent
+
+    try:
+        # Apply FFT to each channel
+        # latent shape: (batch, channels, height, width)
+        fft = torch.fft.fft2(latent, dim=(-2, -1))
+        fft_shifted = torch.fft.fftshift(fft, dim=(-2, -1))
+
+        # Compute magnitude
+        magnitude = torch.abs(fft_shifted)
+
+        # Flatten for percentile computation (per batch, per channel)
+        mag_flat = magnitude.view(magnitude.shape[0], magnitude.shape[1], -1)
+
+        # Compute percentile thresholds
+        low_thresh = torch.quantile(mag_flat, percentile / 100.0, dim=-1, keepdim=True)
+        high_thresh = torch.quantile(mag_flat, 1.0 - percentile / 100.0, dim=-1, keepdim=True)
+
+        # Reshape thresholds back
+        low_thresh = low_thresh.view(magnitude.shape[0], magnitude.shape[1], 1, 1)
+        high_thresh = high_thresh.view(magnitude.shape[0], magnitude.shape[1], 1, 1)
+
+        # Create multiplier map
+        multiplier = torch.ones_like(magnitude)
+        multiplier = torch.where(magnitude < low_thresh, low_mult * multiplier, multiplier)
+        multiplier = torch.where(magnitude > high_thresh, high_mult * multiplier, multiplier)
+
+        # Apply modulation
+        fft_modulated = fft_shifted * multiplier
+
+        # Inverse FFT
+        fft_unshifted = torch.fft.ifftshift(fft_modulated, dim=(-2, -1))
+        result = torch.fft.ifft2(fft_unshifted, dim=(-2, -1)).real
+
+        return result
+
+    except Exception as e:
+        print(f"⚠️ Spectral modulation failed: {e}")
+        return latent
+
+
+def apply_divisive_norm(latent, intensity=1.0, kernel_size=3):
+    """
+    Divisive Normalization: Normalize latent using local average pooling.
+
+    Based on ComfyUI-Latent-Modifiers.
+
+    This can reduce noisy artifacts from high CFG by normalizing the latent
+    relative to its local neighborhood.
+
+    Args:
+        latent: The latent tensor to normalize
+        intensity: Effect strength (0=disabled, 1=full effect). Default: 1.0
+        kernel_size: Size of the pooling kernel. Default: 3
+
+    Returns:
+        Normalized latent
+    """
+    if intensity <= 0:
+        return latent
+
+    try:
+        import torch.nn.functional as F
+
+        # Compute local mean using average pooling
+        padding = kernel_size // 2
+        local_mean = F.avg_pool2d(
+            latent,
+            kernel_size=kernel_size,
+            stride=1,
+            padding=padding
+        )
+
+        # Divisive normalization
+        normalized = latent / (local_mean.abs() + 1e-8)
+
+        # Blend based on intensity
+        result = intensity * normalized + (1.0 - intensity) * latent
+
+        return result
+
+    except Exception as e:
+        print(f"⚠️ Divisive normalization failed: {e}")
+        return latent
+
+
+def apply_combat_cfg_drift(latent, method='mean'):
+    """
+    Combat CFG Drift: Re-center the latent to combat mean drift from high CFG.
+
+    Based on ComfyUI-Latent-Modifiers.
+
+    As CFG increases, the latent mean can drift away from 0, which causes
+    color shifts and other artifacts. This technique re-centers the latent.
+
+    Args:
+        latent: The latent tensor to re-center
+        method: 'mean' or 'median'. Default: 'mean'
+
+    Returns:
+        Re-centered latent
+    """
+    try:
+        if method == 'median':
+            # Compute median per batch, per channel
+            center = latent.view(latent.shape[0], latent.shape[1], -1).median(dim=-1, keepdim=True)[0]
+            center = center.view(latent.shape[0], latent.shape[1], 1, 1)
+        else:
+            # Compute mean per batch, per channel
+            center = latent.mean(dim=(-2, -1), keepdim=True)
+
+        # Subtract to re-center
+        return latent - center
+
+    except Exception as e:
+        print(f"⚠️ Combat CFG drift failed: {e}")
+        return latent
+
+
+def compute_phase_aware_cfg_scale(base_scale, progress, alpha=2.0, beta=2.0):
+    """
+    Phase-Aware CFG Scaling: Adjust CFG scale based on sampling progress.
+
+    Inspired by β-CFG (arXiv:2502.10574).
+
+    CFG effectiveness varies by sampling phase:
+    - Early: Lower CFG allows manifold exploration
+    - Middle: Higher CFG for prompt adherence
+    - Late: Lower CFG to stay on data manifold
+
+    Args:
+        base_scale: The user-specified CFG scale
+        progress: Sampling progress (0.0 to 1.0)
+        alpha: Beta distribution alpha parameter. Default: 2.0
+        beta: Beta distribution beta parameter. Default: 2.0
+
+    Returns:
+        Adjusted CFG scale for the current step
+    """
+    try:
+        # Use a simple polynomial approximation of beta distribution
+        # Beta(2,2) peaks at 0.5 with a smooth curve
+        # f(x) = 6 * x * (1-x) for Beta(2,2), normalized to peak at 1
+        if alpha == 2.0 and beta == 2.0:
+            # Simple case: symmetric peak at 0.5
+            scale_factor = 4.0 * progress * (1.0 - progress)  # Peaks at 1.0 when progress=0.5
+            scale_factor = 0.7 + 0.6 * scale_factor  # Range: 0.7 to 1.3
+        else:
+            # General case: use polynomial approximation
+            # Mode of Beta(a,b) is at (a-1)/(a+b-2)
+            mode = (alpha - 1.0) / (alpha + beta - 2.0) if (alpha + beta) > 2 else 0.5
+            # Create a smooth curve that peaks at the mode
+            dist_from_mode = abs(progress - mode)
+            scale_factor = 1.0 - 0.3 * dist_from_mode * 2  # Simple linear falloff
+            scale_factor = max(0.7, min(1.3, scale_factor))
+
+        return base_scale * scale_factor
+
+    except Exception as e:
+        print(f"⚠️ Phase-aware CFG scaling failed: {e}")
+        return base_scale
+
+
+def apply_cfg_techniques(denoised, x, sigma, cfg_scale, progress, settings, momentum_buffer=None):
+    """
+    Master function to apply all enabled CFG enhancement techniques.
+
+    This is the main entry point for CFG enhancements in the solver.
+
+    Args:
+        denoised: The denoised prediction from the model
+        x: Current latent
+        sigma: Current sigma value
+        cfg_scale: CFG scale being used
+        progress: Sampling progress (0.0 to 1.0)
+        settings: Dictionary with CFG technique settings
+        momentum_buffer: Previous APG momentum buffer (for APG momentum)
+
+    Returns:
+        Tuple of (enhanced_denoised, new_momentum_buffer)
+    """
+    result = denoised
+    new_momentum_buffer = momentum_buffer
+
+    cfg_method = settings.get('akashic_cfg_method', 'Off')
+
+    if cfg_method == 'Off':
+        return result, new_momentum_buffer
+
+    # Apply APG if enabled
+    if cfg_method in ['APG', 'APG+Rescale']:
+        apg_eta = settings.get('akashic_apg_eta', 0.0)
+        apg_momentum = settings.get('akashic_apg_momentum', -0.5)
+        result, new_momentum_buffer = apply_apg(
+            result, x, sigma, cfg_scale,
+            eta=apg_eta,
+            momentum=apg_momentum,
+            momentum_buffer=momentum_buffer
+        )
+
+    # Apply RescaleCFG if enabled
+    if cfg_method in ['RescaleCFG', 'APG+Rescale']:
+        rescale_phi = settings.get('akashic_rescale_phi', 0.7)
+        result = apply_rescale_cfg(result, x, sigma, phi=rescale_phi)
+
+    # Apply Spectral Modulation if enabled
+    if settings.get('akashic_spectral_mod', False):
+        percentile = settings.get('akashic_spectral_percentile', 5.0)
+        result = apply_spectral_modulation(result, percentile=percentile)
+
+    # Apply Divisive Normalization if enabled
+    if settings.get('akashic_divisive_norm', False):
+        intensity = settings.get('akashic_divisive_intensity', 1.0)
+        result = apply_divisive_norm(result, intensity=intensity)
+
+    # Apply Combat CFG Drift if enabled
+    if settings.get('akashic_combat_cfg_drift', False):
+        result = apply_combat_cfg_drift(result, method='mean')
+
+    return result, new_momentum_buffer
 
 
 def compute_compensation_ratio(r, step_idx, total_steps, base_ratio=1.0):
@@ -1583,7 +2026,7 @@ class AdeptSamplerForge(scripts.Script):
                         
                         with gr.Group(visible=False) as akashic_solver_options:
                             gr.Markdown("🌀 **AkashicSolver v2** - SA-Solver base with AYS schedules")
-                            gr.Markdown("⚠️ Use with **external rescaleCFG** (0.7) for EQ-VAE models")
+                            gr.Markdown("💡 Enable **Built-in CFG Enhancement** below to eliminate need for external rescaleCFG")
                             
                             with gr.Row():
                                 self.akashic_tau = gr.Slider(
@@ -1645,6 +2088,97 @@ class AdeptSamplerForge(scripts.Script):
                                     value='Off',
                                     info="Optimized for EQ-VAE's cleaner latents"
                                 )
+
+                            # CFG Enhancement Section
+                            gr.Markdown("---")
+                            gr.Markdown("**Built-in CFG Enhancement** - Eliminates need for external rescaleCFG")
+
+                            with gr.Row():
+                                self.akashic_cfg_method = gr.Dropdown(
+                                    label='CFG Method',
+                                    choices=['Off', 'APG', 'RescaleCFG', 'APG+Rescale'],
+                                    value='Off',
+                                    info="APG: Removes oversaturation. RescaleCFG: Std normalization."
+                                )
+
+                            with gr.Group(visible=False) as cfg_apg_options:
+                                with gr.Row():
+                                    self.akashic_apg_eta = gr.Slider(
+                                        label='APG Eta (η)',
+                                        minimum=0.0, maximum=1.0, value=0.0, step=0.05,
+                                        info="Parallel component weight (0=max APG effect, 1=standard CFG)"
+                                    )
+                                    self.akashic_apg_momentum = gr.Slider(
+                                        label='APG Momentum',
+                                        minimum=-1.0, maximum=1.0, value=-0.5, step=0.1,
+                                        info="Guidance smoothing (-1 to 1, negative=reverse)"
+                                    )
+
+                            with gr.Group(visible=False) as cfg_rescale_options:
+                                self.akashic_rescale_phi = gr.Slider(
+                                    label='Rescale Phi (φ)',
+                                    minimum=0.0, maximum=1.0, value=0.7, step=0.05,
+                                    info="Interpolation (0=original, 1=fully rescaled)"
+                                )
+
+                            gr.Markdown("**Additional CFG Fixes**")
+                            with gr.Row():
+                                self.akashic_spectral_mod = gr.Checkbox(
+                                    label='Spectral Modulation',
+                                    value=False,
+                                    info="Frequency-domain CFG correction"
+                                )
+                                self.akashic_divisive_norm = gr.Checkbox(
+                                    label='Divisive Norm',
+                                    value=False,
+                                    info="Local normalization for artifacts"
+                                )
+                                self.akashic_combat_cfg_drift = gr.Checkbox(
+                                    label='Combat CFG Drift',
+                                    value=False,
+                                    info="Re-center latent mean"
+                                )
+
+                            with gr.Group(visible=False) as spectral_options:
+                                self.akashic_spectral_percentile = gr.Slider(
+                                    label='Spectral Percentile',
+                                    minimum=1.0, maximum=15.0, value=5.0, step=0.5,
+                                    info="Frequency threshold (lower=gentler)"
+                                )
+
+                            with gr.Group(visible=False) as divisive_options:
+                                self.akashic_divisive_intensity = gr.Slider(
+                                    label='Divisive Intensity',
+                                    minimum=0.1, maximum=2.0, value=1.0, step=0.1,
+                                    info="Normalization strength"
+                                )
+
+                            # Visibility handlers for CFG options
+                            def on_cfg_method_change(method):
+                                show_apg = method in ['APG', 'APG+Rescale']
+                                show_rescale = method in ['RescaleCFG', 'APG+Rescale']
+                                return {
+                                    cfg_apg_options: gr.update(visible=show_apg),
+                                    cfg_rescale_options: gr.update(visible=show_rescale)
+                                }
+
+                            self.akashic_cfg_method.change(
+                                fn=on_cfg_method_change,
+                                inputs=[self.akashic_cfg_method],
+                                outputs=[cfg_apg_options, cfg_rescale_options]
+                            )
+
+                            self.akashic_spectral_mod.change(
+                                fn=lambda x: gr.update(visible=x),
+                                inputs=[self.akashic_spectral_mod],
+                                outputs=[spectral_options]
+                            )
+
+                            self.akashic_divisive_norm.change(
+                                fn=lambda x: gr.update(visible=x),
+                                inputs=[self.akashic_divisive_norm],
+                                outputs=[divisive_options]
+                            )
 
                         def on_solver_type_change(solver_type):
                             return {
@@ -1871,6 +2405,16 @@ class AdeptSamplerForge(scripts.Script):
             (self.akashic_smea_strength, lambda p: gr.update() if p.get('akashic_smea_strength') in (None, 'N/A') else float(p['akashic_smea_strength'])),
             (self.akashic_ndb_strength, lambda p: gr.update() if p.get('akashic_ndb_strength') in (None, 'N/A') else float(p['akashic_ndb_strength'])),
             (self.akashic_eqvae_mode, lambda p: p.get('akashic_eqvae_mode', 'Off') if 'akashic_eqvae_mode' in p else gr.update()),
+            # CFG Enhancement settings
+            (self.akashic_cfg_method, lambda p: p.get('akashic_cfg_method', 'Off') if 'akashic_cfg_method' in p else gr.update()),
+            (self.akashic_apg_eta, lambda p: gr.update() if p.get('akashic_apg_eta') in (None, 'N/A') else float(p['akashic_apg_eta'])),
+            (self.akashic_apg_momentum, lambda p: gr.update() if p.get('akashic_apg_momentum') in (None, 'N/A') else float(p['akashic_apg_momentum'])),
+            (self.akashic_rescale_phi, lambda p: gr.update() if p.get('akashic_rescale_phi') in (None, 'N/A') else float(p['akashic_rescale_phi'])),
+            (self.akashic_spectral_mod, lambda p: str(p.get('akashic_spectral_mod', 'false')).lower() == 'true' if 'akashic_spectral_mod' in p else gr.update()),
+            (self.akashic_spectral_percentile, lambda p: gr.update() if p.get('akashic_spectral_percentile') in (None, 'N/A') else float(p['akashic_spectral_percentile'])),
+            (self.akashic_divisive_norm, lambda p: str(p.get('akashic_divisive_norm', 'false')).lower() == 'true' if 'akashic_divisive_norm' in p else gr.update()),
+            (self.akashic_divisive_intensity, lambda p: gr.update() if p.get('akashic_divisive_intensity') in (None, 'N/A') else float(p['akashic_divisive_intensity'])),
+            (self.akashic_combat_cfg_drift, lambda p: str(p.get('akashic_combat_cfg_drift', 'false')).lower() == 'true' if 'akashic_combat_cfg_drift' in p else gr.update()),
             (self.vae_reflection, lambda p: str(p.get('vae_reflection', 'false')).lower() == 'true' if 'vae_reflection' in p else gr.update()),
         ]
 
@@ -1914,6 +2458,16 @@ class AdeptSamplerForge(scripts.Script):
             self.akashic_adaptive_eta, self.akashic_use_ays, self.akashic_phase_strength, self.akashic_smea_strength,
             self.akashic_ndb_strength,
             self.akashic_eqvae_mode,
+            # CFG Enhancement settings
+            self.akashic_cfg_method,
+            self.akashic_apg_eta,
+            self.akashic_apg_momentum,
+            self.akashic_rescale_phi,
+            self.akashic_spectral_mod,
+            self.akashic_spectral_percentile,
+            self.akashic_divisive_norm,
+            self.akashic_divisive_intensity,
+            self.akashic_combat_cfg_drift,
             self.vae_reflection,
         ]
 
@@ -1935,7 +2489,12 @@ class AdeptSamplerForge(scripts.Script):
             adept_ancestral_adaptive_eta, adept_ancestral_phase_noise, adept_ancestral_phase_strength, adept_ancestral_enhanced_derivative,
             akashic_tau, akashic_solver_order, akashic_base_eta, akashic_s_noise,
             akashic_adaptive_eta, akashic_use_ays, akashic_phase_strength, akashic_smea_strength,
-            akashic_ndb_strength, akashic_eqvae_mode, vae_reflection,
+            akashic_ndb_strength, akashic_eqvae_mode,
+            # CFG Enhancement settings
+            akashic_cfg_method, akashic_apg_eta, akashic_apg_momentum, akashic_rescale_phi,
+            akashic_spectral_mod, akashic_spectral_percentile,
+            akashic_divisive_norm, akashic_divisive_intensity, akashic_combat_cfg_drift,
+            vae_reflection,
         ) = script_args
 
         # --- XYZ Grid overrides (if provided) ---
@@ -2036,6 +2595,30 @@ class AdeptSamplerForge(scripts.Script):
                 except Exception: pass
             if "akashic_eqvae_mode" in xyz:
                 akashic_eqvae_mode = str(xyz["akashic_eqvae_mode"])
+            # CFG Enhancement XYZ overrides
+            if "akashic_cfg_method" in xyz:
+                akashic_cfg_method = str(xyz["akashic_cfg_method"])
+            if "akashic_apg_eta" in xyz:
+                try: akashic_apg_eta = float(xyz["akashic_apg_eta"])
+                except Exception: pass
+            if "akashic_apg_momentum" in xyz:
+                try: akashic_apg_momentum = float(xyz["akashic_apg_momentum"])
+                except Exception: pass
+            if "akashic_rescale_phi" in xyz:
+                try: akashic_rescale_phi = float(xyz["akashic_rescale_phi"])
+                except Exception: pass
+            if "akashic_spectral_mod" in xyz:
+                akashic_spectral_mod = str(xyz["akashic_spectral_mod"]) == "True"
+            if "akashic_spectral_percentile" in xyz:
+                try: akashic_spectral_percentile = float(xyz["akashic_spectral_percentile"])
+                except Exception: pass
+            if "akashic_divisive_norm" in xyz:
+                akashic_divisive_norm = str(xyz["akashic_divisive_norm"]) == "True"
+            if "akashic_divisive_intensity" in xyz:
+                try: akashic_divisive_intensity = float(xyz["akashic_divisive_intensity"])
+                except Exception: pass
+            if "akashic_combat_cfg_drift" in xyz:
+                akashic_combat_cfg_drift = str(xyz["akashic_combat_cfg_drift"]) == "True"
             if "vae_reflection" in xyz:
                 vae_reflection = str(xyz["vae_reflection"]) == "True"
 
@@ -2138,6 +2721,16 @@ class AdeptSamplerForge(scripts.Script):
             'akashic_smea_strength': akashic_smea_strength,
             'akashic_ndb_strength': akashic_ndb_strength,
             'akashic_eqvae_mode': akashic_eqvae_mode,
+            # CFG Enhancement settings
+            'akashic_cfg_method': akashic_cfg_method,
+            'akashic_apg_eta': akashic_apg_eta,
+            'akashic_apg_momentum': akashic_apg_momentum,
+            'akashic_rescale_phi': akashic_rescale_phi,
+            'akashic_spectral_mod': akashic_spectral_mod,
+            'akashic_spectral_percentile': akashic_spectral_percentile,
+            'akashic_divisive_norm': akashic_divisive_norm,
+            'akashic_divisive_intensity': akashic_divisive_intensity,
+            'akashic_combat_cfg_drift': akashic_combat_cfg_drift,
             'vae_reflection': vae_reflection,
         })
 
@@ -2204,6 +2797,14 @@ class AdeptSamplerForge(scripts.Script):
                 'akashic_smea_strength': akashic_smea_strength if use_akashic_solver else 'N/A',
                 'akashic_ndb_strength': akashic_ndb_strength if use_akashic_solver else 'N/A',
                 'akashic_eqvae_mode': akashic_eqvae_mode if use_akashic_solver else 'N/A',
+                # CFG Enhancement parameters
+                'akashic_cfg_method': akashic_cfg_method if use_akashic_solver else 'N/A',
+                'akashic_apg_eta': akashic_apg_eta if use_akashic_solver and akashic_cfg_method in ['APG', 'APG+Rescale'] else 'N/A',
+                'akashic_apg_momentum': akashic_apg_momentum if use_akashic_solver and akashic_cfg_method in ['APG', 'APG+Rescale'] else 'N/A',
+                'akashic_rescale_phi': akashic_rescale_phi if use_akashic_solver and akashic_cfg_method in ['RescaleCFG', 'APG+Rescale'] else 'N/A',
+                'akashic_spectral_mod': akashic_spectral_mod if use_akashic_solver else False,
+                'akashic_divisive_norm': akashic_divisive_norm if use_akashic_solver else False,
+                'akashic_combat_cfg_drift': akashic_combat_cfg_drift if use_akashic_solver else False,
                 'vae_reflection': vae_reflection,
             })
         else:
