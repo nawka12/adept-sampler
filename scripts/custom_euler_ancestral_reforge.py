@@ -807,16 +807,27 @@ def sample_akashic_solver(model, x, sigmas, extra_args=None, callback=None,
             print(f"      Additional: {', '.join(extras)}")
     elif not eqvae_mode:
         print(f"   ⚠️ Consider enabling CFG Enhancement (APG/Rescale) for EQ-VAE models")
-    
+
+    # === WRAP MODEL WITH CFG ENHANCEMENT (PROPER IMPLEMENTATION) ===
+    # This hooks into the CFG computation with access to separate cond/uncond predictions
+    active_model = model
+    if cfg_enhancement_active:
+        wrapped = wrap_model_with_cfg_enhancement(model, cfg_settings)
+        if wrapped is not model:
+            active_model = wrapped
+            print(f"   🔗 Model wrapped with {cfg_method} CFG hook (proper implementation)")
+        else:
+            print(f"   ⚠️ Model wrapping failed, CFG enhancement may be limited")
+
     # Get noise sampler for stochastic injection
     noise_sampler = get_noise_sampler(x)
-    
+
     total_steps = len(sigmas) - 1
-    
+
     # Multi-step history for SA-Solver (stores (sigma, derivative) tuples)
     d_history = []
 
-    # APG momentum buffer for guidance smoothing
+    # Legacy APG momentum buffer (for fallback post-hoc correction only)
     apg_momentum_buffer = None
 
     for i in range(total_steps):
@@ -864,27 +875,33 @@ def sample_akashic_solver(model, x, sigmas, extra_args=None, callback=None,
         # === SMEA FACTOR ===
         # Adjusts noise for high-resolution coherency
         smea_factor = compute_smea_factor(progress, smea_strength)
-        
+
         # === MODEL PREDICTION ===
-        denoised = model(x, sigma * s_in, **extra_args)
-        
+        # Use active_model (which may be wrapped with CFG enhancement)
+        denoised = active_model(x, sigma * s_in, **extra_args)
+
         # Apply dynamic thresholding for stability at high CFG
         cfg_scale = extra_args.get('cond_scale', 1.0)
         if cfg_scale > 7.0:
             denoised = apply_dynamic_thresholding(denoised, percentile=0.995)
 
-        # === BUILT-IN CFG ENHANCEMENT ===
-        # Apply APG, RescaleCFG, and other techniques to eliminate oversaturation
+        # === POST-HOC CFG TECHNIQUES (Spectral, Divisive Norm, Combat Drift) ===
+        # Note: APG and RescaleCFG are now handled via model hook (above)
+        # These additional techniques can still be applied post-hoc
         if cfg_enhancement_active:
-            denoised, apg_momentum_buffer = apply_cfg_techniques(
-                denoised=denoised,
-                x=x,
-                sigma=sigma,
-                cfg_scale=cfg_scale,
-                progress=progress,
-                settings=cfg_settings,
-                momentum_buffer=apg_momentum_buffer
-            )
+            # Apply only the additional post-hoc techniques (not APG/RescaleCFG)
+            if cfg_settings.get('akashic_spectral_mod', False):
+                denoised = apply_spectral_modulation(
+                    denoised,
+                    percentile=cfg_settings.get('akashic_spectral_percentile', 5.0)
+                )
+            if cfg_settings.get('akashic_divisive_norm', False):
+                denoised = apply_divisive_norm(
+                    denoised,
+                    intensity=cfg_settings.get('akashic_divisive_intensity', 1.0)
+                )
+            if cfg_settings.get('akashic_combat_cfg_drift', False):
+                denoised = apply_combat_cfg_drift(denoised)
 
         # === COMPUTE DERIVATIVE ===
         d = to_d(x, sigma, denoised)
@@ -1152,164 +1169,364 @@ def apply_dynamic_thresholding(x, percentile=0.995, clamp_range=1.0):
 
 
 # =============================================================================
-# BUILT-IN CFG ENHANCEMENT TECHNIQUES
-# These techniques eliminate the need for external rescaleCFG extensions
+# PROPER CFG ENHANCEMENT VIA MODEL HOOKS
+# These implementations use set_model_sampler_cfg_function for true access to
+# separate cond/uncond predictions, matching the reference implementations.
+# =============================================================================
+
+class APGMomentumBuffer:
+    """Momentum buffer for APG guidance smoothing across steps."""
+    def __init__(self, momentum: float):
+        self.momentum = momentum
+        self.running_average = 0
+
+    def update(self, update_value: torch.Tensor):
+        new_average = self.momentum * self.running_average
+        self.running_average = update_value + new_average
+
+
+def _apg_project(v0: torch.Tensor, v1: torch.Tensor):
+    """
+    Project v0 onto v1, returning parallel and orthogonal components.
+    Based on the reference APG implementation.
+    """
+    dtype = v0.dtype
+    # Normalize v1 for projection
+    v1 = torch.nn.functional.normalize(v1, dim=[-1, -2, -3])
+    # Compute parallel component via dot product
+    v0_parallel = (v0 * v1).sum(dim=[-1, -2, -3], keepdim=True) * v1
+    # Orthogonal is the remainder
+    v0_orthogonal = v0 - v0_parallel
+    return v0_parallel.to(dtype), v0_orthogonal.to(dtype)
+
+
+def create_apg_cfg_function(eta=1.0, momentum=0.5, adaptive_momentum=0.180, norm_threshold=15.0):
+    """
+    Create an APG (Adaptive Projected Guidance) CFG function.
+
+    Based on "Eliminating Oversaturation and Artifacts of High Guidance Scales
+    in Diffusion Models" (arXiv:2410.02416) and the reForge reference implementation.
+
+    The key insight: CFG direction (cond - uncond) can be decomposed into:
+    - Parallel component (in direction of cond): causes oversaturation
+    - Orthogonal component: enhances image quality
+
+    By reducing the parallel component (via eta < 1), we reduce oversaturation.
+
+    Args:
+        eta: Parallel component weight (0=full removal, 1=standard CFG). Default: 1.0
+        momentum: Guidance smoothing across steps (-1.5 to 1.0). Default: 0.5
+        adaptive_momentum: Momentum decay rate (0-1). Default: 0.180
+        norm_threshold: Max norm for guidance (0=disabled). Default: 15.0
+
+    Returns:
+        CFG function compatible with set_model_sampler_cfg_function
+    """
+    momentum_buffer = APGMomentumBuffer(momentum)
+    extras = [momentum_buffer, momentum, adaptive_momentum]
+
+    def apg_cfg_function(args):
+        cond = args["cond"]
+        uncond = args["uncond"]
+        cond_scale = args["cond_scale"]
+        sigma = args["sigma"]
+        model = args["model"]
+
+        # Get timestep for adaptive momentum
+        try:
+            t = model.inner_model.model_sampling.timestep(sigma)[0].item()
+        except:
+            t = 500  # Fallback mid-point
+
+        momentum_buf = extras[0]
+        mom = extras[1]
+        adaptive_mom = extras[2]
+
+        # Reset momentum buffer on new generation or resolution change
+        if (torch.is_tensor(momentum_buf.running_average) and
+            cond.shape[3] != momentum_buf.running_average.shape[3]) or t >= 999:
+            momentum_buf = APGMomentumBuffer(mom)
+            extras[0] = momentum_buf
+        else:
+            # Adaptive momentum: decay over time
+            signal_scale = mom
+            if adaptive_mom > 0:
+                if mom < 0:
+                    signal_scale += -mom * (adaptive_mom ** 4) * (1000 - t)
+                    if signal_scale > 0:
+                        signal_scale = 0
+                else:
+                    signal_scale -= mom * (adaptive_mom ** 4) * (1000 - t)
+                    if signal_scale < 0:
+                        signal_scale = 0
+            momentum_buf.momentum = signal_scale
+
+        # Compute guidance direction
+        diff = cond - uncond
+
+        # Apply momentum smoothing
+        if momentum_buf is not None:
+            momentum_buf.update(diff)
+            diff = momentum_buf.running_average
+
+        # Apply norm threshold if enabled
+        if norm_threshold > 0:
+            ones = torch.ones_like(diff)
+            diff_norm = diff.norm(p=2, dim=[-1, -2, -3], keepdim=True)
+            scale_factor = torch.minimum(ones, norm_threshold / diff_norm)
+            diff = diff * scale_factor
+
+        # Project onto cond direction to separate parallel/orthogonal
+        diff_parallel, diff_orthogonal = _apg_project(diff, cond)
+
+        # APG: keep orthogonal, reduce parallel by eta
+        normalized_update = diff_orthogonal + eta * diff_parallel
+
+        # Final guided prediction
+        # Note: standard CFG is: uncond + cond_scale * (cond - uncond)
+        # APG modifies this to: cond + (cond_scale - 1) * normalized_update
+        pred_guided = cond + (cond_scale - 1) * normalized_update
+
+        return pred_guided
+
+    return apg_cfg_function
+
+
+def create_rescale_cfg_function(phi=0.7):
+    """
+    Create a RescaleCFG function.
+
+    Based on the SDXL paper (arXiv:2305.08891) and reForge reference implementation.
+
+    This technique rescales the CFG output to match the standard deviation
+    of the conditional prediction, reducing oversaturation while maintaining
+    prompt adherence.
+
+    Args:
+        phi: Interpolation factor (0=no rescaling, 1=full rescaling). Default: 0.7
+
+    Returns:
+        CFG function compatible with set_model_sampler_cfg_function
+    """
+    def rescale_cfg_function(args):
+        cond = args["cond"]
+        uncond = args["uncond"]
+        cond_scale = args["cond_scale"]
+        sigma = args["sigma"]
+        x_orig = args["input"]
+
+        # Reshape sigma for broadcasting
+        sigma = sigma.view(sigma.shape[:1] + (1,) * (cond.ndim - 1))
+
+        # Convert to v-prediction space for proper rescaling
+        # x = x_orig / (sigma^2 + 1)
+        x = x_orig / (sigma * sigma + 1.0)
+        # Convert predictions to v-space
+        cond_v = ((x - (x_orig - cond)) * (sigma ** 2 + 1.0) ** 0.5) / sigma
+        uncond_v = ((x - (x_orig - uncond)) * (sigma ** 2 + 1.0) ** 0.5) / sigma
+
+        # Standard CFG in v-space
+        x_cfg = uncond_v + cond_scale * (cond_v - uncond_v)
+
+        # Compute standard deviations
+        ro_pos = torch.std(cond_v, dim=(1, 2, 3), keepdim=True)
+        ro_cfg = torch.std(x_cfg, dim=(1, 2, 3), keepdim=True)
+
+        # Rescale CFG output to match cond std
+        x_rescaled = x_cfg * (ro_pos / ro_cfg)
+
+        # Interpolate between rescaled and original CFG
+        x_final = phi * x_rescaled + (1.0 - phi) * x_cfg
+
+        # Convert back from v-space
+        return x_orig - (x - x_final * sigma / (sigma * sigma + 1.0) ** 0.5)
+
+    return rescale_cfg_function
+
+
+def create_combined_apg_rescale_function(apg_eta=1.0, apg_momentum=0.5, apg_adaptive_momentum=0.180,
+                                          apg_norm_threshold=15.0, rescale_phi=0.7):
+    """
+    Create a combined APG + RescaleCFG function.
+
+    Applies APG first (to decompose and reduce parallel guidance),
+    then RescaleCFG (to normalize the result).
+
+    Args:
+        apg_eta: APG parallel component weight (0-1)
+        apg_momentum: APG momentum (-1.5 to 1.0)
+        apg_adaptive_momentum: APG momentum decay rate
+        apg_norm_threshold: APG max guidance norm
+        rescale_phi: RescaleCFG interpolation factor
+
+    Returns:
+        CFG function compatible with set_model_sampler_cfg_function
+    """
+    momentum_buffer = APGMomentumBuffer(apg_momentum)
+    extras = [momentum_buffer, apg_momentum, apg_adaptive_momentum]
+
+    def combined_cfg_function(args):
+        cond = args["cond"]
+        uncond = args["uncond"]
+        cond_scale = args["cond_scale"]
+        sigma = args["sigma"]
+        model = args["model"]
+        x_orig = args["input"]
+
+        # === APG PHASE ===
+        try:
+            t = model.inner_model.model_sampling.timestep(sigma)[0].item()
+        except:
+            t = 500
+
+        momentum_buf = extras[0]
+        mom = extras[1]
+        adaptive_mom = extras[2]
+
+        if (torch.is_tensor(momentum_buf.running_average) and
+            cond.shape[3] != momentum_buf.running_average.shape[3]) or t >= 999:
+            momentum_buf = APGMomentumBuffer(mom)
+            extras[0] = momentum_buf
+        else:
+            signal_scale = mom
+            if adaptive_mom > 0:
+                if mom < 0:
+                    signal_scale += -mom * (adaptive_mom ** 4) * (1000 - t)
+                    if signal_scale > 0:
+                        signal_scale = 0
+                else:
+                    signal_scale -= mom * (adaptive_mom ** 4) * (1000 - t)
+                    if signal_scale < 0:
+                        signal_scale = 0
+            momentum_buf.momentum = signal_scale
+
+        diff = cond - uncond
+
+        if momentum_buf is not None:
+            momentum_buf.update(diff)
+            diff = momentum_buf.running_average
+
+        if apg_norm_threshold > 0:
+            ones = torch.ones_like(diff)
+            diff_norm = diff.norm(p=2, dim=[-1, -2, -3], keepdim=True)
+            scale_factor = torch.minimum(ones, apg_norm_threshold / diff_norm)
+            diff = diff * scale_factor
+
+        diff_parallel, diff_orthogonal = _apg_project(diff, cond)
+        normalized_update = diff_orthogonal + apg_eta * diff_parallel
+
+        # Get APG result (this replaces standard CFG)
+        apg_result = cond + (cond_scale - 1) * normalized_update
+
+        # === RESCALECFG PHASE ===
+        # Apply rescaling to the APG result
+        sigma_reshaped = sigma.view(sigma.shape[:1] + (1,) * (cond.ndim - 1))
+
+        # Compute std of cond (reference) and apg_result
+        ro_pos = torch.std(cond, dim=(1, 2, 3), keepdim=True)
+        ro_cfg = torch.std(apg_result, dim=(1, 2, 3), keepdim=True)
+
+        # Rescale
+        x_rescaled = apg_result * (ro_pos / ro_cfg.clamp(min=1e-8))
+
+        # Interpolate
+        result = rescale_phi * x_rescaled + (1.0 - rescale_phi) * apg_result
+
+        return result
+
+    return combined_cfg_function
+
+
+def wrap_model_with_cfg_enhancement(model, cfg_settings):
+    """
+    Wrap the model with CFG enhancement (APG and/or RescaleCFG).
+
+    This uses set_model_sampler_cfg_function to hook into the CFG computation
+    with access to separate cond/uncond predictions.
+
+    Args:
+        model: The model to wrap (must have clone() and set_model_sampler_cfg_function())
+        cfg_settings: Dict with CFG enhancement settings
+
+    Returns:
+        Wrapped model with CFG enhancement, or original model if enhancement disabled
+    """
+    cfg_method = cfg_settings.get('akashic_cfg_method', 'None')
+
+    if cfg_method == 'None':
+        return model
+
+    # Check if model supports the required methods
+    if not hasattr(model, 'clone') or not hasattr(model, 'set_model_sampler_cfg_function'):
+        print("⚠️ Model doesn't support CFG hooks, falling back to post-hoc correction")
+        return model
+
+    try:
+        # Clone the model to avoid modifying the original
+        wrapped_model = model.clone()
+
+        if cfg_method == 'APG':
+            apg_eta = cfg_settings.get('akashic_apg_eta', 1.0)
+            apg_momentum = cfg_settings.get('akashic_apg_momentum', 0.5)
+
+            cfg_func = create_apg_cfg_function(
+                eta=apg_eta,
+                momentum=apg_momentum,
+                adaptive_momentum=0.180,
+                norm_threshold=15.0
+            )
+            wrapped_model.set_model_sampler_cfg_function(cfg_func)
+
+        elif cfg_method == 'RescaleCFG':
+            rescale_phi = cfg_settings.get('akashic_rescale_phi', 0.7)
+
+            cfg_func = create_rescale_cfg_function(phi=rescale_phi)
+            wrapped_model.set_model_sampler_cfg_function(cfg_func)
+
+        elif cfg_method == 'APG+Rescale':
+            apg_eta = cfg_settings.get('akashic_apg_eta', 1.0)
+            apg_momentum = cfg_settings.get('akashic_apg_momentum', 0.5)
+            rescale_phi = cfg_settings.get('akashic_rescale_phi', 0.7)
+
+            cfg_func = create_combined_apg_rescale_function(
+                apg_eta=apg_eta,
+                apg_momentum=apg_momentum,
+                apg_adaptive_momentum=0.180,
+                apg_norm_threshold=15.0,
+                rescale_phi=rescale_phi
+            )
+            wrapped_model.set_model_sampler_cfg_function(cfg_func)
+
+        return wrapped_model
+
+    except Exception as e:
+        print(f"⚠️ Failed to wrap model with CFG enhancement: {e}")
+        return model
+
+
+# =============================================================================
+# LEGACY POST-HOC CFG FUNCTIONS (Fallback when model hooks unavailable)
+# These are less accurate but work without model-level access
 # =============================================================================
 
 def apply_apg(denoised, x, sigma, cfg_scale, eta=0.0, momentum=None, momentum_buffer=None):
     """
-    APG-style CFG correction: Reduces oversaturation from high CFG by softly
-    clamping extreme values while preserving structure.
-
-    This is an approximation of Adaptive Projected Guidance that works without
-    access to separate cond/uncond predictions. It achieves similar results by:
-    1. Identifying extreme values that indicate CFG oversaturation
-    2. Soft-clamping them toward the mean
-    3. Applying momentum for temporal consistency
-
-    The eta parameter controls the strength:
-    - eta=0: Maximum correction (most aggressive oversaturation removal)
-    - eta=1: No correction (standard CFG behavior)
-
-    Args:
-        denoised: The denoised prediction (after CFG is applied by the model)
-        x: Current latent (unused, kept for API compatibility)
-        sigma: Current sigma value
-        cfg_scale: CFG scale used
-        eta: Correction strength (0=max correction, 1=no correction)
-        momentum: Momentum for temporal smoothing (-1 to 1)
-        momentum_buffer: Previous correction buffer
-
-    Returns:
-        Tuple of (adjusted_denoised, new_momentum_buffer)
+    Legacy post-hoc APG approximation. Used as fallback when model hooks unavailable.
+    For proper APG, use wrap_model_with_cfg_enhancement() instead.
     """
-    if cfg_scale <= 1.0 or eta >= 1.0:
-        return denoised, momentum_buffer
-
-    try:
-        batch_size = denoised.shape[0]
-        num_channels = denoised.shape[1]
-
-        # Work per-channel to preserve color balance
-        result = denoised.clone()
-
-        for c in range(num_channels):
-            channel = denoised[:, c:c+1, :, :]
-            channel_flat = channel.view(batch_size, -1)
-
-            # Compute channel statistics
-            channel_mean = channel_flat.mean(dim=1, keepdim=True)
-            channel_std = channel_flat.std(dim=1, keepdim=True).clamp(min=1e-8)
-
-            # Identify how far each value is from the mean (in std units)
-            normalized = (channel_flat - channel_mean) / channel_std
-
-            # Soft clamp: values beyond threshold get pulled back
-            # The threshold scales with CFG - higher CFG needs more correction
-            threshold = 2.5 + (1.0 - eta) * 1.5  # Range: 2.5 to 4.0
-
-            # Soft clamping function: tanh-based to smoothly reduce extremes
-            # correction_strength is how much we pull extreme values back
-            correction_strength = (1.0 - eta) * 0.3  # Max 30% correction at eta=0
-
-            # Apply soft correction to values beyond threshold
-            abs_normalized = torch.abs(normalized)
-            correction_mask = abs_normalized > threshold
-
-            if correction_mask.any():
-                # Calculate how much to pull back: more for more extreme values
-                excess = (abs_normalized - threshold).clamp(min=0)
-                # Tanh for smooth asymptotic behavior
-                correction = torch.tanh(excess * 0.5) * correction_strength
-
-                # Apply correction (pull toward mean)
-                corrected_normalized = normalized * (1.0 - correction * correction_mask.float())
-
-                # Reconstruct channel
-                corrected = corrected_normalized * channel_std + channel_mean
-                result[:, c:c+1, :, :] = corrected.view(channel.shape)
-
-        # Apply momentum if specified (smooths corrections across steps)
-        if momentum is not None and momentum != 0 and momentum_buffer is not None:
-            # Blend with previous result for temporal consistency
-            blend = abs(momentum) * 0.3  # Max 30% blend with previous
-            result = (1.0 - blend) * result + blend * momentum_buffer
-
-        # Update momentum buffer
-        new_momentum_buffer = result.detach().clone() if momentum is not None else None
-
-        return result, new_momentum_buffer
-
-    except Exception as e:
-        print(f"⚠️ APG correction failed: {e}")
-        return denoised, momentum_buffer
+    # This is now a no-op since proper APG requires model-level hooks
+    # Return unchanged to avoid the previous broken implementation
+    return denoised, momentum_buffer
 
 
 def apply_rescale_cfg(denoised, x, sigma, phi=0.7):
     """
-    RescaleCFG: Normalize CFG output to reduce oversaturation.
-
-    Based on the SDXL paper (arXiv:2305.08891).
-
-    Since we don't have access to the original conditional prediction,
-    this implementation normalizes each channel to a target standard deviation,
-    effectively reducing the amplification caused by high CFG.
-
-    The target std is estimated based on typical latent statistics.
-
-    Args:
-        denoised: The denoised prediction (after CFG is applied)
-        x: Current latent (used for reference statistics)
-        sigma: Current sigma value
-        phi: Interpolation factor (0=no rescaling, 1=full rescaling). Default: 0.7
-
-    Returns:
-        Rescaled denoised prediction
+    Legacy post-hoc RescaleCFG approximation. Used as fallback when model hooks unavailable.
+    For proper RescaleCFG, use wrap_model_with_cfg_enhancement() instead.
     """
-    if phi <= 0:
-        return denoised
-
-    try:
-        batch_size = denoised.shape[0]
-        num_channels = denoised.shape[1]
-
-        result = denoised.clone()
-
-        for c in range(num_channels):
-            channel = denoised[:, c:c+1, :, :]
-            channel_flat = channel.view(batch_size, -1)
-
-            # Current channel statistics
-            current_std = channel_flat.std(dim=1, keepdim=True).clamp(min=1e-8)
-            current_mean = channel_flat.mean(dim=1, keepdim=True)
-
-            # Reference: use the noisy latent's channel std as target
-            # This tends to be more "natural" than the CFG-amplified prediction
-            x_channel = x[:, c:c+1, :, :]
-            x_channel_flat = x_channel.view(batch_size, -1)
-            target_std = x_channel_flat.std(dim=1, keepdim=True).clamp(min=1e-8)
-
-            # Only rescale if current std is larger than target (CFG amplification)
-            # This prevents over-correction when std is already low
-            rescale_factor = torch.where(
-                current_std > target_std,
-                target_std / current_std,
-                torch.ones_like(current_std)
-            )
-
-            # Apply rescaling with interpolation (phi controls strength)
-            # Rescale around the mean to preserve color
-            centered = channel_flat - current_mean
-            rescaled = centered * (1.0 + phi * (rescale_factor - 1.0))
-            rescaled = rescaled + current_mean
-
-            result[:, c:c+1, :, :] = rescaled.view(channel.shape)
-
-        return result
-
-    except Exception as e:
-        print(f"⚠️ RescaleCFG failed: {e}")
-        return denoised
+    # This is now a no-op since proper RescaleCFG requires model-level hooks
+    # Return unchanged to avoid the previous broken implementation
+    return denoised
 
 
 def apply_spectral_modulation(latent, percentile=5.0, high_mult=0.9, low_mult=1.1):
