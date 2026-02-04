@@ -179,6 +179,7 @@ current_sampler_settings = {
     'akashic_divisive_norm': False,  # Enable divisive normalization
     'akashic_divisive_intensity': 1.0,  # Divisive norm intensity
     'akashic_combat_cfg_drift': False,  # Combat CFG mean drift
+    'akashic_combat_drift_intensity': 0.5,  # Combat drift intensity (0-1)
 }
 
 
@@ -761,6 +762,7 @@ def sample_akashic_solver(model, x, sigmas, extra_args=None, callback=None,
         'akashic_divisive_norm': current_sampler_settings.get('akashic_divisive_norm', False),
         'akashic_divisive_intensity': current_sampler_settings.get('akashic_divisive_intensity', 1.0),
         'akashic_combat_cfg_drift': current_sampler_settings.get('akashic_combat_cfg_drift', False),
+        'akashic_combat_drift_intensity': current_sampler_settings.get('akashic_combat_drift_intensity', 0.5),
     }
     cfg_enhancement_active = cfg_method != 'Off'
 
@@ -883,7 +885,10 @@ def sample_akashic_solver(model, x, sigmas, extra_args=None, callback=None,
                     intensity=cfg_settings.get('akashic_divisive_intensity', 1.0)
                 )
             if cfg_settings.get('akashic_combat_cfg_drift', False):
-                denoised = apply_combat_cfg_drift(denoised)
+                denoised = apply_combat_cfg_drift(
+                    denoised,
+                    intensity=cfg_settings.get('akashic_combat_drift_intensity', 0.5)
+                )
 
         # === COMPUTE DERIVATIVE ===
         d = to_d(x, sigma, denoised)
@@ -1373,22 +1378,27 @@ def apply_divisive_norm(latent, intensity=1.0, kernel_size=3):
         return latent
 
 
-def apply_combat_cfg_drift(latent, method='mean'):
+def apply_combat_cfg_drift(latent, method='mean', intensity=1.0):
     """
-    Combat CFG Drift: Re-center the latent to combat mean drift from high CFG.
+    Combat CFG Drift: Reduce mean drift from high CFG values.
 
     Based on ComfyUI-Latent-Modifiers.
 
     As CFG increases, the latent mean can drift away from 0, which causes
-    color shifts and other artifacts. This technique re-centers the latent.
+    color shifts and other artifacts. This technique reduces the drift
+    proportionally based on intensity.
 
     Args:
-        latent: The latent tensor to re-center
+        latent: The latent tensor to correct
         method: 'mean' or 'median'. Default: 'mean'
+        intensity: How much drift to remove (0=none, 1=full). Default: 1.0
 
     Returns:
-        Re-centered latent
+        Drift-corrected latent
     """
+    if intensity <= 0:
+        return latent
+
     try:
         if method == 'median':
             # Compute median per batch, per channel
@@ -1398,8 +1408,9 @@ def apply_combat_cfg_drift(latent, method='mean'):
             # Compute mean per batch, per channel
             center = latent.mean(dim=(-2, -1), keepdim=True)
 
-        # Subtract to re-center
-        return latent - center
+        # Remove drift proportionally based on intensity
+        # intensity=1.0 removes all drift, intensity=0.5 removes half
+        return latent - center * intensity
 
     except Exception as e:
         print(f"⚠️ Combat CFG drift failed: {e}")
@@ -1491,7 +1502,8 @@ def apply_cfg_techniques(denoised, x, sigma, cfg_scale, progress, settings):
 
     # Apply Combat CFG Drift if enabled
     if settings.get('akashic_combat_cfg_drift', False):
-        result = apply_combat_cfg_drift(result, method='mean')
+        intensity = settings.get('akashic_combat_drift_intensity', 0.5)
+        result = apply_combat_cfg_drift(result, method='mean', intensity=intensity)
 
     return result
 
@@ -2105,6 +2117,13 @@ class AdeptSamplerForge(scripts.Script):
                                     info="Normalization strength"
                                 )
 
+                            with gr.Group(visible=False) as combat_drift_options:
+                                self.akashic_combat_drift_intensity = gr.Slider(
+                                    label='Drift Correction Intensity',
+                                    minimum=0.1, maximum=1.0, value=0.5, step=0.1,
+                                    info="How much drift to remove (lower=subtler)"
+                                )
+
                             # Visibility handler for CFG options
                             def on_cfg_method_change(method):
                                 return gr.update(visible=method == 'RescaleCFG')
@@ -2125,6 +2144,12 @@ class AdeptSamplerForge(scripts.Script):
                                 fn=lambda x: gr.update(visible=x),
                                 inputs=[self.akashic_divisive_norm],
                                 outputs=[divisive_options]
+                            )
+
+                            self.akashic_combat_cfg_drift.change(
+                                fn=lambda x: gr.update(visible=x),
+                                inputs=[self.akashic_combat_cfg_drift],
+                                outputs=[combat_drift_options]
                             )
 
                         def on_solver_type_change(solver_type):
@@ -2360,6 +2385,7 @@ class AdeptSamplerForge(scripts.Script):
             (self.akashic_divisive_norm, lambda p: str(p.get('akashic_divisive_norm', 'false')).lower() == 'true' if 'akashic_divisive_norm' in p else gr.update()),
             (self.akashic_divisive_intensity, lambda p: gr.update() if p.get('akashic_divisive_intensity') in (None, 'N/A') else float(p['akashic_divisive_intensity'])),
             (self.akashic_combat_cfg_drift, lambda p: str(p.get('akashic_combat_cfg_drift', 'false')).lower() == 'true' if 'akashic_combat_cfg_drift' in p else gr.update()),
+            (self.akashic_combat_drift_intensity, lambda p: gr.update() if p.get('akashic_combat_drift_intensity') in (None, 'N/A') else float(p['akashic_combat_drift_intensity'])),
             (self.vae_reflection, lambda p: str(p.get('vae_reflection', 'false')).lower() == 'true' if 'vae_reflection' in p else gr.update()),
         ]
 
@@ -2411,6 +2437,7 @@ class AdeptSamplerForge(scripts.Script):
             self.akashic_divisive_norm,
             self.akashic_divisive_intensity,
             self.akashic_combat_cfg_drift,
+            self.akashic_combat_drift_intensity,
             self.vae_reflection,
         ]
 
@@ -2436,7 +2463,7 @@ class AdeptSamplerForge(scripts.Script):
             # CFG Enhancement settings
             akashic_cfg_method, akashic_rescale_phi,
             akashic_spectral_mod, akashic_spectral_percentile,
-            akashic_divisive_norm, akashic_divisive_intensity, akashic_combat_cfg_drift,
+            akashic_divisive_norm, akashic_divisive_intensity, akashic_combat_cfg_drift, akashic_combat_drift_intensity,
             vae_reflection,
         ) = script_args
 
@@ -2666,6 +2693,7 @@ class AdeptSamplerForge(scripts.Script):
             'akashic_divisive_norm': akashic_divisive_norm,
             'akashic_divisive_intensity': akashic_divisive_intensity,
             'akashic_combat_cfg_drift': akashic_combat_cfg_drift,
+            'akashic_combat_drift_intensity': akashic_combat_drift_intensity,
             'vae_reflection': vae_reflection,
         })
 
@@ -2743,6 +2771,7 @@ class AdeptSamplerForge(scripts.Script):
                 'akashic_spectral_mod': akashic_spectral_mod if use_akashic_solver else False,
                 'akashic_divisive_norm': akashic_divisive_norm if use_akashic_solver else False,
                 'akashic_combat_cfg_drift': akashic_combat_cfg_drift if use_akashic_solver else False,
+                'akashic_combat_drift_intensity': akashic_combat_drift_intensity if use_akashic_solver and akashic_combat_cfg_drift else 'N/A',
                 'vae_reflection': vae_reflection,
             })
         else:
