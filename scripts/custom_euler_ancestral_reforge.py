@@ -882,7 +882,7 @@ def sample_akashic_solver(model, x, sigmas, extra_args=None, callback=None,
                     denoised,
                     intensity=cfg_settings.get('akashic_divisive_intensity', 1.0)
                 )
-            if cfg_settings.get('akashic_combat_cfg_drift', False):
+            if cfg_settings.get('akashic_combat_cfg_drift', False) and cfg_method != 'RescaleCFG':
                 denoised = apply_combat_cfg_drift(denoised)
 
         # === COMPUTE DERIVATIVE ===
@@ -1156,14 +1156,15 @@ def apply_dynamic_thresholding(x, percentile=0.995, clamp_range=1.0):
 # separate cond/uncond predictions, matching the reference implementations.
 # =============================================================================
 
-def create_rescale_cfg_function(multiplier=0.7):
+def create_rescale_cfg_function(multiplier=0.7, combat_drift=False):
     """
-    Create a RescaleCFG function - EXACT copy of reForge reference implementation.
+    Create a RescaleCFG function - based on reForge reference implementation.
 
     Based on reForge's extensions-builtin/reForge-RescaleCFG/RescaleCFG/nodes_RescaleCFG.py
 
     Args:
         multiplier: Interpolation factor (0=no rescaling, 1=full rescaling). Default: 0.7
+        combat_drift: If True, also match per-channel mean to positive conditioning. Default: False
 
     Returns:
         CFG function compatible with set_model_sampler_cfg_function
@@ -1187,6 +1188,13 @@ def create_rescale_cfg_function(multiplier=0.7):
         ro_cfg = torch.std(x_cfg, dim=(1,2,3), keepdim=True)
 
         x_rescaled = x_cfg * (ro_pos / ro_cfg)
+
+        # Combat CFG Drift: match per-channel mean to positive conditioning
+        if combat_drift:
+            mean_pos = cond.mean(dim=(2, 3), keepdim=True)
+            mean_rescaled = x_rescaled.mean(dim=(2, 3), keepdim=True)
+            x_rescaled = x_rescaled - mean_rescaled + mean_pos
+
         x_final = multiplier * x_rescaled + (1.0 - multiplier) * x_cfg
 
         return x_orig - (x - x_final * sigma / (sigma * sigma + 1.0) ** 0.5)
@@ -1224,8 +1232,9 @@ def wrap_model_with_cfg_enhancement(model, cfg_settings):
 
         if cfg_method == 'RescaleCFG':
             rescale_phi = cfg_settings.get('akashic_rescale_phi', 0.7)
+            combat_drift = cfg_settings.get('akashic_combat_cfg_drift', False)
 
-            cfg_func = create_rescale_cfg_function(multiplier=rescale_phi)
+            cfg_func = create_rescale_cfg_function(multiplier=rescale_phi, combat_drift=combat_drift)
             wrapped_model.set_model_sampler_cfg_function(cfg_func)
 
         return wrapped_model
@@ -1472,8 +1481,8 @@ def apply_cfg_techniques(denoised, x, sigma, cfg_scale, progress, settings):
         intensity = settings.get('akashic_divisive_intensity', 1.0)
         result = apply_divisive_norm(result, intensity=intensity)
 
-    # Apply Combat CFG Drift if enabled
-    if settings.get('akashic_combat_cfg_drift', False):
+    # Apply Combat CFG Drift if enabled (skip if RescaleCFG handles it internally)
+    if settings.get('akashic_combat_cfg_drift', False) and cfg_method != 'RescaleCFG':
         result = apply_combat_cfg_drift(result, method='mean')
 
     return result
