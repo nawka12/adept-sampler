@@ -882,7 +882,7 @@ def sample_akashic_solver(model, x, sigmas, extra_args=None, callback=None,
                     denoised,
                     intensity=cfg_settings.get('akashic_divisive_intensity', 1.0)
                 )
-            if cfg_settings.get('akashic_combat_cfg_drift', False) and cfg_method != 'RescaleCFG':
+            if cfg_settings.get('akashic_combat_cfg_drift', False):
                 denoised = apply_combat_cfg_drift(denoised)
 
         # === COMPUTE DERIVATIVE ===
@@ -1156,7 +1156,7 @@ def apply_dynamic_thresholding(x, percentile=0.995, clamp_range=1.0):
 # separate cond/uncond predictions, matching the reference implementations.
 # =============================================================================
 
-def create_rescale_cfg_function(multiplier=0.7, combat_drift=False):
+def create_rescale_cfg_function(multiplier=0.7):
     """
     Create a RescaleCFG function - based on reForge reference implementation.
 
@@ -1164,7 +1164,6 @@ def create_rescale_cfg_function(multiplier=0.7, combat_drift=False):
 
     Args:
         multiplier: Interpolation factor (0=no rescaling, 1=full rescaling). Default: 0.7
-        combat_drift: If True, also match per-channel mean to positive conditioning. Default: False
 
     Returns:
         CFG function compatible with set_model_sampler_cfg_function
@@ -1188,12 +1187,6 @@ def create_rescale_cfg_function(multiplier=0.7, combat_drift=False):
         ro_cfg = torch.std(x_cfg, dim=(1,2,3), keepdim=True)
 
         x_rescaled = x_cfg * (ro_pos / ro_cfg)
-
-        # Combat CFG Drift: match per-channel mean to positive conditioning
-        if combat_drift:
-            mean_pos = cond.mean(dim=(2, 3), keepdim=True)
-            mean_rescaled = x_rescaled.mean(dim=(2, 3), keepdim=True)
-            x_rescaled = x_rescaled - mean_rescaled + mean_pos
 
         x_final = multiplier * x_rescaled + (1.0 - multiplier) * x_cfg
 
@@ -1232,9 +1225,8 @@ def wrap_model_with_cfg_enhancement(model, cfg_settings):
 
         if cfg_method == 'RescaleCFG':
             rescale_phi = cfg_settings.get('akashic_rescale_phi', 0.7)
-            combat_drift = cfg_settings.get('akashic_combat_cfg_drift', False)
 
-            cfg_func = create_rescale_cfg_function(multiplier=rescale_phi, combat_drift=combat_drift)
+            cfg_func = create_rescale_cfg_function(multiplier=rescale_phi)
             wrapped_model.set_model_sampler_cfg_function(cfg_func)
 
         return wrapped_model
@@ -1322,12 +1314,13 @@ def apply_spectral_modulation(latent, percentile=5.0, high_mult=0.9, low_mult=1.
 
 def apply_divisive_norm(latent, intensity=1.0, kernel_size=3):
     """
-    Divisive Normalization: Normalize latent using local average pooling.
+    Divisive Normalization: Normalize latent using local energy (standard deviation).
 
-    Based on ComfyUI-Latent-Modifiers.
+    Based on ComfyUI-Latent-Modifiers concept but with proper divisive normalization.
 
-    This can reduce noisy artifacts from high CFG by normalizing the latent
-    relative to its local neighborhood.
+    Proper divisive normalization divides by local energy/std, not mean.
+    This reduces high-frequency noise and artifacts from high CFG while
+    preserving the overall structure.
 
     Args:
         latent: The latent tensor to normalize
@@ -1343,8 +1336,9 @@ def apply_divisive_norm(latent, intensity=1.0, kernel_size=3):
     try:
         import torch.nn.functional as F
 
-        # Compute local mean using average pooling
         padding = kernel_size // 2
+
+        # Compute local mean
         local_mean = F.avg_pool2d(
             latent,
             kernel_size=kernel_size,
@@ -1352,8 +1346,22 @@ def apply_divisive_norm(latent, intensity=1.0, kernel_size=3):
             padding=padding
         )
 
-        # Divisive normalization
-        normalized = latent / (local_mean.abs() + 1e-8)
+        # Compute local variance: E[x^2] - E[x]^2
+        local_sq_mean = F.avg_pool2d(
+            latent ** 2,
+            kernel_size=kernel_size,
+            stride=1,
+            padding=padding
+        )
+        local_var = local_sq_mean - local_mean ** 2
+        local_std = torch.sqrt(torch.clamp(local_var, min=1e-4))
+
+        # Compute global std to preserve overall scale
+        global_std = latent.std()
+
+        # Divisive normalization: normalize by local std, rescale by global std
+        # This smooths local variations while preserving global scale
+        normalized = (latent - local_mean) / local_std * global_std + local_mean
 
         # Blend based on intensity
         result = intensity * normalized + (1.0 - intensity) * latent
@@ -1481,8 +1489,8 @@ def apply_cfg_techniques(denoised, x, sigma, cfg_scale, progress, settings):
         intensity = settings.get('akashic_divisive_intensity', 1.0)
         result = apply_divisive_norm(result, intensity=intensity)
 
-    # Apply Combat CFG Drift if enabled (skip if RescaleCFG handles it internally)
-    if settings.get('akashic_combat_cfg_drift', False) and cfg_method != 'RescaleCFG':
+    # Apply Combat CFG Drift if enabled
+    if settings.get('akashic_combat_cfg_drift', False):
         result = apply_combat_cfg_drift(result, method='mean')
 
     return result
