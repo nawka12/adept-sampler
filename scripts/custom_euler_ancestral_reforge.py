@@ -1237,18 +1237,17 @@ def create_spectral_modulation_cfg_hook(multiplier=1.0, percentile=5.0):
     return spectral_cfg_hook
 
 
-def apply_divisive_norm(latent, intensity=1.0, kernel_size=3):
+def apply_divisive_norm(latent, intensity=1.0, kernel_size=5):
     """
     Divisive Normalization: Suppress localized energy spikes in latent space.
 
-    Divides each value by its local RMS energy then rescales by global RMS.
-    This naturally attenuates high-energy regions (where CFG artifacts
-    concentrate) while leaving smooth/normal regions largely unchanged.
+    Only attenuates regions where local RMS energy exceeds the global RMS.
+    Low-energy / smooth regions are left untouched (no amplification).
 
     Args:
         latent: The latent tensor to normalize
         intensity: Effect strength (0=disabled, 1=full effect). Default: 1.0
-        kernel_size: Size of the pooling kernel. Default: 3
+        kernel_size: Size of the pooling kernel. Default: 5
 
     Returns:
         Normalized latent
@@ -1270,13 +1269,14 @@ def apply_divisive_norm(latent, intensity=1.0, kernel_size=3):
         )
         local_rms = torch.sqrt(local_sq_mean + 1e-8)
 
-        # Global RMS for rescaling
+        # Global RMS as reference threshold
         global_rms = torch.sqrt((latent ** 2).mean() + 1e-8)
 
-        # Divisive normalization: divide by local energy, rescale by global
-        # High-energy artifact patches get divided by a larger value, suppressing them
-        # Low-energy smooth regions stay approximately unchanged
-        normalized = (latent / local_rms) * global_rms
+        # One-sided suppression: only attenuate where local energy exceeds global
+        # Where local_rms <= global_rms: suppression = 1.0 (no change)
+        # Where local_rms >  global_rms: suppression = global_rms / local_rms (< 1.0)
+        suppression = global_rms / torch.max(local_rms, global_rms)
+        normalized = latent * suppression
 
         # Blend based on intensity
         result = intensity * normalized + (1.0 - intensity) * latent
