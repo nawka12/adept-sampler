@@ -857,14 +857,9 @@ def sample_akashic_solver(model, x, sigmas, extra_args=None, callback=None,
         if cfg_scale > 7.0:
             denoised = apply_dynamic_thresholding(denoised, percentile=0.995)
 
-        # === POST-HOC CFG FIXES (Spectral, Divisive Norm, Combat Drift) ===
+        # === POST-HOC CFG FIXES (Divisive Norm, Combat Drift) ===
+        # Note: Spectral Modulation is now handled via CFG hook in process_before_every_sampling
         if cfg_enhancement_active:
-            # Apply the additional post-hoc techniques
-            if cfg_settings.get('akashic_spectral_mod', False):
-                denoised = apply_spectral_modulation(
-                    denoised,
-                    percentile=cfg_settings.get('akashic_spectral_percentile', 5.0)
-                )
             if cfg_settings.get('akashic_divisive_norm', False):
                 denoised = apply_divisive_norm(
                     denoised,
@@ -1145,63 +1140,101 @@ def apply_dynamic_thresholding(x, percentile=0.995, clamp_range=1.0):
 # POST-HOC CFG FIX FUNCTIONS
 # =============================================================================
 
-def apply_spectral_modulation(latent, percentile=5.0, high_mult=0.9, low_mult=1.1):
+def apply_spectral_modulation_clybius(noise_pred, multiplier=1.0, percentile=5.0):
     """
-    Spectral Modulation: Apply frequency-domain corrections to combat CFG artifacts.
-
-    Based on ComfyUI-Latent-Modifiers concept.
-
-    Converts the latent to frequency domain via FFT, reduces high magnitude
-    frequencies (which can cause artifacts from high CFG) and boosts low 
-    magnitude frequencies (which preserve structure), then converts back.
-
+    Clybius Spectral Modulation: Apply frequency-domain corrections to noise prediction.
+    
+    This is the correct implementation based on ComfyUI-Latent-Modifiers.
+    It should be applied to noise_pred (cond - uncond), NOT to denoised latent.
+    
     Args:
-        latent: The latent tensor to modify
-        percentile: Upper/lower percentile threshold for modification. Default: 5.0
-        high_mult: Multiplier for high magnitude frequencies (< 1 reduces). Default: 0.9
-        low_mult: Multiplier for low magnitude frequencies (> 1 boosts). Default: 1.1
-
+        noise_pred: The noise prediction tensor (cond - uncond)
+        multiplier: Modulation strength (0=none, 1=full Clybius effect). Default: 1.0
+        percentile: Upper/lower percentile threshold. Default: 5.0
+    
     Returns:
-        Spectrally modulated latent
+        Spectrally modulated noise prediction
     """
-    if percentile <= 0:
-        return latent
-
+    if multiplier == 0 or percentile <= 0:
+        return noise_pred
+    
     try:
-        # Apply FFT to each channel
-        # latent shape: (batch, channels, height, width)
-        fourier = torch.fft.fft2(latent, dim=(-2, -1))
-
-        # Compute magnitude
-        magnitude = torch.abs(fourier)
-
-        # Flatten for percentile computation (per batch, per channel)
-        mag_flat = magnitude.view(magnitude.shape[0], magnitude.shape[1], -1)
-
-        # Compute percentile thresholds
-        low_thresh = torch.quantile(mag_flat, percentile / 100.0, dim=-1, keepdim=True)
-        high_thresh = torch.quantile(mag_flat, 1.0 - percentile / 100.0, dim=-1, keepdim=True)
-
-        # Reshape thresholds back
-        low_thresh = low_thresh.view(magnitude.shape[0], magnitude.shape[1], 1, 1)
-        high_thresh = high_thresh.view(magnitude.shape[0], magnitude.shape[1], 1, 1)
-
-        # Create multiplier map
-        mult = torch.ones_like(magnitude)
-        mult = torch.where(magnitude < low_thresh, low_mult * mult, mult)
-        mult = torch.where(magnitude > high_thresh, high_mult * mult, mult)
-
-        # Apply modulation
-        fourier_modulated = fourier * mult
-
+        # FFT
+        fourier = torch.fft.fft2(noise_pred, dim=(-2, -1))
+        
+        # Log amplitude (with small epsilon for numerical stability)
+        log_amp = torch.log(torch.sqrt(fourier.real ** 2 + fourier.imag ** 2) + 1e-8)
+        
+        # Compute quantiles on absolute log amplitude
+        log_amp_flat = log_amp.abs().flatten(2)
+        quantile_low = torch.quantile(log_amp_flat, percentile * 0.01, dim=2)
+        quantile_high = torch.quantile(log_amp_flat, 1 - percentile * 0.01, dim=2)
+        
+        # Expand quantiles back to log_amp shape
+        quantile_low = quantile_low.unsqueeze(-1).unsqueeze(-1).expand(log_amp.shape)
+        quantile_high = quantile_high.unsqueeze(-1).unsqueeze(-1).expand(log_amp.shape)
+        
+        # Create masks (Clybius approach)
+        # mask_low: boost values below low threshold (range 1.0 to 1.5)
+        # mask_high: reduce values above high threshold (range 0.5 to 1.0)
+        mask_low = ((log_amp < quantile_low).float() + 1).clamp_(max=1.5)
+        mask_high = ((log_amp < quantile_high).float()).clamp_(min=0.5)
+        
+        # Apply modulation via exponentiation
+        filtered_fourier = fourier * ((mask_low * mask_high) ** multiplier)
+        
         # Inverse FFT
-        result = torch.fft.ifft2(fourier_modulated, dim=(-2, -1)).real
-
+        result = torch.fft.ifft2(filtered_fourier, dim=(-2, -1)).real
+        
         return result
-
+        
     except Exception as e:
         print(f"⚠️ Spectral modulation failed: {e}")
-        return latent
+        return noise_pred
+
+
+def create_spectral_modulation_cfg_hook(multiplier=1.0, percentile=5.0):
+    """
+    Create a CFG hook that applies Clybius spectral modulation to noise prediction.
+    
+    This hooks into reForge's set_model_sampler_cfg_function to intercept
+    the CFG calculation and apply spectral modulation at the correct point.
+    
+    Args:
+        multiplier: Modulation strength (0=none, 1=full). Default: 1.0
+        percentile: Frequency percentile threshold. Default: 5.0
+    
+    Returns:
+        A hook function to pass to set_model_sampler_cfg_function
+    """
+    def spectral_cfg_hook(args):
+        cond = args["cond"]
+        uncond = args["uncond"]
+        cond_scale = args["cond_scale"]
+        sigma = args["sigma"]
+        x_orig = args["input"]
+        
+        # Reshape sigma for broadcasting
+        sigma = sigma.view(sigma.shape[:1] + (1,) * (cond.ndim - 1))
+        
+        # Convert to v-pred space (from RescaleCFG reference)
+        x = x_orig / (sigma * sigma + 1.0)
+        cond_v = ((x - (x_orig - cond)) * (sigma ** 2 + 1.0) ** 0.5) / (sigma)
+        uncond_v = ((x - (x_orig - uncond)) * (sigma ** 2 + 1.0) ** 0.5) / (sigma)
+        
+        # Compute noise prediction
+        noise_pred = cond_v - uncond_v
+        
+        # Apply Clybius spectral modulation to noise prediction
+        noise_pred_modulated = apply_spectral_modulation_clybius(noise_pred, multiplier, percentile)
+        
+        # Compute CFG with modified noise prediction
+        x_cfg = uncond_v + cond_scale * noise_pred_modulated
+        
+        # Convert back from v-pred space
+        return x_orig - (x - x_cfg * sigma / (sigma * sigma + 1.0) ** 0.5)
+    
+    return spectral_cfg_hook
 
 
 def apply_divisive_norm(latent, intensity=1.0, kernel_size=3):
@@ -1369,15 +1402,10 @@ def apply_cfg_techniques(denoised, x, sigma, cfg_scale, progress, settings):
     result = denoised
 
     # Skip if no additional CFG fixes are enabled
-    if not (settings.get('akashic_spectral_mod', False)
-            or settings.get('akashic_divisive_norm', False)
+    # Note: Spectral Modulation is now handled via CFG hook, not here
+    if not (settings.get('akashic_divisive_norm', False)
             or settings.get('akashic_combat_cfg_drift', False)):
         return result
-
-    # Apply Spectral Modulation if enabled
-    if settings.get('akashic_spectral_mod', False):
-        percentile = settings.get('akashic_spectral_percentile', 5.0)
-        result = apply_spectral_modulation(result, percentile=percentile)
 
     # Apply Divisive Normalization if enabled
     if settings.get('akashic_divisive_norm', False):
@@ -2551,6 +2579,22 @@ class AdeptSamplerForge(scripts.Script):
                     apply_vae_reflection(vae_model)
                 else:
                     restore_vae_reflection(vae_model)
+
+        # --- Spectral Modulation CFG Hook ---
+        # Apply spectral modulation via CFG hook (like RescaleCFG)
+        if akashic_spectral_mod and REFORGE_AVAILABLE:
+            try:
+                if hasattr(p, 'sd_model') and hasattr(p.sd_model, 'forge_objects'):
+                    unet = p.sd_model.forge_objects.unet.clone()
+                    spectral_hook = create_spectral_modulation_cfg_hook(
+                        multiplier=1.0,  # Full Clybius effect
+                        percentile=akashic_spectral_percentile
+                    )
+                    unet.set_model_sampler_cfg_function(spectral_hook)
+                    p.sd_model.forge_objects.unet = unet
+                    print(f"🌈 Spectral Modulation CFG hook active (percentile={akashic_spectral_percentile})")
+            except Exception as e:
+                print(f"⚠️ Failed to apply Spectral Modulation CFG hook: {e}")
 
         if enable_custom:
             if disable_reason:
