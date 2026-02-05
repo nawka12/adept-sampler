@@ -1290,12 +1290,13 @@ def apply_combat_cfg_drift(latent, method='mean', intensity=1.0):
 
     try:
         if method == 'median':
-            # Compute median per batch, per channel
-            center = latent.view(latent.shape[0], latent.shape[1], -1).median(dim=-1, keepdim=True)[0]
-            center = center.view(latent.shape[0], latent.shape[1], 1, 1)
+            # Compute global median per batch (across all channels and spatial dims)
+            center = latent.view(latent.shape[0], -1).median(dim=-1, keepdim=True)[0]
+            center = center.view(latent.shape[0], 1, 1, 1)
         else:
-            # Compute mean per batch, per channel
-            center = latent.mean(dim=(-2, -1), keepdim=True)
+            # Compute global mean per batch (across all channels and spatial dims)
+            # This matches ComfyUI's PostCFGsubtractMeanNode implementation
+            center = latent.mean(dim=(1, 2, 3), keepdim=True)
 
         # Remove drift proportionally based on intensity
         # intensity=1.0 removes all drift, intensity=0.5 removes half
