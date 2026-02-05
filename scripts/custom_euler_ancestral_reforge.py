@@ -1239,13 +1239,11 @@ def create_spectral_modulation_cfg_hook(multiplier=1.0, percentile=5.0):
 
 def apply_divisive_norm(latent, intensity=1.0, kernel_size=3):
     """
-    Divisive Normalization: Normalize latent using local energy (standard deviation).
+    Divisive Normalization: Suppress localized energy spikes in latent space.
 
-    Based on ComfyUI-Latent-Modifiers concept but with proper divisive normalization.
-
-    Proper divisive normalization divides by local energy/std, not mean.
-    This reduces high-frequency noise and artifacts from high CFG while
-    preserving the overall structure.
+    Divides each value by its local RMS energy then rescales by global RMS.
+    This naturally attenuates high-energy regions (where CFG artifacts
+    concentrate) while leaving smooth/normal regions largely unchanged.
 
     Args:
         latent: The latent tensor to normalize
@@ -1263,30 +1261,22 @@ def apply_divisive_norm(latent, intensity=1.0, kernel_size=3):
 
         padding = kernel_size // 2
 
-        # Compute local mean
-        local_mean = F.avg_pool2d(
-            latent,
-            kernel_size=kernel_size,
-            stride=1,
-            padding=padding
-        )
-
-        # Compute local variance: E[x^2] - E[x]^2
+        # Compute local RMS energy
         local_sq_mean = F.avg_pool2d(
             latent ** 2,
             kernel_size=kernel_size,
             stride=1,
             padding=padding
         )
-        local_var = local_sq_mean - local_mean ** 2
-        local_std = torch.sqrt(torch.clamp(local_var, min=1e-4))
+        local_rms = torch.sqrt(local_sq_mean + 1e-8)
 
-        # Compute global std to preserve overall scale
-        global_std = latent.std()
+        # Global RMS for rescaling
+        global_rms = torch.sqrt((latent ** 2).mean() + 1e-8)
 
-        # Divisive normalization: normalize by local std, rescale by global std
-        # This smooths local variations while preserving global scale
-        normalized = (latent - local_mean) / local_std * global_std + local_mean
+        # Divisive normalization: divide by local energy, rescale by global
+        # High-energy artifact patches get divided by a larger value, suppressing them
+        # Low-energy smooth regions stay approximately unchanged
+        normalized = (latent / local_rms) * global_rms
 
         # Blend based on intensity
         result = intensity * normalized + (1.0 - intensity) * latent
