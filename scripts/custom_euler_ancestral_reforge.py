@@ -863,7 +863,8 @@ def sample_akashic_solver(model, x, sigmas, extra_args=None, callback=None,
             if cfg_settings.get('akashic_divisive_norm', False):
                 denoised = apply_divisive_norm(
                     denoised,
-                    intensity=cfg_settings.get('akashic_divisive_intensity', 1.0)
+                    intensity=cfg_settings.get('akashic_divisive_intensity', 1.0),
+                    progress=progress
                 )
             if cfg_settings.get('akashic_combat_cfg_drift', False):
                 denoised = apply_combat_cfg_drift(
@@ -1237,17 +1238,18 @@ def create_spectral_modulation_cfg_hook(multiplier=1.0, percentile=5.0):
     return spectral_cfg_hook
 
 
-def apply_divisive_norm(latent, intensity=1.0, kernel_size=5):
+def apply_divisive_norm(latent, intensity=1.0, progress=0.0):
     """
-    Divisive Normalization: Suppress localized energy spikes in latent space.
+    Divisive Normalization: Reduce CFG artifacts via local variance normalization.
 
-    Only attenuates regions where local RMS energy exceeds the global RMS.
-    Low-energy / smooth regions are left untouched (no amplification).
+    Based on ComfyUI-Latent-Modifiers (Clybius). Uses a large kernel covering
+    most of the latent and progress-based ramping that protects early
+    compositional steps while applying artifact suppression in later steps.
 
     Args:
         latent: The latent tensor to normalize
         intensity: Effect strength (0=disabled, 1=full effect). Default: 1.0
-        kernel_size: Size of the pooling kernel. Default: 5
+        progress: Sampling progress 0.0-1.0 for timestep-based ramping
 
     Returns:
         Normalized latent
@@ -1255,31 +1257,37 @@ def apply_divisive_norm(latent, intensity=1.0, kernel_size=5):
     if intensity <= 0:
         return latent
 
+    # Progress-based ramping: minimal at start, full at end
+    alpha = progress * intensity
+    if alpha <= 1e-6:
+        return latent
+
     try:
         import torch.nn.functional as F
 
+        # Large kernel covering the full spatial extent (like Clybius' default of 255)
+        h, w = latent.shape[-2:]
+        kernel_size = max(h, w) | 1  # ensure odd
         padding = kernel_size // 2
 
-        # Compute local RMS energy
-        local_sq_mean = F.avg_pool2d(
-            latent ** 2,
-            kernel_size=kernel_size,
-            stride=1,
-            padding=padding
+        # Local mean
+        local_mean = F.avg_pool2d(
+            latent, kernel_size=kernel_size, stride=1,
+            padding=padding, count_include_pad=False
         )
-        local_rms = torch.sqrt(local_sq_mean + 1e-8)
 
-        # Global RMS as reference threshold
-        global_rms = torch.sqrt((latent ** 2).mean() + 1e-8)
+        # Local variance: E[X^2] - E[X]^2
+        local_sq_mean = F.avg_pool2d(
+            latent ** 2, kernel_size=kernel_size, stride=1,
+            padding=padding, count_include_pad=False
+        )
+        local_var = local_sq_mean - local_mean ** 2 + 1e-6
 
-        # One-sided suppression: only attenuate where local energy exceeds global
-        # Where local_rms <= global_rms: suppression = 1.0 (no change)
-        # Where local_rms >  global_rms: suppression = global_rms / local_rms (< 1.0)
-        suppression = global_rms / torch.max(local_rms, global_rms)
-        normalized = latent * suppression
+        # Divisive normalization: divide by local standard deviation
+        normalized = latent / torch.sqrt(local_var)
 
-        # Blend based on intensity
-        result = intensity * normalized + (1.0 - intensity) * latent
+        # Blend with original based on progress-ramped alpha
+        result = alpha * normalized + (1.0 - alpha) * latent
 
         return result
 
@@ -1400,7 +1408,7 @@ def apply_cfg_techniques(denoised, x, sigma, cfg_scale, progress, settings):
     # Apply Divisive Normalization if enabled
     if settings.get('akashic_divisive_norm', False):
         intensity = settings.get('akashic_divisive_intensity', 1.0)
-        result = apply_divisive_norm(result, intensity=intensity)
+        result = apply_divisive_norm(result, intensity=intensity, progress=progress)
 
     # Apply Combat CFG Drift if enabled
     if settings.get('akashic_combat_cfg_drift', False):
