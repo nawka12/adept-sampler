@@ -171,9 +171,7 @@ current_sampler_settings = {
     'akashic_ndb_strength': 0.0,     # Native Detail Boost (0=disabled)
     'akashic_eqvae_mode': 'Off',     # EQ-VAE optimized mode: 'Off', 'Balanced'
     'vae_reflection': False,         # VAE reflection padding for EQ-VAE edge artifact fix
-    # Built-in CFG Enhancement techniques (eliminates need for external rescaleCFG)
-    'akashic_cfg_method': 'Off',     # CFG method: 'Off', 'RescaleCFG'
-    'akashic_rescale_phi': 0.7,      # RescaleCFG interpolation (0=original, 1=fully rescaled)
+    # Additional CFG fixes (post-hoc techniques)
     'akashic_spectral_mod': False,   # Enable spectral modulation for frequency correction
     'akashic_spectral_percentile': 5.0,  # Spectral modulation percentile threshold
     'akashic_divisive_norm': False,  # Enable divisive normalization
@@ -729,14 +727,14 @@ def sample_akashic_solver(model, x, sigmas, extra_args=None, callback=None,
     
     Recommended settings for EQ-VAE models (e.g., AkashicPulse):
     - Use with AkashicAOS scheduler or AYS schedule
-    - Enable built-in CFG Enhancement (RescaleCFG) - no external rescaleCFG needed
+    - Enable Additional CFG Fixes (Spectral, Divisive Norm, Combat Drift) as needed
     - CFG Scale: 7-10
     - Steps: 20-30
     - Tau: 0.5 (balanced) or 1.0 (full stochastic)
     - Order: 2 (recommended)
 
-    Built-in CFG Enhancement Methods:
-    - RescaleCFG: Standard deviation normalization to reduce oversaturation
+    Additional CFG Fixes (post-hoc):
+    - Spectral Modulation, Divisive Norm, Combat CFG Drift
     """
     extra_args = {} if extra_args is None else extra_args
     s_in = x.new_ones([x.shape[0]])
@@ -752,11 +750,8 @@ def sample_akashic_solver(model, x, sigmas, extra_args=None, callback=None,
     ndb_strength = current_sampler_settings.get('akashic_ndb_strength', 0.0)
     eqvae_mode_setting = current_sampler_settings.get('akashic_eqvae_mode', 'Off')
 
-    # Get CFG Enhancement settings
-    cfg_method = current_sampler_settings.get('akashic_cfg_method', 'Off')
+    # Get Additional CFG Fixes settings
     cfg_settings = {
-        'akashic_cfg_method': cfg_method,
-        'akashic_rescale_phi': current_sampler_settings.get('akashic_rescale_phi', 0.7),
         'akashic_spectral_mod': current_sampler_settings.get('akashic_spectral_mod', False),
         'akashic_spectral_percentile': current_sampler_settings.get('akashic_spectral_percentile', 5.0),
         'akashic_divisive_norm': current_sampler_settings.get('akashic_divisive_norm', False),
@@ -764,7 +759,11 @@ def sample_akashic_solver(model, x, sigmas, extra_args=None, callback=None,
         'akashic_combat_cfg_drift': current_sampler_settings.get('akashic_combat_cfg_drift', False),
         'akashic_combat_drift_intensity': current_sampler_settings.get('akashic_combat_drift_intensity', 0.5),
     }
-    cfg_enhancement_active = cfg_method != 'Off'
+    cfg_enhancement_active = (
+        cfg_settings['akashic_spectral_mod']
+        or cfg_settings['akashic_divisive_norm']
+        or cfg_settings['akashic_combat_cfg_drift']
+    )
 
     # Parse EQ-VAE mode setting
     if isinstance(eqvae_mode_setting, bool):
@@ -785,11 +784,8 @@ def sample_akashic_solver(model, x, sigmas, extra_args=None, callback=None,
     if ndb_strength > 0:
         print(f"   Native Detail Boost: {ndb_strength:.2f} (detail enhancement)")
 
-    # CFG Enhancement status
+    # Additional CFG Fixes status
     if cfg_enhancement_active:
-        print(f"   ✨ CFG Enhancement: {cfg_method} (no external rescaleCFG needed)")
-        if cfg_method == 'RescaleCFG':
-            print(f"      Rescale φ: {cfg_settings['akashic_rescale_phi']:.2f}")
         extras = []
         if cfg_settings['akashic_spectral_mod']:
             extras.append("Spectral")
@@ -797,14 +793,7 @@ def sample_akashic_solver(model, x, sigmas, extra_args=None, callback=None,
             extras.append("DivisiveNorm")
         if cfg_settings['akashic_combat_cfg_drift']:
             extras.append("CombatDrift")
-        if extras:
-            print(f"      Additional: {', '.join(extras)}")
-    elif not eqvae_mode:
-        print(f"   ⚠️ Consider enabling CFG Enhancement (RescaleCFG) for EQ-VAE models")
-
-    # Note: CFG Enhancement (RescaleCFG) is now hooked at the model level
-    # in process_before_every_sampling() via p.sd_model.forge_objects.unet
-    # The model passed here already has CFG hooks applied if enabled
+        print(f"   ✨ CFG Fixes: {', '.join(extras)}")
 
     # Get noise sampler for stochastic injection
     noise_sampler = get_noise_sampler(x)
@@ -861,7 +850,6 @@ def sample_akashic_solver(model, x, sigmas, extra_args=None, callback=None,
         smea_factor = compute_smea_factor(progress, smea_strength)
 
         # === MODEL PREDICTION ===
-        # CFG enhancement (RescaleCFG) is hooked at model level via forge_objects.unet
         denoised = model(x, sigma * s_in, **extra_args)
 
         # Apply dynamic thresholding for stability at high CFG
@@ -869,9 +857,7 @@ def sample_akashic_solver(model, x, sigmas, extra_args=None, callback=None,
         if cfg_scale > 7.0:
             denoised = apply_dynamic_thresholding(denoised, percentile=0.995)
 
-        # === POST-HOC CFG TECHNIQUES (Spectral, Divisive Norm, Combat Drift) ===
-        # Note: RescaleCFG is handled via model hook (above)
-        # These additional techniques can still be applied post-hoc
+        # === POST-HOC CFG FIXES (Spectral, Divisive Norm, Combat Drift) ===
         if cfg_enhancement_active:
             # Apply the additional post-hoc techniques
             if cfg_settings.get('akashic_spectral_mod', False):
@@ -1156,105 +1142,8 @@ def apply_dynamic_thresholding(x, percentile=0.995, clamp_range=1.0):
 
 
 # =============================================================================
-# PROPER CFG ENHANCEMENT VIA MODEL HOOKS
-# These implementations use set_model_sampler_cfg_function for true access to
-# separate cond/uncond predictions, matching the reference implementations.
+# POST-HOC CFG FIX FUNCTIONS
 # =============================================================================
-
-def create_rescale_cfg_function(multiplier=0.7):
-    """
-    Create a RescaleCFG function - based on reForge reference implementation.
-
-    Based on reForge's extensions-builtin/reForge-RescaleCFG/RescaleCFG/nodes_RescaleCFG.py
-
-    Args:
-        multiplier: Interpolation factor (0=no rescaling, 1=full rescaling). Default: 0.7
-
-    Returns:
-        CFG function compatible with set_model_sampler_cfg_function
-    """
-    def rescale_cfg(args):
-        cond = args["cond"]
-        uncond = args["uncond"]
-        cond_scale = args["cond_scale"]
-        sigma = args["sigma"]
-        sigma = sigma.view(sigma.shape[:1] + (1,) * (cond.ndim - 1))
-        x_orig = args["input"]
-
-        # rescale cfg has to be done on v-pred model output
-        x = x_orig / (sigma * sigma + 1.0)
-        cond = ((x - (x_orig - cond)) * (sigma ** 2 + 1.0) ** 0.5) / (sigma)
-        uncond = ((x - (x_orig - uncond)) * (sigma ** 2 + 1.0) ** 0.5) / (sigma)
-
-        # rescalecfg
-        x_cfg = uncond + cond_scale * (cond - uncond)
-        ro_pos = torch.std(cond, dim=(1,2,3), keepdim=True)
-        ro_cfg = torch.std(x_cfg, dim=(1,2,3), keepdim=True)
-
-        x_rescaled = x_cfg * (ro_pos / ro_cfg)
-
-        x_final = multiplier * x_rescaled + (1.0 - multiplier) * x_cfg
-
-        return x_orig - (x - x_final * sigma / (sigma * sigma + 1.0) ** 0.5)
-
-    return rescale_cfg
-
-
-def wrap_model_with_cfg_enhancement(model, cfg_settings):
-    """
-    Wrap the model with CFG enhancement (RescaleCFG).
-
-    This uses set_model_sampler_cfg_function to hook into the CFG computation
-    with access to separate cond/uncond predictions.
-
-    Args:
-        model: The model to wrap (must have clone() and set_model_sampler_cfg_function())
-        cfg_settings: Dict with CFG enhancement settings
-
-    Returns:
-        Wrapped model with CFG enhancement, or original model if enhancement disabled
-    """
-    cfg_method = cfg_settings.get('akashic_cfg_method', 'None')
-
-    if cfg_method == 'None' or cfg_method == 'Off':
-        return model
-
-    # Check if model supports the required methods
-    if not hasattr(model, 'clone') or not hasattr(model, 'set_model_sampler_cfg_function'):
-        print("⚠️ Model doesn't support CFG hooks, falling back to post-hoc correction")
-        return model
-
-    try:
-        # Clone the model to avoid modifying the original
-        wrapped_model = model.clone()
-
-        if cfg_method == 'RescaleCFG':
-            rescale_phi = cfg_settings.get('akashic_rescale_phi', 0.7)
-
-            cfg_func = create_rescale_cfg_function(multiplier=rescale_phi)
-            wrapped_model.set_model_sampler_cfg_function(cfg_func)
-
-        return wrapped_model
-
-    except Exception as e:
-        print(f"⚠️ Failed to wrap model with CFG enhancement: {e}")
-        return model
-
-
-# =============================================================================
-# LEGACY POST-HOC CFG FUNCTIONS (Fallback when model hooks unavailable)
-# These are less accurate but work without model-level access
-# =============================================================================
-
-def apply_rescale_cfg(denoised, x, sigma, phi=0.7):
-    """
-    Legacy post-hoc RescaleCFG approximation. Used as fallback when model hooks unavailable.
-    For proper RescaleCFG, use wrap_model_with_cfg_enhancement() instead.
-    """
-    # This is now a no-op since proper RescaleCFG requires model-level hooks
-    # Return unchanged to avoid the previous broken implementation
-    return denoised
-
 
 def apply_spectral_modulation(latent, percentile=5.0, high_mult=0.9, low_mult=1.1):
     """
@@ -1480,15 +1369,11 @@ def apply_cfg_techniques(denoised, x, sigma, cfg_scale, progress, settings):
     """
     result = denoised
 
-    cfg_method = settings.get('akashic_cfg_method', 'Off')
-
-    if cfg_method == 'Off':
+    # Skip if no additional CFG fixes are enabled
+    if not (settings.get('akashic_spectral_mod', False)
+            or settings.get('akashic_divisive_norm', False)
+            or settings.get('akashic_combat_cfg_drift', False)):
         return result
-
-    # Apply RescaleCFG if enabled
-    if cfg_method == 'RescaleCFG':
-        rescale_phi = settings.get('akashic_rescale_phi', 0.7)
-        result = apply_rescale_cfg(result, x, sigma, phi=rescale_phi)
 
     # Apply Spectral Modulation if enabled
     if settings.get('akashic_spectral_mod', False):
@@ -2003,7 +1888,6 @@ class AdeptSamplerForge(scripts.Script):
                         
                         with gr.Group(visible=False) as akashic_solver_options:
                             gr.Markdown("🌀 **AkashicSolver v2** - SA-Solver base with AYS schedules")
-                            gr.Markdown("💡 Enable **Built-in CFG Enhancement** below to eliminate need for external rescaleCFG")
                             
                             with gr.Row():
                                 self.akashic_tau = gr.Slider(
@@ -2066,25 +1950,8 @@ class AdeptSamplerForge(scripts.Script):
                                     info="Optimized for EQ-VAE's cleaner latents"
                                 )
 
-                            # CFG Enhancement Section
+                            # Additional CFG Fixes Section
                             gr.Markdown("---")
-                            gr.Markdown("**Built-in CFG Enhancement** - Eliminates need for external rescaleCFG")
-
-                            with gr.Row():
-                                self.akashic_cfg_method = gr.Dropdown(
-                                    label='CFG Method',
-                                    choices=['Off', 'RescaleCFG'],
-                                    value='Off',
-                                    info="RescaleCFG: Std normalization to reduce oversaturation"
-                                )
-
-                            with gr.Group(visible=False) as cfg_rescale_options:
-                                self.akashic_rescale_phi = gr.Slider(
-                                    label='Rescale Phi (φ)',
-                                    minimum=0.0, maximum=1.0, value=0.7, step=0.05,
-                                    info="Interpolation (0=original, 1=fully rescaled)"
-                                )
-
                             gr.Markdown("**Additional CFG Fixes**")
                             with gr.Row():
                                 self.akashic_spectral_mod = gr.Checkbox(
@@ -2124,16 +1991,7 @@ class AdeptSamplerForge(scripts.Script):
                                     info="How much drift to remove (lower=subtler)"
                                 )
 
-                            # Visibility handler for CFG options
-                            def on_cfg_method_change(method):
-                                return gr.update(visible=method == 'RescaleCFG')
-
-                            self.akashic_cfg_method.change(
-                                fn=on_cfg_method_change,
-                                inputs=[self.akashic_cfg_method],
-                                outputs=[cfg_rescale_options]
-                            )
-
+                            # Visibility handlers for CFG fix options
                             self.akashic_spectral_mod.change(
                                 fn=lambda x: gr.update(visible=x),
                                 inputs=[self.akashic_spectral_mod],
@@ -2377,9 +2235,7 @@ class AdeptSamplerForge(scripts.Script):
             (self.akashic_smea_strength, lambda p: gr.update() if p.get('akashic_smea_strength') in (None, 'N/A') else float(p['akashic_smea_strength'])),
             (self.akashic_ndb_strength, lambda p: gr.update() if p.get('akashic_ndb_strength') in (None, 'N/A') else float(p['akashic_ndb_strength'])),
             (self.akashic_eqvae_mode, lambda p: p.get('akashic_eqvae_mode', 'Off') if 'akashic_eqvae_mode' in p else gr.update()),
-            # CFG Enhancement settings
-            (self.akashic_cfg_method, lambda p: p.get('akashic_cfg_method', 'Off') if 'akashic_cfg_method' in p else gr.update()),
-            (self.akashic_rescale_phi, lambda p: gr.update() if p.get('akashic_rescale_phi') in (None, 'N/A') else float(p['akashic_rescale_phi'])),
+            # Additional CFG Fixes settings
             (self.akashic_spectral_mod, lambda p: str(p.get('akashic_spectral_mod', 'false')).lower() == 'true' if 'akashic_spectral_mod' in p else gr.update()),
             (self.akashic_spectral_percentile, lambda p: gr.update() if p.get('akashic_spectral_percentile') in (None, 'N/A') else float(p['akashic_spectral_percentile'])),
             (self.akashic_divisive_norm, lambda p: str(p.get('akashic_divisive_norm', 'false')).lower() == 'true' if 'akashic_divisive_norm' in p else gr.update()),
@@ -2429,9 +2285,7 @@ class AdeptSamplerForge(scripts.Script):
             self.akashic_adaptive_eta, self.akashic_use_ays, self.akashic_phase_strength, self.akashic_smea_strength,
             self.akashic_ndb_strength,
             self.akashic_eqvae_mode,
-            # CFG Enhancement settings
-            self.akashic_cfg_method,
-            self.akashic_rescale_phi,
+            # Additional CFG Fixes settings
             self.akashic_spectral_mod,
             self.akashic_spectral_percentile,
             self.akashic_divisive_norm,
@@ -2460,8 +2314,7 @@ class AdeptSamplerForge(scripts.Script):
             akashic_tau, akashic_solver_order, akashic_base_eta, akashic_s_noise,
             akashic_adaptive_eta, akashic_use_ays, akashic_phase_strength, akashic_smea_strength,
             akashic_ndb_strength, akashic_eqvae_mode,
-            # CFG Enhancement settings
-            akashic_cfg_method, akashic_rescale_phi,
+            # Additional CFG Fixes settings
             akashic_spectral_mod, akashic_spectral_percentile,
             akashic_divisive_norm, akashic_divisive_intensity, akashic_combat_cfg_drift, akashic_combat_drift_intensity,
             vae_reflection,
@@ -2565,12 +2418,7 @@ class AdeptSamplerForge(scripts.Script):
                 except Exception: pass
             if "akashic_eqvae_mode" in xyz:
                 akashic_eqvae_mode = str(xyz["akashic_eqvae_mode"])
-            # CFG Enhancement XYZ overrides
-            if "akashic_cfg_method" in xyz:
-                akashic_cfg_method = str(xyz["akashic_cfg_method"])
-            if "akashic_rescale_phi" in xyz:
-                try: akashic_rescale_phi = float(xyz["akashic_rescale_phi"])
-                except Exception: pass
+            # Additional CFG Fixes XYZ overrides
             if "akashic_spectral_mod" in xyz:
                 akashic_spectral_mod = str(xyz["akashic_spectral_mod"]) == "True"
             if "akashic_spectral_percentile" in xyz:
@@ -2686,8 +2534,6 @@ class AdeptSamplerForge(scripts.Script):
             'akashic_ndb_strength': akashic_ndb_strength,
             'akashic_eqvae_mode': akashic_eqvae_mode,
             # CFG Enhancement settings
-            'akashic_cfg_method': akashic_cfg_method,
-            'akashic_rescale_phi': akashic_rescale_phi,
             'akashic_spectral_mod': akashic_spectral_mod,
             'akashic_spectral_percentile': akashic_spectral_percentile,
             'akashic_divisive_norm': akashic_divisive_norm,
@@ -2706,11 +2552,6 @@ class AdeptSamplerForge(scripts.Script):
                     apply_vae_reflection(vae_model)
                 else:
                     restore_vae_reflection(vae_model)
-
-        # --- CFG Enhancement via Model Hook (Proper Implementation) ---
-        # Hook into sampling_prepare to inject CFG function at the right time
-        if enable_custom and use_akashic_solver and akashic_cfg_method != 'Off':
-            self._setup_cfg_hook(akashic_cfg_method, akashic_rescale_phi)
 
         if enable_custom:
             if disable_reason:
@@ -2765,9 +2606,7 @@ class AdeptSamplerForge(scripts.Script):
                 'akashic_smea_strength': akashic_smea_strength if use_akashic_solver else 'N/A',
                 'akashic_ndb_strength': akashic_ndb_strength if use_akashic_solver else 'N/A',
                 'akashic_eqvae_mode': akashic_eqvae_mode if use_akashic_solver else 'N/A',
-                # CFG Enhancement parameters
-                'akashic_cfg_method': akashic_cfg_method if use_akashic_solver else 'N/A',
-                'akashic_rescale_phi': akashic_rescale_phi if use_akashic_solver and akashic_cfg_method == 'RescaleCFG' else 'N/A',
+                # Additional CFG Fixes parameters
                 'akashic_spectral_mod': akashic_spectral_mod if use_akashic_solver else False,
                 'akashic_divisive_norm': akashic_divisive_norm if use_akashic_solver else False,
                 'akashic_combat_cfg_drift': akashic_combat_cfg_drift if use_akashic_solver else False,
@@ -2777,57 +2616,6 @@ class AdeptSamplerForge(scripts.Script):
         else:
             print("🔄 Using standard sampler")
             return
-
-    def _setup_cfg_hook(self, cfg_method, rescale_phi):
-        """
-        Set up CFG enhancement by patching sampling_prepare to inject CFG function.
-        This ensures the CFG function is applied right before sampling starts,
-        when forge_objects.unet is available.
-        """
-        try:
-            from modules_forge import forge_sampler
-
-            # Store original function (only once)
-            if not hasattr(forge_sampler, '_adept_original_sampling_prepare'):
-                forge_sampler._adept_original_sampling_prepare = forge_sampler.sampling_prepare
-
-            # Create the appropriate CFG function based on method
-            if cfg_method == 'RescaleCFG':
-                cfg_func = create_rescale_cfg_function(multiplier=rescale_phi)
-                cfg_desc = f"RescaleCFG (multiplier={rescale_phi})"
-            else:
-                return
-
-            original_prepare = forge_sampler._adept_original_sampling_prepare
-            # Use a unique flag to track if we've already hooked this generation
-            hook_applied = [False]
-
-            def patched_sampling_prepare(unet, x):
-                # Apply our CFG function to the unet before sampling (only once per generation)
-                if not hook_applied[0] and hasattr(unet, 'set_model_sampler_cfg_function'):
-                    unet.set_model_sampler_cfg_function(cfg_func)
-                    hook_applied[0] = True
-                    print(f"   🔗 {cfg_desc} hooked at model level")
-                # Call original function
-                return original_prepare(unet, x)
-
-            # Patch the function
-            forge_sampler.sampling_prepare = patched_sampling_prepare
-            print(f"   📋 CFG Enhancement ({cfg_method}) ready")
-
-        except ImportError:
-            print(f"   ⚠️ modules_forge not available for CFG hook")
-        except Exception as e:
-            print(f"   ⚠️ Failed to setup CFG hook: {e}")
-
-    def _restore_cfg_hook(self):
-        """Restore original sampling_prepare function."""
-        try:
-            from modules_forge import forge_sampler
-            if hasattr(forge_sampler, '_adept_original_sampling_prepare'):
-                forge_sampler.sampling_prepare = forge_sampler._adept_original_sampling_prepare
-        except:
-            pass
 
     def sample_enhanced_euler_ancestral(self, model, x, sigmas, extra_args=None, callback=None, disable=None, eta=1., s_noise=1., generator=None, skip_schedule_override=False):
         """Simplified custom Euler Ancestral with dynamic thresholding, focused on AOS."""

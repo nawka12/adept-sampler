@@ -117,7 +117,7 @@ Native Detail Boost: 0.3-0.5 (for native res detail)
 EQ-VAE Mode: Balanced
 ```
 
-**Important**: Use external rescaleCFG at 0.7 for EQ-VAE models.
+**Tip**: Enable Additional CFG Fixes (Spectral Modulation, Divisive Norm, Combat CFG Drift) for EQ-VAE models if needed.
 
 ### Adept Solver
 
