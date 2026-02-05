@@ -1145,21 +1145,23 @@ def apply_dynamic_thresholding(x, percentile=0.995, clamp_range=1.0):
 # POST-HOC CFG FIX FUNCTIONS
 # =============================================================================
 
-def apply_spectral_modulation(latent, percentile=5.0, high_mult=0.9, low_mult=1.1):
+def apply_spectral_modulation(latent, percentile=5.0, multiplier=1.0):
     """
     Spectral Modulation: Apply frequency-domain corrections to combat CFG artifacts.
 
-    Based on ComfyUI-Latent-Modifiers.
+    Based on Clybius/ComfyUI-Latent-Modifiers reference implementation.
 
-    Converts the latent to frequency domain via FFT, clamps high frequencies
-    (which cause noise/artifacts) and boosts low frequencies (which preserve
-    structure), then converts back.
+    Converts the latent to frequency domain via FFT, boosts low frequencies
+    (which preserve structure) and reduces high frequencies (which cause
+    noise/artifacts), then converts back.
+
+    Uses log amplitude for percentile calculation to handle the wide dynamic
+    range of FFT magnitudes more effectively.
 
     Args:
         latent: The latent tensor to modify
         percentile: Upper/lower percentile threshold for modification. Default: 5.0
-        high_mult: Multiplier for high frequencies (< 1 reduces). Default: 0.9
-        low_mult: Multiplier for low frequencies (> 1 boosts). Default: 1.1
+        multiplier: Exponent for modulation strength (higher = stronger effect). Default: 1.0
 
     Returns:
         Spectrally modulated latent
@@ -1168,36 +1170,42 @@ def apply_spectral_modulation(latent, percentile=5.0, high_mult=0.9, low_mult=1.
         return latent
 
     try:
-        # Apply FFT to each channel
+        # Apply FFT to each channel (no shift needed for this algorithm)
         # latent shape: (batch, channels, height, width)
-        fft = torch.fft.fft2(latent, dim=(-2, -1))
-        fft_shifted = torch.fft.fftshift(fft, dim=(-2, -1))
+        fourier = torch.fft.fft2(latent, dim=(-2, -1))
 
-        # Compute magnitude
-        magnitude = torch.abs(fft_shifted)
+        # Compute log amplitude (matches Clybius reference)
+        # Log compresses the wide dynamic range for better percentile thresholds
+        log_amp = torch.log(torch.sqrt(fourier.real ** 2 + fourier.imag ** 2) + 1e-8)
 
         # Flatten for percentile computation (per batch, per channel)
-        mag_flat = magnitude.view(magnitude.shape[0], magnitude.shape[1], -1)
+        log_amp_flat = log_amp.abs().flatten(2)
 
-        # Compute percentile thresholds
-        low_thresh = torch.quantile(mag_flat, percentile / 100.0, dim=-1, keepdim=True)
-        high_thresh = torch.quantile(mag_flat, 1.0 - percentile / 100.0, dim=-1, keepdim=True)
+        # Compute percentile thresholds on log amplitude
+        quantile_low = torch.quantile(
+            log_amp_flat,
+            percentile * 0.01,
+            dim=2
+        ).unsqueeze(-1).unsqueeze(-1).expand(log_amp.shape)
 
-        # Reshape thresholds back
-        low_thresh = low_thresh.view(magnitude.shape[0], magnitude.shape[1], 1, 1)
-        high_thresh = high_thresh.view(magnitude.shape[0], magnitude.shape[1], 1, 1)
+        quantile_high = torch.quantile(
+            log_amp_flat,
+            1 - (percentile * 0.01),
+            dim=2
+        ).unsqueeze(-1).unsqueeze(-1).expand(log_amp.shape)
 
-        # Create multiplier map
-        multiplier = torch.ones_like(magnitude)
-        multiplier = torch.where(magnitude < low_thresh, low_mult * multiplier, multiplier)
-        multiplier = torch.where(magnitude > high_thresh, high_mult * multiplier, multiplier)
+        # Create binary masks (Clybius method)
+        # Low frequencies (< quantile_low): boost to 1.5
+        # High frequencies (> quantile_high): reduce to 0.5
+        # Middle frequencies: unchanged at 1.0
+        mask_low = ((log_amp < quantile_low).float() + 1).clamp_(max=1.5)
+        mask_high = ((log_amp < quantile_high).float()).clamp_(min=0.5)
 
-        # Apply modulation
-        fft_modulated = fft_shifted * multiplier
+        # Apply modulation with exponent for intensity control
+        filtered_fourier = fourier * ((mask_low * mask_high) ** multiplier)
 
-        # Inverse FFT
-        fft_unshifted = torch.fft.ifftshift(fft_modulated, dim=(-2, -1))
-        result = torch.fft.ifft2(fft_unshifted, dim=(-2, -1)).real
+        # Inverse FFT (no shift/unshift needed)
+        result = torch.fft.ifft2(filtered_fourier, dim=(-2, -1)).real
 
         return result
 
