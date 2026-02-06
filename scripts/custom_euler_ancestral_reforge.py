@@ -175,7 +175,7 @@ current_sampler_settings = {
     'akashic_spectral_mod': False,   # Enable spectral modulation for frequency correction
     'akashic_spectral_percentile': 5.0,  # Spectral modulation percentile threshold
     'akashic_divisive_norm': False,  # Enable divisive normalization
-    'akashic_divisive_intensity': 1.0,  # Divisive norm intensity
+    'akashic_divisive_intensity': 0.3,  # Divisive norm intensity
     'akashic_combat_cfg_drift': False,  # Combat CFG mean drift
     'akashic_combat_drift_intensity': 0.5,  # Combat drift intensity (0-1)
 }
@@ -755,7 +755,7 @@ def sample_akashic_solver(model, x, sigmas, extra_args=None, callback=None,
         'akashic_spectral_mod': current_sampler_settings.get('akashic_spectral_mod', False),
         'akashic_spectral_percentile': current_sampler_settings.get('akashic_spectral_percentile', 5.0),
         'akashic_divisive_norm': current_sampler_settings.get('akashic_divisive_norm', False),
-        'akashic_divisive_intensity': current_sampler_settings.get('akashic_divisive_intensity', 1.0),
+        'akashic_divisive_intensity': current_sampler_settings.get('akashic_divisive_intensity', 0.3),
         'akashic_combat_cfg_drift': current_sampler_settings.get('akashic_combat_cfg_drift', False),
         'akashic_combat_drift_intensity': current_sampler_settings.get('akashic_combat_drift_intensity', 0.5),
     }
@@ -863,7 +863,7 @@ def sample_akashic_solver(model, x, sigmas, extra_args=None, callback=None,
             if cfg_settings.get('akashic_divisive_norm', False):
                 denoised = apply_divisive_norm(
                     denoised,
-                    intensity=cfg_settings.get('akashic_divisive_intensity', 1.0),
+                    intensity=cfg_settings.get('akashic_divisive_intensity', 0.3),
                     progress=progress
                 )
             if cfg_settings.get('akashic_combat_cfg_drift', False):
@@ -1407,7 +1407,7 @@ def apply_cfg_techniques(denoised, x, sigma, cfg_scale, progress, settings):
 
     # Apply Divisive Normalization if enabled
     if settings.get('akashic_divisive_norm', False):
-        intensity = settings.get('akashic_divisive_intensity', 1.0)
+        intensity = settings.get('akashic_divisive_intensity', 0.3)
         result = apply_divisive_norm(result, intensity=intensity, progress=progress)
 
     # Apply Combat CFG Drift if enabled
@@ -2005,8 +2005,8 @@ class AdeptSamplerForge(scripts.Script):
                             with gr.Group(visible=False) as divisive_options:
                                 self.akashic_divisive_intensity = gr.Slider(
                                     label='Divisive Intensity',
-                                    minimum=0.1, maximum=2.0, value=1.0, step=0.1,
-                                    info="Normalization strength"
+                                    minimum=0.1, maximum=1.0, value=0.3, step=0.05,
+                                    info="Normalization strength (0.2-0.3 recommended)"
                                 )
 
                             with gr.Group(visible=False) as combat_drift_options:
