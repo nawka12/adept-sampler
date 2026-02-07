@@ -158,7 +158,7 @@ current_sampler_settings = {
     'adept_ancestral_phase_noise': False,
     'adept_ancestral_phase_strength': 0.5,
     'adept_ancestral_enhanced_derivative': False,
-    # AkashicSolver v2 [EXPERIMENTAL] settings - SA-Solver base with AYS schedules
+    # AkashicSolver v2 settings - SA-Solver base with AYS schedules
     'use_akashic_solver': False,
     'akashic_base_eta': 1.0,
     'akashic_s_noise': 1.0,
@@ -174,8 +174,6 @@ current_sampler_settings = {
     # Additional CFG fixes (post-hoc techniques)
     'akashic_spectral_mod': False,   # Enable spectral modulation for frequency correction
     'akashic_spectral_percentile': 5.0,  # Spectral modulation percentile threshold
-    'akashic_divisive_norm': False,  # Enable divisive normalization
-    'akashic_divisive_intensity': 0.3,  # Divisive norm intensity
     'akashic_combat_cfg_drift': False,  # Combat CFG mean drift
     'akashic_combat_drift_intensity': 0.5,  # Combat drift intensity (0-1)
 }
@@ -304,7 +302,7 @@ def patch_samplers_globally():
                 if use_adept_ancestral_solver:
                     return sample_adept_ancestral_solver(active_model, x, final_sigmas, extra_args, callback, disable, generator, **kwargs)
 
-                # Priority 4: AkashicSolver [EXPERIMENTAL] (optimized for EQVAE models)
+                # Priority 4: AkashicSolver (optimized for EQVAE models)
                 use_akashic_solver = current_sampler_settings.get('use_akashic_solver', False)
                 if use_akashic_solver:
                     return sample_akashic_solver(active_model, x, final_sigmas, extra_args, callback, disable, generator, **kwargs)
@@ -705,7 +703,7 @@ def sample_adept_ancestral_solver(model, x, sigmas, extra_args=None, callback=No
 def sample_akashic_solver(model, x, sigmas, extra_args=None, callback=None, 
                           disable=None, generator=None, **kwargs):
     """
-    AkashicSolver v2 [EXPERIMENTAL]: Advanced sampler for SDXL/EQ-VAE models.
+    AkashicSolver v2: Advanced sampler for SDXL/EQ-VAE models.
     
     This solver combines multiple SOTA techniques for optimal EQ-VAE sampling:
     
@@ -727,14 +725,14 @@ def sample_akashic_solver(model, x, sigmas, extra_args=None, callback=None,
     
     Recommended settings for EQ-VAE models (e.g., AkashicPulse):
     - Use with AkashicAOS scheduler or AYS schedule
-    - Enable Additional CFG Fixes (Spectral, Divisive Norm, Combat Drift) as needed
+    - Enable Additional CFG Fixes (Spectral, Combat Drift) as needed
     - CFG Scale: 7-10
     - Steps: 20-30
     - Tau: 0.5 (balanced) or 1.0 (full stochastic)
     - Order: 2 (recommended)
 
     Additional CFG Fixes (post-hoc):
-    - Spectral Modulation, Divisive Norm, Combat CFG Drift
+    - Spectral Modulation, Combat CFG Drift
     """
     extra_args = {} if extra_args is None else extra_args
     s_in = x.new_ones([x.shape[0]])
@@ -754,14 +752,11 @@ def sample_akashic_solver(model, x, sigmas, extra_args=None, callback=None,
     cfg_settings = {
         'akashic_spectral_mod': current_sampler_settings.get('akashic_spectral_mod', False),
         'akashic_spectral_percentile': current_sampler_settings.get('akashic_spectral_percentile', 5.0),
-        'akashic_divisive_norm': current_sampler_settings.get('akashic_divisive_norm', False),
-        'akashic_divisive_intensity': current_sampler_settings.get('akashic_divisive_intensity', 0.3),
         'akashic_combat_cfg_drift': current_sampler_settings.get('akashic_combat_cfg_drift', False),
         'akashic_combat_drift_intensity': current_sampler_settings.get('akashic_combat_drift_intensity', 0.5),
     }
     cfg_enhancement_active = (
         cfg_settings['akashic_spectral_mod']
-        or cfg_settings['akashic_divisive_norm']
         or cfg_settings['akashic_combat_cfg_drift']
     )
 
@@ -776,7 +771,7 @@ def sample_akashic_solver(model, x, sigmas, extra_args=None, callback=None,
         print(f"🌀 AkashicSolver v2 [EQ-VAE BALANCED] active")
         print(f"   Optimized for EQ-VAE's cleaner latent space")
     else:
-        print(f"🌀 AkashicSolver v2 [EXPERIMENTAL] active")
+        print(f"🌀 AkashicSolver v2 active")
     print(f"   τ (tau): {base_tau:.2f}, η (eta): {base_eta:.2f}, s_noise: {base_s_noise:.2f}")
     print(f"   Order: {solver_order}, Adaptive Eta: {enable_adaptive_eta}, Phase Strength: {phase_strength:.2f}")
     if smea_strength > 0:
@@ -789,8 +784,6 @@ def sample_akashic_solver(model, x, sigmas, extra_args=None, callback=None,
         extras = []
         if cfg_settings['akashic_spectral_mod']:
             extras.append("Spectral")
-        if cfg_settings['akashic_divisive_norm']:
-            extras.append("DivisiveNorm")
         if cfg_settings['akashic_combat_cfg_drift']:
             extras.append("CombatDrift")
         print(f"   ✨ CFG Fixes: {', '.join(extras)}")
@@ -857,15 +850,9 @@ def sample_akashic_solver(model, x, sigmas, extra_args=None, callback=None,
         if cfg_scale > 7.0:
             denoised = apply_dynamic_thresholding(denoised, percentile=0.995)
 
-        # === POST-HOC CFG FIXES (Divisive Norm, Combat Drift) ===
+        # === POST-HOC CFG FIXES (Combat Drift) ===
         # Note: Spectral Modulation is now handled via CFG hook in process_before_every_sampling
         if cfg_enhancement_active:
-            if cfg_settings.get('akashic_divisive_norm', False):
-                denoised = apply_divisive_norm(
-                    denoised,
-                    intensity=cfg_settings.get('akashic_divisive_intensity', 0.3),
-                    progress=progress
-                )
             if cfg_settings.get('akashic_combat_cfg_drift', False):
                 denoised = apply_combat_cfg_drift(
                     denoised,
@@ -1238,64 +1225,6 @@ def create_spectral_modulation_cfg_hook(multiplier=1.0, percentile=5.0):
     return spectral_cfg_hook
 
 
-def apply_divisive_norm(latent, intensity=1.0, progress=0.0):
-    """
-    Divisive Normalization: Reduce CFG artifacts via local variance normalization.
-
-    Based on ComfyUI-Latent-Modifiers (Clybius). Uses a large kernel covering
-    most of the latent and progress-based ramping that protects early
-    compositional steps while applying artifact suppression in later steps.
-
-    Args:
-        latent: The latent tensor to normalize
-        intensity: Effect strength (0=disabled, 1=full effect). Default: 1.0
-        progress: Sampling progress 0.0-1.0 for timestep-based ramping
-
-    Returns:
-        Normalized latent
-    """
-    if intensity <= 0:
-        return latent
-
-    # Progress-based ramping: minimal at start, full at end
-    alpha = progress * intensity
-    if alpha <= 1e-6:
-        return latent
-
-    try:
-        import torch.nn.functional as F
-
-        # Large kernel covering the full spatial extent (like Clybius' default of 255)
-        h, w = latent.shape[-2:]
-        kernel_size = max(h, w) | 1  # ensure odd
-        padding = kernel_size // 2
-
-        # Local mean
-        local_mean = F.avg_pool2d(
-            latent, kernel_size=kernel_size, stride=1,
-            padding=padding, count_include_pad=False
-        )
-
-        # Local variance: E[X^2] - E[X]^2
-        local_sq_mean = F.avg_pool2d(
-            latent ** 2, kernel_size=kernel_size, stride=1,
-            padding=padding, count_include_pad=False
-        )
-        local_var = local_sq_mean - local_mean ** 2 + 1e-6
-
-        # Divisive normalization: divide by local standard deviation
-        normalized = latent / torch.sqrt(local_var)
-
-        # Blend with original based on progress-ramped alpha
-        result = alpha * normalized + (1.0 - alpha) * latent
-
-        return result
-
-    except Exception as e:
-        print(f"⚠️ Divisive normalization failed: {e}")
-        return latent
-
-
 def apply_combat_cfg_drift(latent, method='mean', intensity=1.0):
     """
     Combat CFG Drift: Reduce mean drift from high CFG values.
@@ -1401,14 +1330,8 @@ def apply_cfg_techniques(denoised, x, sigma, cfg_scale, progress, settings):
 
     # Skip if no additional CFG fixes are enabled
     # Note: Spectral Modulation is now handled via CFG hook, not here
-    if not (settings.get('akashic_divisive_norm', False)
-            or settings.get('akashic_combat_cfg_drift', False)):
+    if not settings.get('akashic_combat_cfg_drift', False):
         return result
-
-    # Apply Divisive Normalization if enabled
-    if settings.get('akashic_divisive_norm', False):
-        intensity = settings.get('akashic_divisive_intensity', 0.3)
-        result = apply_divisive_norm(result, intensity=intensity, progress=progress)
 
     # Apply Combat CFG Drift if enabled
     if settings.get('akashic_combat_cfg_drift', False):
@@ -1849,7 +1772,7 @@ class AdeptSamplerForge(scripts.Script):
                         self.solver_type = gr.Dropdown(
                             label='Solver Type',
                             value='None',
-                            choices=['None', 'Adept Solver', 'Adept Ancestral Solver', 'AkashicSolver [EXPERIMENTAL]'],
+                            choices=['None', 'Adept Solver', 'Adept Ancestral Solver', 'AkashicSolver'],
                             info="None = WebUI's native solver. Adept = multistep predictor-corrector. Adept Ancestral = adds noise injection. AkashicSolver = optimized for EQVAE models."
                         )
                         
@@ -1984,11 +1907,6 @@ class AdeptSamplerForge(scripts.Script):
                                     value=False,
                                     info="Frequency-domain CFG correction"
                                 )
-                                self.akashic_divisive_norm = gr.Checkbox(
-                                    label='Divisive Norm',
-                                    value=False,
-                                    info="Local normalization for artifacts"
-                                )
                                 self.akashic_combat_cfg_drift = gr.Checkbox(
                                     label='Combat CFG Drift',
                                     value=False,
@@ -2000,13 +1918,6 @@ class AdeptSamplerForge(scripts.Script):
                                     label='Spectral Percentile',
                                     minimum=1.0, maximum=15.0, value=5.0, step=0.5,
                                     info="Frequency threshold (lower=gentler)"
-                                )
-
-                            with gr.Group(visible=False) as divisive_options:
-                                self.akashic_divisive_intensity = gr.Slider(
-                                    label='Divisive Intensity',
-                                    minimum=0.1, maximum=1.0, value=0.3, step=0.05,
-                                    info="Normalization strength (0.2-0.3 recommended)"
                                 )
 
                             with gr.Group(visible=False) as combat_drift_options:
@@ -2023,12 +1934,6 @@ class AdeptSamplerForge(scripts.Script):
                                 outputs=[spectral_options]
                             )
 
-                            self.akashic_divisive_norm.change(
-                                fn=lambda x: gr.update(visible=x),
-                                inputs=[self.akashic_divisive_norm],
-                                outputs=[divisive_options]
-                            )
-
                             self.akashic_combat_cfg_drift.change(
                                 fn=lambda x: gr.update(visible=x),
                                 inputs=[self.akashic_combat_cfg_drift],
@@ -2039,7 +1944,7 @@ class AdeptSamplerForge(scripts.Script):
                             return {
                                 solver_options: gr.update(visible=solver_type == 'Adept Solver'),
                                 ancestral_solver_options: gr.update(visible=solver_type == 'Adept Ancestral Solver'),
-                                akashic_solver_options: gr.update(visible=solver_type == 'AkashicSolver [EXPERIMENTAL]')
+                                akashic_solver_options: gr.update(visible=solver_type == 'AkashicSolver')
                             }
                         
                         self.solver_type.change(
@@ -2072,7 +1977,7 @@ class AdeptSamplerForge(scripts.Script):
                         ]
                         eps_choices = [
                             "AOS-ε (for ε-prediction)",
-                            "AkashicAOS [EXPERIMENTAL]",
+                            "AkashicAOS",
                         ]
 
                         self.scheduler_category = gr.Dropdown(
@@ -2263,8 +2168,6 @@ class AdeptSamplerForge(scripts.Script):
             # Additional CFG Fixes settings
             (self.akashic_spectral_mod, lambda p: str(p.get('akashic_spectral_mod', 'false')).lower() == 'true' if 'akashic_spectral_mod' in p else gr.update()),
             (self.akashic_spectral_percentile, lambda p: gr.update() if p.get('akashic_spectral_percentile') in (None, 'N/A') else float(p['akashic_spectral_percentile'])),
-            (self.akashic_divisive_norm, lambda p: str(p.get('akashic_divisive_norm', 'false')).lower() == 'true' if 'akashic_divisive_norm' in p else gr.update()),
-            (self.akashic_divisive_intensity, lambda p: gr.update() if p.get('akashic_divisive_intensity') in (None, 'N/A') else float(p['akashic_divisive_intensity'])),
             (self.akashic_combat_cfg_drift, lambda p: str(p.get('akashic_combat_cfg_drift', 'false')).lower() == 'true' if 'akashic_combat_cfg_drift' in p else gr.update()),
             (self.akashic_combat_drift_intensity, lambda p: gr.update() if p.get('akashic_combat_drift_intensity') in (None, 'N/A') else float(p['akashic_combat_drift_intensity'])),
             (self.vae_reflection, lambda p: str(p.get('vae_reflection', 'false')).lower() == 'true' if 'vae_reflection' in p else gr.update()),
@@ -2313,8 +2216,6 @@ class AdeptSamplerForge(scripts.Script):
             # Additional CFG Fixes settings
             self.akashic_spectral_mod,
             self.akashic_spectral_percentile,
-            self.akashic_divisive_norm,
-            self.akashic_divisive_intensity,
             self.akashic_combat_cfg_drift,
             self.akashic_combat_drift_intensity,
             self.vae_reflection,
@@ -2341,7 +2242,7 @@ class AdeptSamplerForge(scripts.Script):
             akashic_ndb_strength, akashic_eqvae_mode,
             # Additional CFG Fixes settings
             akashic_spectral_mod, akashic_spectral_percentile,
-            akashic_divisive_norm, akashic_divisive_intensity, akashic_combat_cfg_drift, akashic_combat_drift_intensity,
+            akashic_combat_cfg_drift, akashic_combat_drift_intensity,
             vae_reflection,
         ) = script_args
 
@@ -2449,11 +2350,6 @@ class AdeptSamplerForge(scripts.Script):
             if "akashic_spectral_percentile" in xyz:
                 try: akashic_spectral_percentile = float(xyz["akashic_spectral_percentile"])
                 except Exception: pass
-            if "akashic_divisive_norm" in xyz:
-                akashic_divisive_norm = str(xyz["akashic_divisive_norm"]) == "True"
-            if "akashic_divisive_intensity" in xyz:
-                try: akashic_divisive_intensity = float(xyz["akashic_divisive_intensity"])
-                except Exception: pass
             if "akashic_combat_cfg_drift" in xyz:
                 akashic_combat_cfg_drift = str(xyz["akashic_combat_cfg_drift"]) == "True"
             if "vae_reflection" in xyz:
@@ -2462,12 +2358,12 @@ class AdeptSamplerForge(scripts.Script):
         # Set solver flags based on the dropdown choice
         use_adept_solver = (solver_type == 'Adept Solver')
         use_adept_ancestral_solver = (solver_type == 'Adept Ancestral Solver')
-        use_akashic_solver = (solver_type == 'AkashicSolver [EXPERIMENTAL]')
+        use_akashic_solver = (solver_type == 'AkashicSolver')
         
         # Set scheduler flags based on the radio button choice
         use_anime_schedule_v = (scheduler_override == "AOS-V (for v-prediction)")
         use_anime_schedule_e = (scheduler_override == "AOS-ε (for ε-prediction)")
-        use_akashic_aos = (scheduler_override == "AkashicAOS [EXPERIMENTAL]")
+        use_akashic_aos = (scheduler_override == "AkashicAOS")
         use_anime_schedule = use_anime_schedule_v or use_anime_schedule_e or use_akashic_aos
         use_entropic_scheduler = (scheduler_override == "Entropic")
 
@@ -2487,7 +2383,7 @@ class AdeptSamplerForge(scripts.Script):
             "JYS (Dynamic)",
             "AOS-V (for v-prediction)",
             "AOS-ε (for ε-prediction)",
-            "AkashicAOS [EXPERIMENTAL]",
+            "AkashicAOS",
         ]:
             custom_scheduler_type = scheduler_override
 
@@ -2545,7 +2441,7 @@ class AdeptSamplerForge(scripts.Script):
             'adept_ancestral_phase_noise': adept_ancestral_phase_noise,
             'adept_ancestral_phase_strength': adept_ancestral_phase_strength,
             'adept_ancestral_enhanced_derivative': adept_ancestral_enhanced_derivative,
-            # AkashicSolver v2 [EXPERIMENTAL] settings
+            # AkashicSolver v2 settings
             'use_akashic_solver': use_akashic_solver and enable_custom,
             'use_akashic_aos': use_akashic_aos,
             'akashic_tau': akashic_tau,
@@ -2561,8 +2457,6 @@ class AdeptSamplerForge(scripts.Script):
             # CFG Enhancement settings
             'akashic_spectral_mod': akashic_spectral_mod,
             'akashic_spectral_percentile': akashic_spectral_percentile,
-            'akashic_divisive_norm': akashic_divisive_norm,
-            'akashic_divisive_intensity': akashic_divisive_intensity,
             'akashic_combat_cfg_drift': akashic_combat_cfg_drift,
             'akashic_combat_drift_intensity': akashic_combat_drift_intensity,
             'vae_reflection': vae_reflection,
@@ -2649,7 +2543,6 @@ class AdeptSamplerForge(scripts.Script):
                 'akashic_eqvae_mode': akashic_eqvae_mode if use_akashic_solver else 'N/A',
                 # Additional CFG Fixes parameters
                 'akashic_spectral_mod': akashic_spectral_mod if use_akashic_solver else False,
-                'akashic_divisive_norm': akashic_divisive_norm if use_akashic_solver else False,
                 'akashic_combat_cfg_drift': akashic_combat_cfg_drift if use_akashic_solver else False,
                 'akashic_combat_drift_intensity': akashic_combat_drift_intensity if use_akashic_solver and akashic_combat_cfg_drift else 'N/A',
                 'vae_reflection': vae_reflection,
@@ -2725,7 +2618,7 @@ class AdeptSamplerForge(scripts.Script):
                         sigmas[0], sigmas[-2], len(sigmas) - 1, sigmas.device
                     )
             elif current_sampler_settings.get('use_akashic_aos', False):
-                print("🌀 Overriding sigma schedule with AkashicAOS [EXPERIMENTAL].")
+                print("🌀 Overriding sigma schedule with AkashicAOS.")
                 if len(sigmas) > 1:
                     final_sigmas = self.create_aos_akashic_sigmas(
                         sigmas[0], sigmas[-2], len(sigmas) - 1, sigmas.device
@@ -3754,7 +3647,7 @@ def list_supported_schedulers():
         # AOS variants
         "AOS-V (for v-prediction)",
         "AOS-ε (for ε-prediction)",
-        "AkashicAOS [EXPERIMENTAL]",
+        "AkashicAOS",
     ]
 
 
@@ -3812,7 +3705,7 @@ def compute_custom_sigma_schedule(sigmas: torch.Tensor, scheduler_name: str, *, 
         "JYS (Dynamic)": lambda: forge.create_jys_sigmas(sigma_max, sigma_min, num_steps, device),
         "AOS-V (for v-prediction)": lambda: forge.create_aos_v_sigmas(sigma_max, sigma_min, num_steps, device),
         "AOS-ε (for ε-prediction)": lambda: forge.create_aos_e_sigmas(sigma_max, sigma_min, num_steps, device),
-        "AkashicAOS [EXPERIMENTAL]": lambda: forge.create_aos_akashic_sigmas(sigma_max, sigma_min, num_steps, device),
+        "AkashicAOS": lambda: forge.create_aos_akashic_sigmas(sigma_max, sigma_min, num_steps, device),
     }
 
     if scheduler_name not in mapping:
@@ -3854,7 +3747,7 @@ def compute_sigma_schedule_from_settings(sigmas: torch.Tensor, settings: dict | 
         return compute_custom_sigma_schedule(sigmas, 'AOS-ε (for ε-prediction)')
 
     if settings.get('use_akashic_aos', False):
-        return compute_custom_sigma_schedule(sigmas, 'AkashicAOS [EXPERIMENTAL]')
+        return compute_custom_sigma_schedule(sigmas, 'AkashicAOS')
 
     return sigmas
 
@@ -3918,7 +3811,7 @@ def make_axis_on_xyz_grid():
             "(Adept) Solver Type",
             str,
             partial(set_value, field="solver_type"),
-            choices=lambda: ["None", "Adept Solver", "Adept Ancestral Solver", "AkashicSolver [EXPERIMENTAL]"],
+            choices=lambda: ["None", "Adept Solver", "Adept Ancestral Solver", "AkashicSolver"],
         ),
         xyz_grid.AxisOption(
             "(Adept) Solver Order",

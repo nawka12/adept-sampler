@@ -27,7 +27,7 @@ This extension is developed and tested on **Stable Diffusion WebUI reForge**. Co
 |--------|-------------|
 | **Adept Solver** | A hybrid **Predictor-Corrector** pipeline. It utilizes a multi-step Adams-Bashforth integrator (derived from **DEIS**) for prediction and a **UniPC**-style corrector step. It integrates **DC-Solver**'s compensation logic to align predictor-corrector steps and uses **DPM-Solver++** dynamic thresholding for high-CFG stability. |
 | **Adept Ancestral Solver** | Enhanced ancestral sampling with adaptive step sizing, phase-aware noise injection, enhanced derivative computation, and dynamic eta scheduling. |
-| **AkashicSolver [EXPERIMENTAL]** | An optimized implementation of the **Stochastic Adams Solver (SA-Solver)** tailored for SDXL/EQ-VAE. It augments the standard SA-Solver with **SMEA** (Sinusoidal Multipass) interpolation for high-res coherence, phase-aware stochasticity control (Tau) to interpolate between ODE and SDE behaviors, and an **EQ-VAE Mode** with optimized noise scaling for EQ-VAE's cleaner latent space. |
+| **AkashicSolver** | An optimized implementation of the **Stochastic Adams Solver (SA-Solver)** tailored for SDXL/EQ-VAE. It augments the standard SA-Solver with **SMEA** (Sinusoidal Multipass) interpolation for high-res coherence, phase-aware stochasticity control (Tau) to interpolate between ODE and SDE behaviors, and an **EQ-VAE Mode** with optimized noise scaling for EQ-VAE's cleaner latent space. |
 
 ### Schedulers
 
@@ -38,9 +38,9 @@ Organized by category for easy selection:
 | **Universal** | `None`, `Entropic`, `SNR-Optimized`, `Constant-Rate`, `Adaptive-Optimized`, `Cosine-Annealed`, `LogSNR-Uniform`, `Tanh Mid-Boost`, `Exponential Tail`, `Jittered-Karras`, `Hybrid JYS-Karras`, `AYS-SDXL`, `Stochastic`, `JYS (Dynamic)` |
 | **V-Prediction** | `AOS-V (for v-prediction)` |
 | **ε-Prediction** | `AOS-ε (for ε-prediction)` |
-| **Experimental** | `AkashicAOS [EXPERIMENTAL]` |
+| **ε-Prediction / EQ-VAE** | `AkashicAOS` |
 
-#### AkashicAOS v2 [EXPERIMENTAL]
+#### AkashicAOS v2
 
 A continuous power-function schedule designed for the smooth latent space of EQ-VAE:
 - **Single continuous curve** — unlike stepwise schedules, uses a single continuous curve with no discrete phase boundaries
@@ -104,8 +104,8 @@ git clone https://github.com/nawka12/adept-sampler extensions/adept-sampler
 ### AkashicSolver with AkashicAOS (for EQ-VAE models)
 
 ```
-Solver: AkashicSolver [EXPERIMENTAL]
-Scheduler: AkashicAOS [EXPERIMENTAL]
+Solver: AkashicSolver
+Scheduler: AkashicAOS
 τ (tau): 0.5-0.6
 Order: 2
 η (eta): 1.0
@@ -117,7 +117,7 @@ Native Detail Boost: 0.3-0.5 (for native res detail)
 EQ-VAE Mode: Balanced
 ```
 
-**Tip**: Enable Additional CFG Fixes (Spectral Modulation, Divisive Norm, Combat CFG Drift) for EQ-VAE models if needed.
+**Tip**: Enable Additional CFG Fixes (Spectral Modulation, Combat CFG Drift) for EQ-VAE models if needed.
 
 ### Adept Solver
 
