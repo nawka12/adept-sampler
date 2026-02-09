@@ -1229,14 +1229,20 @@ def apply_combat_cfg_drift(latent, method='mean', intensity=1.0):
     """
     Combat CFG Drift: Reduce mean drift from high CFG values.
 
-    Based on ComfyUI-Latent-Modifiers.
+    Based on ComfyUI-Latent-Modifiers, with per-channel correction to avoid
+    patchy artifacts when compositing partial re-generations (e.g. ADetailer).
 
     As CFG increases, the latent mean can drift away from 0, which causes
     color shifts and other artifacts. This technique reduces the drift
     proportionally based on intensity.
 
+    Uses per-channel (spatial-only) mean subtraction instead of a single global
+    scalar. This ensures that inpainted sub-regions receive a correction
+    consistent with the surrounding image, preventing visible seams at the
+    composite boundary.
+
     Args:
-        latent: The latent tensor to correct
+        latent: The latent tensor to correct [B, C, H, W]
         method: 'mean' or 'median'. Default: 'mean'
         intensity: How much drift to remove (0=none, 1=full). Default: 1.0
 
@@ -1248,16 +1254,15 @@ def apply_combat_cfg_drift(latent, method='mean', intensity=1.0):
 
     try:
         if method == 'median':
-            # Compute global median per batch (across all channels and spatial dims)
-            center = latent.view(latent.shape[0], -1).median(dim=-1, keepdim=True)[0]
-            center = center.view(latent.shape[0], 1, 1, 1)
+            # Per-channel median across spatial dims
+            flat = latent.view(latent.shape[0], latent.shape[1], -1)
+            center = flat.median(dim=-1, keepdim=True)[0].unsqueeze(-1)  # [B, C, 1, 1]
         else:
-            # Compute global mean per batch (across all channels and spatial dims)
-            # This matches ComfyUI's PostCFGsubtractMeanNode implementation
-            center = latent.mean(dim=(1, 2, 3), keepdim=True)
+            # Per-channel mean across spatial dims only (dims 2,3)
+            # Each channel's spatial mean is independently zeroed, which is
+            # compositing-friendly and avoids the patchy look with ADetailer
+            center = latent.mean(dim=(2, 3), keepdim=True)
 
-        # Remove drift proportionally based on intensity
-        # intensity=1.0 removes all drift, intensity=0.5 removes half
         return latent - center * intensity
 
     except Exception as e:
