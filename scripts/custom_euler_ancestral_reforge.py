@@ -3108,15 +3108,17 @@ class AdeptSamplerForge(scripts.Script):
 
     def create_akashic_eqflow_sigmas(self, sigma_max, sigma_min, num_steps, device='cpu'):
         """
-        AkashicEQFlow: Native log-SNR schedule for EQ-VAE models.
+        AkashicEQFlow: Crossover-concentrated log-SNR schedule for EQ-VAE models.
 
-        Works directly in log-SNR space (lambda = -2*log(sigma)) where uniform
-        spacing produces uniform sigma ratios by construction. Applies mild
-        detail-progressive warping (power 0.75-0.90) and tanh crossover
-        concentration — much gentler than the failed t^(1/9) attempt which
-        double-corrected an already-linearized coordinate.
+        Unlike detail-progressive schedulers (AkashicAOS, AkashicAOS Alt) which
+        monotonically shift steps toward the detail phase, EQFlow concentrates
+        steps in the perceptual crossover zone where the diffusion model
+        transitions from structure to detail (SNR ~ 1). It pulls steps from
+        BOTH tails toward this transition, producing a bell-shaped step density
+        in log-SNR space.
 
-        Adaptive detail power: 0.75 at 10 steps, 0.85 at 20, 0.90 at 30+.
+        Uses CDF inversion of a Gaussian-weighted density function, with
+        adaptive concentration that scales with step count.
         """
         if num_steps <= 0:
             return torch.zeros(1, device=device)
@@ -3125,42 +3127,50 @@ class AdeptSamplerForge(scripts.Script):
         # lambda = -2 * log(sigma); higher lambda = lower noise = more detail
         lambda_min = -2.0 * math.log(max(float(sigma_max), 1e-10))  # noisiest
         lambda_max = -2.0 * math.log(max(float(sigma_min), 1e-10))  # cleanest
+        lambda_range = lambda_max - lambda_min
 
-        # === ADAPTIVE DETAIL POWER ===
-        # Mild warping: power < 1 shifts density toward high lambda (detail).
-        # Adapts to step count so low-step runs get more detail bias while
-        # high-step runs stay closer to uniform (extra steps stay meaningful).
-        detail_power = min(0.90, max(0.75, 1.0 - 3.0 / max(num_steps, 10)))
+        # === CROSSOVER CENTER ===
+        # SNR=1 (lambda=0) is the perceptual crossover where structure meets
+        # detail. Shift slightly toward detail (+0.5 in lambda space) for
+        # EQ-VAE's characteristics.
+        u_center = (0.0 - lambda_min + 0.5) / lambda_range
 
-        u = torch.linspace(0, 1, num_steps, device=device)
-        u_detail = u ** detail_power
+        # === ADAPTIVE CONCENTRATION ===
+        # More steps = more room for ratio variation = stronger concentration.
+        # At low step counts, keep mild to avoid extreme tail ratios.
+        concentration = min(3.5, max(1.5, num_steps / 15.0))
+        width = 0.22
 
-        # === SHIFTED CROSSOVER CONCENTRATION ===
-        # tanh crossover at t=0.55 concentrates steps near the structure→detail
-        # transition, matching EQ-VAE's information-gain peak.
-        t_center = 0.55
-        beta = 0.06
-        gamma = 4.0
-        crossover = beta * torch.tanh(gamma * (u - t_center))
+        # === CDF INVERSION ===
+        # Sample Gaussian-weighted density, compute CDF, then invert to find
+        # step positions that achieve the desired density profile.
+        N = 1000
+        t = torch.linspace(0, 1, N, device=device)
+        density = 1.0 + concentration * torch.exp(
+            -((t - u_center) ** 2) / (2 * width ** 2)
+        )
 
-        u_modulated = u_detail + crossover
+        # Trapezoidal CDF
+        dt = 1.0 / (N - 1)
+        cdf = torch.zeros(N, device=device)
+        cdf[1:] = torch.cumsum((density[:-1] + density[1:]) / 2 * dt, dim=0)
+        cdf = cdf / cdf[-1]
 
-        # Normalize to [0, 1]
-        u_min, u_max = u_modulated.min(), u_modulated.max()
-        if u_max - u_min > 1e-8:
-            u_modulated = (u_modulated - u_min) / (u_max - u_min)
+        # Invert CDF: for each step target, find t where CDF(t) = target
+        targets = torch.linspace(0, 1, num_steps, device=device)
+        indices = torch.searchsorted(cdf, targets).clamp(1, N - 1)
+        lo = indices - 1
+        frac = (targets - cdf[lo]) / (cdf[indices] - cdf[lo]).clamp(min=1e-12)
+        u_steps = t[lo] + frac * (t[indices] - t[lo])
 
-        # === LOG-SNR → SIGMA MAPPING ===
-        # Linear interpolation in log-SNR space, then convert back to sigma.
-        # lambda = lambda_min + u * (lambda_max - lambda_min)
-        # sigma = exp(-lambda / 2)
-        lambdas = lambda_min + u_modulated * (lambda_max - lambda_min)
+        # === LOG-SNR -> SIGMA MAPPING ===
+        lambdas = lambda_min + u_steps * lambda_range
         sigmas = torch.exp(-lambdas / 2.0)
 
-        # === STEP RATIO SMOOTHING ===
-        # Safety net for multi-step solver stability. With native log-SNR
-        # mapping and mild warping, this should rarely fire (0-2 steps).
-        max_ratio = 1.5
+        # === STEP RATIO SAFETY NET ===
+        # Higher threshold than AOS schedulers (2.0x vs 1.5x) because the CDF
+        # approach produces controlled, bounded ratios. Fires on 0-1 tail steps.
+        max_ratio = 2.0
         for i in range(1, len(sigmas)):
             if sigmas[i] >= sigmas[i - 1]:
                 sigmas[i] = sigmas[i - 1] * 0.995
