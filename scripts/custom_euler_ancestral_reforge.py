@@ -1864,6 +1864,7 @@ class AdeptSamplerForge(scripts.Script):
                         eps_choices = [
                             "AOS-ε (for ε-prediction)",
                             "AkashicAOS",
+                            "AkashicAOS Alt",
                             "AkashicEQFlow",
                         ]
 
@@ -2271,6 +2272,7 @@ class AdeptSamplerForge(scripts.Script):
             "AOS-V (for v-prediction)",
             "AOS-ε (for ε-prediction)",
             "AkashicAOS",
+            "AkashicAOS Alt",
             "AkashicEQFlow",
         ]:
             custom_scheduler_type = scheduler_override
@@ -3036,9 +3038,9 @@ class AdeptSamplerForge(scripts.Script):
         
         return torch.cat([sigmas, torch.zeros(1, device=device)])
 
-    def create_akashic_eqflow_sigmas(self, sigma_max, sigma_min, num_steps, device='cpu'):
+    def create_aos_akashic_alt_sigmas(self, sigma_max, sigma_min, num_steps, device='cpu'):
         """
-        AkashicEQFlow: EQ-VAE-Optimized Schedule for SDXL models.
+        AkashicAOS Alt: Karras-based schedule with EQ-VAE-tuned warping.
 
         Uses Karras sigma mapping (proven to produce uniform step ratios) with
         EQ-VAE-specific warping that improves on AkashicAOS v2 in two ways:
@@ -3095,6 +3097,69 @@ class AdeptSamplerForge(scripts.Script):
         # === STEP RATIO SMOOTHING ===
         # Safety net for multi-step solver stability. With Karras mapping, this
         # rarely activates (unlike log-SNR mapping which hit this on 14/19 steps).
+        max_ratio = 1.5
+        for i in range(1, len(sigmas)):
+            if sigmas[i] >= sigmas[i - 1]:
+                sigmas[i] = sigmas[i - 1] * 0.995
+            if sigmas[i - 1] / sigmas[i].clamp(min=1e-10) > max_ratio:
+                sigmas[i] = sigmas[i - 1] / max_ratio
+
+        return torch.cat([sigmas, torch.zeros(1, device=device)])
+
+    def create_akashic_eqflow_sigmas(self, sigma_max, sigma_min, num_steps, device='cpu'):
+        """
+        AkashicEQFlow: Native log-SNR schedule for EQ-VAE models.
+
+        Works directly in log-SNR space (lambda = -2*log(sigma)) where uniform
+        spacing produces uniform sigma ratios by construction. Applies mild
+        detail-progressive warping (power 0.75-0.90) and tanh crossover
+        concentration — much gentler than the failed t^(1/9) attempt which
+        double-corrected an already-linearized coordinate.
+
+        Adaptive detail power: 0.75 at 10 steps, 0.85 at 20, 0.90 at 30+.
+        """
+        if num_steps <= 0:
+            return torch.zeros(1, device=device)
+
+        # === LOG-SNR ENDPOINTS ===
+        # lambda = -2 * log(sigma); higher lambda = lower noise = more detail
+        lambda_min = -2.0 * math.log(max(float(sigma_max), 1e-10))  # noisiest
+        lambda_max = -2.0 * math.log(max(float(sigma_min), 1e-10))  # cleanest
+
+        # === ADAPTIVE DETAIL POWER ===
+        # Mild warping: power < 1 shifts density toward high lambda (detail).
+        # Adapts to step count so low-step runs get more detail bias while
+        # high-step runs stay closer to uniform (extra steps stay meaningful).
+        detail_power = min(0.90, max(0.75, 1.0 - 3.0 / max(num_steps, 10)))
+
+        u = torch.linspace(0, 1, num_steps, device=device)
+        u_detail = u ** detail_power
+
+        # === SHIFTED CROSSOVER CONCENTRATION ===
+        # tanh crossover at t=0.55 concentrates steps near the structure→detail
+        # transition, matching EQ-VAE's information-gain peak.
+        t_center = 0.55
+        beta = 0.06
+        gamma = 4.0
+        crossover = beta * torch.tanh(gamma * (u - t_center))
+
+        u_modulated = u_detail + crossover
+
+        # Normalize to [0, 1]
+        u_min, u_max = u_modulated.min(), u_modulated.max()
+        if u_max - u_min > 1e-8:
+            u_modulated = (u_modulated - u_min) / (u_max - u_min)
+
+        # === LOG-SNR → SIGMA MAPPING ===
+        # Linear interpolation in log-SNR space, then convert back to sigma.
+        # lambda = lambda_min + u * (lambda_max - lambda_min)
+        # sigma = exp(-lambda / 2)
+        lambdas = lambda_min + u_modulated * (lambda_max - lambda_min)
+        sigmas = torch.exp(-lambdas / 2.0)
+
+        # === STEP RATIO SMOOTHING ===
+        # Safety net for multi-step solver stability. With native log-SNR
+        # mapping and mild warping, this should rarely fire (0-2 steps).
         max_ratio = 1.5
         for i in range(1, len(sigmas)):
             if sigmas[i] >= sigmas[i - 1]:
@@ -3617,6 +3682,7 @@ def list_supported_schedulers():
         "AOS-V (for v-prediction)",
         "AOS-ε (for ε-prediction)",
         "AkashicAOS",
+        "AkashicAOS Alt",
         "AkashicEQFlow",
     ]
 
@@ -3676,6 +3742,7 @@ def compute_custom_sigma_schedule(sigmas: torch.Tensor, scheduler_name: str, *, 
         "AOS-V (for v-prediction)": lambda: forge.create_aos_v_sigmas(sigma_max, sigma_min, num_steps, device),
         "AOS-ε (for ε-prediction)": lambda: forge.create_aos_e_sigmas(sigma_max, sigma_min, num_steps, device),
         "AkashicAOS": lambda: forge.create_aos_akashic_sigmas(sigma_max, sigma_min, num_steps, device),
+        "AkashicAOS Alt": lambda: forge.create_aos_akashic_alt_sigmas(sigma_max, sigma_min, num_steps, device),
         "AkashicEQFlow": lambda: forge.create_akashic_eqflow_sigmas(sigma_max, sigma_min, num_steps, device),
     }
 
