@@ -3067,14 +3067,15 @@ class AdeptSamplerForge(scripts.Script):
         t = torch.linspace(0, 1, num_steps, device=device)
 
         # EQ-VAE-specific constants (derived from measured properties):
-        # - rho_eff=9.0: Higher than standard 7.0 because EQ-VAE's 37% lower
-        #   intrinsic dimensionality means less ODE curvature at high noise,
-        #   so we shift ~25% more steps into the detail region
+        # - rho_eff: Adapts to step count. At low counts (10-20), concentrate
+        #   aggressively on detail (rho ~9-11). At high counts (40-50), spread
+        #   out so extra steps contribute across all phases (rho ~7.8).
+        #   Base formula: 7.0 + 2.0 * (20 / num_steps), clamped to [7.0, 11.0]
         # - t_center=0.55: EQ-VAE's lower noise floor shifts the peak of
         #   information gain (mutual information derivative) toward detail
         # - beta=0.06: Gentle tanh modulation strength for crossover concentration
         # - gamma=4.0: Tanh steepness controlling crossover sharpness
-        rho_eff = 9.0
+        rho_eff = min(11.0, max(7.0, 7.0 + 2.0 * (20.0 / max(num_steps, 10))))
         t_center = 0.55
         beta = 0.06
         gamma = 4.0
