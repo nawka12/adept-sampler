@@ -36,17 +36,28 @@ Organized by category for easy selection:
 | Category | Schedulers |
 |----------|------------|
 | **Universal** | `None`, `Entropic`, `SNR-Optimized`, `Constant-Rate`, `Adaptive-Optimized`, `Cosine-Annealed`, `LogSNR-Uniform`, `Tanh Mid-Boost`, `Exponential Tail`, `Jittered-Karras`, `Hybrid JYS-Karras`, `AYS-SDXL`, `Stochastic`, `JYS (Dynamic)` |
-| **V-Prediction** | `AOS-V (for v-prediction)` |
-| **ε-Prediction** | `AOS-ε (for ε-prediction)` |
-| **ε-Prediction / EQ-VAE** | `AkashicAOS` |
+| **V-Prediction** | `AOS-V (for v-prediction)`, `SNR-Optimized` |
+| **ε-Prediction / EQ-VAE** | `AOS-ε (for ε-prediction)`, `AkashicAOS`, `AkashicAOS Alt`, `AkashicEQFlow` |
 
-#### AkashicAOS v2
+#### Akashic Scheduler Family (ε / EQ-VAE)
+
+**AkashicAOS v2**
 
 A continuous power-function schedule designed for the smooth latent space of EQ-VAE:
 - **Single continuous curve** — unlike stepwise schedules, uses a single continuous curve with no discrete phase boundaries
 - **Detail-progressive** — shifts ~18% more steps into the low-sigma (detail) region
 - **Mid-range enhancement** — applies a sinusoidal density boost at logSNR ≈ 0 to enhance mid-range structure formation
 - **AkashicSolver compatible** — designed for stable multi-step integration
+
+**AkashicAOS Alt**
+- **Stronger detail bias** — emphasizes low-sigma refinement more aggressively than AkashicAOS
+- **Shifted crossover shaping** — concentrates around a slightly detail-shifted transition region
+- **Step-count adaptive behavior** — tuned to stay useful from low to high step counts
+
+**AkashicEQFlow**
+- **Crossover-focused density** — concentrates steps around the structure-to-detail transition in logSNR space
+- **Robust hybrid mapping** — blends EQFlow crossover placement with a Karras prior for stability
+- **Multi-step safety controls** — uses ratio caps and ratio slew-rate limiting for high-step robustness
 
 ### Enhancement Features
 
@@ -115,6 +126,22 @@ Phase Strength: 0.5-0.6
 SMEA: 0.0 (off for native res) / 0.1-0.2 (for >1.5x native)
 Native Detail Boost: 0.3-0.5 (for native res detail)
 EQ-VAE Mode: Balanced
+```
+
+### AkashicSolver with AkashicEQFlow (for EQ-VAE models)
+
+```
+Solver: AkashicSolver
+Scheduler: AkashicEQFlow
+τ (tau): 0.55-0.65
+Order: 2
+η (eta): 1.0
+Noise Scale: 0.9-1.0
+Adaptive Eta: On
+Phase Strength: 0.5-0.6
+SMEA: 0.0 (off for native res) / 0.1-0.2 (for >1.5x native)
+Native Detail Boost: 0.2-0.4
+EQ-VAE Mode: Off or Balanced (model-dependent)
 ```
 
 **Tip**: Enable Additional CFG Fixes (Spectral Modulation, Combat CFG Drift) for EQ-VAE models if needed.

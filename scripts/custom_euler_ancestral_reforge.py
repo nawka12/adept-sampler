@@ -1866,7 +1866,6 @@ class AdeptSamplerForge(scripts.Script):
                             "AkashicAOS",
                             "AkashicAOS Alt",
                             "AkashicEQFlow",
-                            "AkashicEQFlow v2 (draft, ε-only)",
                         ]
 
                         self.scheduler_category = gr.Dropdown(
@@ -2275,7 +2274,6 @@ class AdeptSamplerForge(scripts.Script):
             "AkashicAOS",
             "AkashicAOS Alt",
             "AkashicEQFlow",
-            "AkashicEQFlow v2 (draft, ε-only)",
         ]:
             custom_scheduler_type = scheduler_override
 
@@ -3110,90 +3108,14 @@ class AdeptSamplerForge(scripts.Script):
 
     def create_akashic_eqflow_sigmas(self, sigma_max, sigma_min, num_steps, device='cpu'):
         """
-        AkashicEQFlow: Crossover-concentrated log-SNR schedule for EQ-VAE models.
+        AkashicEQFlow: robust crossover-focused log-SNR schedule for EQ-VAE models.
 
-        Unlike detail-progressive schedulers (AkashicAOS, AkashicAOS Alt) which
-        monotonically shift steps toward the detail phase, EQFlow concentrates
-        steps in the perceptual crossover zone where the diffusion model
-        transitions from structure to detail (SNR ~ 1). It pulls steps from
-        BOTH tails toward this transition, producing a bell-shaped step density
-        in log-SNR space.
-
-        Uses CDF inversion of a Gaussian-weighted density function, with
-        adaptive concentration that scales with step count.
-        """
-        if num_steps <= 0:
-            return torch.zeros(1, device=device)
-
-        # === LOG-SNR ENDPOINTS ===
-        # lambda = -2 * log(sigma); higher lambda = lower noise = more detail
-        lambda_min = -2.0 * math.log(max(float(sigma_max), 1e-10))  # noisiest
-        lambda_max = -2.0 * math.log(max(float(sigma_min), 1e-10))  # cleanest
-        lambda_range = lambda_max - lambda_min
-
-        # === CROSSOVER CENTER ===
-        # SNR=1 (lambda=0) is the perceptual crossover where structure meets
-        # detail. Shift slightly toward detail (+0.5 in lambda space) for
-        # EQ-VAE's characteristics.
-        u_center = (0.0 - lambda_min + 0.5) / lambda_range
-
-        # === ADAPTIVE CONCENTRATION ===
-        # More steps = more room for ratio variation = stronger concentration.
-        # At low step counts, keep mild to avoid extreme tail ratios.
-        concentration = min(3.5, max(1.5, num_steps / 15.0))
-        width = 0.22
-
-        # === CDF INVERSION ===
-        # Sample Gaussian-weighted density, compute CDF, then invert to find
-        # step positions that achieve the desired density profile.
-        N = 1000
-        t = torch.linspace(0, 1, N, device=device)
-        density = 1.0 + concentration * torch.exp(
-            -((t - u_center) ** 2) / (2 * width ** 2)
-        )
-
-        # Trapezoidal CDF
-        dt = 1.0 / (N - 1)
-        cdf = torch.zeros(N, device=device)
-        cdf[1:] = torch.cumsum((density[:-1] + density[1:]) / 2 * dt, dim=0)
-        cdf = cdf / cdf[-1]
-
-        # Invert CDF: for each step target, find t where CDF(t) = target
-        targets = torch.linspace(0, 1, num_steps, device=device)
-        indices = torch.searchsorted(cdf, targets).clamp(1, N - 1)
-        lo = indices - 1
-        frac = (targets - cdf[lo]) / (cdf[indices] - cdf[lo]).clamp(min=1e-12)
-        u_steps = t[lo] + frac * (t[indices] - t[lo])
-
-        # === LOG-SNR -> SIGMA MAPPING ===
-        lambdas = lambda_min + u_steps * lambda_range
-        sigmas = torch.exp(-lambdas / 2.0)
-
-        # === STEP RATIO SAFETY NET ===
-        # Higher threshold than AOS schedulers (2.0x vs 1.5x) because the CDF
-        # approach produces controlled, bounded ratios. Fires on 0-1 tail steps.
-        max_ratio = 2.0
-        for i in range(1, len(sigmas)):
-            if sigmas[i] >= sigmas[i - 1]:
-                sigmas[i] = sigmas[i - 1] * 0.995
-            if sigmas[i - 1] / sigmas[i].clamp(min=1e-10) > max_ratio:
-                sigmas[i] = sigmas[i - 1] / max_ratio
-
-        return torch.cat([sigmas, torch.zeros(1, device=device)])
-
-    def create_akashic_eqflow_v2_sigmas(self, sigma_max, sigma_min, num_steps, device='cpu'):
-        """
-        AkashicEQFlow v2 (draft, epsilon-only): robust crossover-focused log-SNR schedule.
-
-        Robustness-focused draft:
-        - Milder crossover concentration than the initial v2 draft
-        - Adaptive width with higher minimum floor (prevents narrow spikes)
+        Robust formulation:
+        - Milder crossover concentration for high-step stability
+        - Adaptive width with higher minimum floor (avoid narrow spikes)
         - Asymmetric but restrained detail-side emphasis
         - Hybrid blend with Karras prior in lambda space
         - Ratio cap + ratio slew-rate limiting for multi-step stability
-
-        This draft intentionally remains epsilon-only until v-pred EQ-VAE
-        behavior can be validated with dedicated models.
         """
         if num_steps <= 0:
             return torch.zeros(1, device=device)
@@ -3812,7 +3734,6 @@ def list_supported_schedulers():
         "AkashicAOS",
         "AkashicAOS Alt",
         "AkashicEQFlow",
-        "AkashicEQFlow v2 (draft, ε-only)",
     ]
 
 
@@ -3873,7 +3794,6 @@ def compute_custom_sigma_schedule(sigmas: torch.Tensor, scheduler_name: str, *, 
         "AkashicAOS": lambda: forge.create_aos_akashic_sigmas(sigma_max, sigma_min, num_steps, device),
         "AkashicAOS Alt": lambda: forge.create_aos_akashic_alt_sigmas(sigma_max, sigma_min, num_steps, device),
         "AkashicEQFlow": lambda: forge.create_akashic_eqflow_sigmas(sigma_max, sigma_min, num_steps, device),
-        "AkashicEQFlow v2 (draft, ε-only)": lambda: forge.create_akashic_eqflow_v2_sigmas(sigma_max, sigma_min, num_steps, device),
     }
 
     if scheduler_name not in mapping:
