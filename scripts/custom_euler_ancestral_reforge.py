@@ -1866,6 +1866,7 @@ class AdeptSamplerForge(scripts.Script):
                             "AkashicAOS",
                             "AkashicAOS Alt",
                             "AkashicEQFlow",
+                            "AkashicEQFlow v2 (draft, ε-only)",
                         ]
 
                         self.scheduler_category = gr.Dropdown(
@@ -2274,6 +2275,7 @@ class AdeptSamplerForge(scripts.Script):
             "AkashicAOS",
             "AkashicAOS Alt",
             "AkashicEQFlow",
+            "AkashicEQFlow v2 (draft, ε-only)",
         ]:
             custom_scheduler_type = scheduler_override
 
@@ -3179,6 +3181,91 @@ class AdeptSamplerForge(scripts.Script):
 
         return torch.cat([sigmas, torch.zeros(1, device=device)])
 
+    def create_akashic_eqflow_v2_sigmas(self, sigma_max, sigma_min, num_steps, device='cpu'):
+        """
+        AkashicEQFlow v2 (draft, epsilon-only): adaptive crossover-focused log-SNR schedule.
+
+        v2 extends EQFlow with:
+        - Adaptive center shift toward detail as step budget grows
+        - Adaptive width (wider at low steps, tighter at high steps)
+        - Asymmetric crossover density (detail-side weighted)
+        - Gentle detail-tail floor to avoid starving late refinement
+
+        This draft intentionally remains in epsilon-prediction only until
+        v-pred EQ-VAE behavior can be validated with dedicated models.
+        """
+        if num_steps <= 0:
+            return torch.zeros(1, device=device)
+
+        # === LOG-SNR ENDPOINTS ===
+        lambda_min = -2.0 * math.log(max(float(sigma_max), 1e-10))  # noisiest
+        lambda_max = -2.0 * math.log(max(float(sigma_min), 1e-10))  # cleanest
+        lambda_range = max(lambda_max - lambda_min, 1e-8)
+
+        # === ADAPTIVE CENTER SHIFT ===
+        # Start near SNR~1 and shift further toward detail as steps increase.
+        # This preserves early structure at low steps while exploiting detail
+        # bandwidth when step budget is larger.
+        step_factor = min(1.0, max(0.0, (num_steps - 14) / 26.0))
+        lambda_center = 0.25 + 0.20 * step_factor
+        u_center = (lambda_center - lambda_min) / lambda_range
+        u_center = float(min(0.88, max(0.12, u_center)))
+
+        # === ADAPTIVE SHAPE ===
+        # Low steps: broader bump to avoid over-concentration.
+        # High steps: tighter bump for stronger crossover targeting.
+        concentration = min(4.2, max(1.4, 1.2 + num_steps / 11.0))
+        base_width = min(0.28, max(0.15, 0.30 - 0.0038 * num_steps))
+
+        # Asymmetry: keep structure-side support broader, increase detail-side
+        # intensity around crossover to better protect the refinement handoff.
+        width_left = base_width * 1.12
+        width_right = base_width * 0.84
+        detail_side_gain = 1.22
+
+        # === CDF INVERSION WITH ASYMMETRIC DENSITY ===
+        N = 1200
+        t = torch.linspace(0, 1, N, device=device)
+        delta = t - u_center
+        left_core = torch.exp(-((delta / width_left) ** 2) / 2.0)
+        right_core = detail_side_gain * torch.exp(-((delta / width_right) ** 2) / 2.0)
+        crossover_core = torch.where(delta <= 0, left_core, right_core)
+
+        # Keep a small detail-tail floor so refinement never gets under-sampled.
+        detail_floor = 0.10 * (t ** 1.5)
+        density = 1.0 + concentration * crossover_core + detail_floor
+
+        # Trapezoidal CDF
+        dt = 1.0 / (N - 1)
+        cdf = torch.zeros(N, device=device)
+        cdf[1:] = torch.cumsum((density[:-1] + density[1:]) * 0.5 * dt, dim=0)
+        cdf = cdf / cdf[-1].clamp(min=1e-12)
+
+        # Invert CDF
+        targets = torch.linspace(0, 1, num_steps, device=device)
+        indices = torch.searchsorted(cdf, targets).clamp(1, N - 1)
+        lo = indices - 1
+        hi = indices
+        frac = (targets - cdf[lo]) / (cdf[hi] - cdf[lo]).clamp(min=1e-12)
+        u_steps = t[lo] + frac * (t[hi] - t[lo])
+
+        # === LOG-SNR -> SIGMA ===
+        lambdas = lambda_min + u_steps * lambda_range
+        sigmas = torch.exp(-lambdas / 2.0)
+
+        # === STABILITY SAFETY ===
+        # Keep ratio bounds a little tighter than v1's 2.0 while still allowing
+        # meaningful non-uniformity from crossover concentration.
+        max_ratio = 1.9 if num_steps >= 18 else 2.05
+        for i in range(1, len(sigmas)):
+            if sigmas[i] >= sigmas[i - 1]:
+                sigmas[i] = sigmas[i - 1] * 0.995
+            ratio = sigmas[i - 1] / sigmas[i].clamp(min=1e-10)
+            if ratio > max_ratio:
+                sigmas[i] = sigmas[i - 1] / max_ratio
+
+        return torch.cat([sigmas, torch.zeros(1, device=device)])
+
     def create_ays_sdxl_sigmas(self, sigma_max, sigma_min, num_steps, device='cpu'):
         """
         AYS (Align Your Steps) optimized sigma schedule for SDXL.
@@ -3694,6 +3781,7 @@ def list_supported_schedulers():
         "AkashicAOS",
         "AkashicAOS Alt",
         "AkashicEQFlow",
+        "AkashicEQFlow v2 (draft, ε-only)",
     ]
 
 
@@ -3754,6 +3842,7 @@ def compute_custom_sigma_schedule(sigmas: torch.Tensor, scheduler_name: str, *, 
         "AkashicAOS": lambda: forge.create_aos_akashic_sigmas(sigma_max, sigma_min, num_steps, device),
         "AkashicAOS Alt": lambda: forge.create_aos_akashic_alt_sigmas(sigma_max, sigma_min, num_steps, device),
         "AkashicEQFlow": lambda: forge.create_akashic_eqflow_sigmas(sigma_max, sigma_min, num_steps, device),
+        "AkashicEQFlow v2 (draft, ε-only)": lambda: forge.create_akashic_eqflow_v2_sigmas(sigma_max, sigma_min, num_steps, device),
     }
 
     if scheduler_name not in mapping:
