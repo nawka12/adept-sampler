@@ -1758,6 +1758,11 @@ class AdeptSamplerForge(scripts.Script):
                                 value=False,
                                 info="Ancestral-specific derivative computation."
                             )
+                            self.adept_ancestral_mirror_correction = gr.Checkbox(
+                                label='Mirror Correction',
+                                value=False,
+                                info="Semantic reflection probe for 2nd-order correction (3 model calls/step in first 60%)."
+                            )
                         
                         with gr.Group(visible=False) as akashic_solver_options:
                             gr.Markdown("🌀 **AkashicSolver v2** - SA-Solver base with AYS schedules")
@@ -1822,6 +1827,12 @@ class AdeptSamplerForge(scripts.Script):
                                     value='Off',
                                     info="Optimized for EQ-VAE's cleaner latents"
                                 )
+
+                            self.akashic_mirror_correction = gr.Checkbox(
+                                label='Mirror Correction',
+                                value=False,
+                                info="Semantic reflection probe for 2nd-order correction (3 model calls/step in first 60%)."
+                            )
 
                             # Additional CFG Fixes Section
                             gr.Markdown("---")
