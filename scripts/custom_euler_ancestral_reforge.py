@@ -539,6 +539,70 @@ def sample_adept_solver(model, x, sigmas, extra_args=None, callback=None, disabl
     return x
 
 
+def sample_mirror_correction_euler(model, x, sigmas, extra_args=None, callback=None, disable=None, generator=None, **kwargs):
+    """
+    Mirror Correction Euler: plain Euler Ancestral with a semantic reflection probe.
+
+    In the first `correction_phase` fraction of steps, uses a 3-call Heun correction:
+      x_probe = 2*D(x) - x  (reflection of x through its own denoised prediction)
+    Unlike KLY's -x probe (where x terms cancel), this probe lies on the denoising
+    trajectory, giving a meaningful curvature estimate for the Heun correction.
+
+    Remaining steps: standard 1-call Euler Ancestral. Ancestral noise at every step.
+
+    Settings read from current_sampler_settings:
+        mirror_correction_euler_eta   (float): Ancestral noise coefficient. Default 1.0.
+        mirror_correction_euler_s_noise (float): Noise scale multiplier. Default 1.0.
+        mirror_correction_euler_phase (float): Fraction of steps that get the 3-call
+            correction (0.0 = no correction, 1.0 = all steps except last). Default 0.5.
+    """
+    extra_args = {} if extra_args is None else extra_args
+    s_in = x.new_ones([x.shape[0]])
+
+    eta = current_sampler_settings.get('mirror_correction_euler_eta', 1.0)
+    s_noise = current_sampler_settings.get('mirror_correction_euler_s_noise', 1.0)
+    correction_phase = current_sampler_settings.get('mirror_correction_euler_phase', 0.5)
+
+    noise_sampler = get_noise_sampler(x)
+    n_steps = len(sigmas) - 1
+
+    for i in range(n_steps):
+        sigma = sigmas[i]
+        sigma_next = sigmas[i + 1]
+        progress = i / max(len(sigmas) - 1, 1)
+
+        denoised = model(x, sigma * s_in, **extra_args)  # call 1 (always)
+        if callback is not None:
+            callback({'x': x, 'i': i, 'sigma': sigma, 'sigma_hat': sigma, 'denoised': denoised})
+
+        d = to_d(x, sigma, denoised)
+
+        # Ancestral step decomposition (standard formula)
+        if sigma_next > 0:
+            sigma_up = min(sigma_next, eta * (sigma_next ** 2 * (sigma ** 2 - sigma_next ** 2) / sigma ** 2) ** 0.5)
+            sigma_down = (sigma_next ** 2 - sigma_up ** 2) ** 0.5
+        else:
+            sigma_up = 0.0
+            sigma_down = 0.0
+        dt = sigma_down - sigma
+
+        # Mirror correction: semantic reflection probe
+        if progress < correction_phase and sigma_next > 0:
+            x_probe = 2 * denoised - x
+            d_probe = to_d(x_probe, sigma, model(x_probe, sigma * s_in, **extra_args))  # call 2
+            x3 = x + ((d + d_probe) / 2) * dt
+            d3 = to_d(x3, sigma, model(x3, sigma * s_in, **extra_args))  # call 3
+            d = (d + d3) / 2
+            if torch.isnan(d).any() or torch.isinf(d).any():
+                d = torch.zeros_like(d)
+
+        x = x + d * dt
+        if sigma_next > 0:
+            x = x + noise_sampler(sigma, sigma_next) * s_noise * sigma_up
+
+    return x
+
+
 def sample_adept_ancestral_solver(model, x, sigmas, extra_args=None, callback=None, disable=None, generator=None, **kwargs):
     """
     Enhanced Adept Ancestral Solver: Advanced ancestral sampling with phase-aware adaptations.
