@@ -643,10 +643,9 @@ def sample_adept_ancestral_solver(model, x, sigmas, extra_args=None, callback=No
     enable_phase_noise = current_sampler_settings.get('adept_ancestral_phase_noise', False)
     phase_strength = current_sampler_settings.get('adept_ancestral_phase_strength', 0.5)
     enable_enhanced_derivative = current_sampler_settings.get('adept_ancestral_enhanced_derivative', False)
-    enable_mirror_correction = current_sampler_settings.get('adept_ancestral_mirror_correction', False)
     
     print(f"🚀 Enhanced Adept Ancestral Solver active (η: {base_eta:.2f}, s_noise: {base_s_noise:.2f})")
-    print(f"   Adaptive Eta: {enable_adaptive_eta}, Phase Noise: {enable_phase_noise}, Phase Strength: {phase_strength:.2f}, Enhanced Derivative: {enable_enhanced_derivative}, Mirror Correction: {enable_mirror_correction}")
+    print(f"   Adaptive Eta: {enable_adaptive_eta}, Phase Noise: {enable_phase_noise}, Phase Strength: {phase_strength:.2f}, Enhanced Derivative: {enable_enhanced_derivative}")
     
     # Get noise sampler for ancestral injection
     noise_sampler = get_noise_sampler(x)
@@ -715,24 +714,6 @@ def sample_adept_ancestral_solver(model, x, sigmas, extra_args=None, callback=No
         dt = sigma_down - sigma
         
 
-        # === MIRROR CORRECTION (Semantic Reflection Probe) ===
-        # Replaces KLY's −x probe with 2·D(x)−x (reflection through denoised prediction).
-        # Applied in first 60% of steps (foundation + structure phases).
-        # Costs 2 extra model calls per corrected step (3 total vs 1 standard).
-        if enable_mirror_correction and progress < 0.60 and sigma_next > 0:
-            x_probe = 2 * denoised - x
-            denoised_probe = model(x_probe, sigma * s_in, **extra_args)
-            if extra_args.get('cond_scale', 1.0) > 7.0:
-                denoised_probe = apply_dynamic_thresholding(denoised_probe, percentile=0.995)
-            d_probe = to_d(x_probe, sigma, denoised_probe)
-            x3 = x + ((d + d_probe) / 2) * dt
-            denoised3 = model(x3, sigma * s_in, **extra_args)
-            if extra_args.get('cond_scale', 1.0) > 7.0:
-                denoised3 = apply_dynamic_thresholding(denoised3, percentile=0.995)
-            d3 = to_d(x3, sigma, denoised3)
-            d = (d + d3) / 2
-            if torch.isnan(d).any() or torch.isinf(d).any():
-                d = torch.zeros_like(d)
         # Compute predictor step (simplified for ancestral compatibility)
         x_pred = x + d * dt
         
@@ -850,7 +831,6 @@ def sample_akashic_solver(model, x, sigmas, extra_args=None, callback=None,
     solver_order = current_sampler_settings.get('akashic_solver_order', 2)
     smea_strength = current_sampler_settings.get('akashic_smea_strength', 0.0)
     ndb_strength = current_sampler_settings.get('akashic_ndb_strength', 0.0)
-    enable_mirror_correction = current_sampler_settings.get('akashic_mirror_correction', False)
     eqvae_mode_setting = current_sampler_settings.get('akashic_eqvae_mode', 'Off')
 
     # EQ-VAE parameter scaling: converts default values to EQ-VAE-optimized equivalents
@@ -887,7 +867,7 @@ def sample_akashic_solver(model, x, sigmas, extra_args=None, callback=None,
     else:
         print(f"🌀 AkashicSolver v2 active")
     print(f"   τ (tau): {base_tau:.2f}, η (eta): {base_eta:.2f}, s_noise: {base_s_noise:.2f}")
-    print(f"   Order: {solver_order}, Adaptive Eta: {enable_adaptive_eta}, Phase Strength: {phase_strength:.2f}, Mirror Correction: {enable_mirror_correction}")
+    print(f"   Order: {solver_order}, Adaptive Eta: {enable_adaptive_eta}, Phase Strength: {phase_strength:.2f}")
     if smea_strength > 0:
         print(f"   SMEA: {smea_strength:.2f} (high-res coherency)")
     if ndb_strength > 0:
@@ -972,28 +952,6 @@ def sample_akashic_solver(model, x, sigmas, extra_args=None, callback=None,
             if torch.isnan(d).any() or torch.isinf(d).any():
                 d = torch.zeros_like(d)
 
-        # === MIRROR CORRECTION (Semantic Reflection Probe) ===
-        # Applied before d_history to ensure corrected d feeds into multi-step history.
-        if enable_mirror_correction and progress < 0.60 and sigma_next > 0:
-            # Compute tau-adjusted dt to match sa_solver_step's deterministic step length.
-            _anc_sq = sigma_next ** 2 * (sigma ** 2 - sigma_next ** 2) / (sigma ** 2 + 1e-8)
-            _sigma_up = tau * (_anc_sq ** 0.5 if _anc_sq > 0 else 0.0)
-            _anc_down_sq = sigma_next ** 2 - _sigma_up ** 2
-            _sigma_down = _anc_down_sq ** 0.5 if _anc_down_sq >= 0 else sigma_next
-            dt_probe = _sigma_down - sigma
-            x_probe = 2 * denoised - x
-            denoised_probe = model(x_probe, sigma * s_in, **extra_args)
-            if cfg_scale > 7.0:
-                denoised_probe = apply_dynamic_thresholding(denoised_probe, percentile=0.995)
-            d_probe = to_d(x_probe, sigma, denoised_probe)
-            x3 = x + ((d + d_probe) / 2) * dt_probe
-            denoised3 = model(x3, sigma * s_in, **extra_args)
-            if cfg_scale > 7.0:
-                denoised3 = apply_dynamic_thresholding(denoised3, percentile=0.995)
-            d3 = to_d(x3, sigma, denoised3)
-            d = (d + d3) / 2
-            if torch.isnan(d).any() or torch.isinf(d).any():
-                d = torch.zeros_like(d)
 
         # Store derivative in history for multi-step
         d_history.append((sigma, d))
