@@ -1767,7 +1767,7 @@ class AdeptSamplerForge(scripts.Script):
                             self.adept_ancestral_mirror_correction = gr.Checkbox(
                                 label='Mirror Correction',
                                 value=False,
-                                info="Heun 2nd-order correction (2 model calls/step in first 30%)."
+                                info="Semantic reflection probe for 2nd-order correction (3 model calls/step in first 60%)."
                             )
                         
                         with gr.Group(visible=False) as akashic_solver_options:
@@ -1837,7 +1837,7 @@ class AdeptSamplerForge(scripts.Script):
                             self.akashic_mirror_correction = gr.Checkbox(
                                 label='Mirror Correction',
                                 value=False,
-                                info="Heun 2nd-order correction (2 model calls/step in first 30%)."
+                                info="Semantic reflection probe for 2nd-order correction (3 model calls/step in first 60%)."
                             )
 
                             # Additional CFG Fixes Section
