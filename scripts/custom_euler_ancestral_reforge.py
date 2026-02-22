@@ -1788,7 +1788,7 @@ class AdeptSamplerForge(scripts.Script):
                         self.solver_type = gr.Dropdown(
                             label='Solver Type',
                             value='None',
-                            choices=['None', 'Adept Solver', 'Adept Ancestral Solver', 'AkashicSolver'],
+                            choices=['None', 'Adept Solver', 'Adept Ancestral Solver', 'AkashicSolver', 'Mirror Correction Euler'],
                             info="None = WebUI's native solver. Adept = multistep predictor-corrector. Adept Ancestral = adds noise injection. AkashicSolver = optimized for EQVAE models."
                         )
                         
@@ -1967,17 +1967,37 @@ class AdeptSamplerForge(scripts.Script):
                                 outputs=[combat_drift_options]
                             )
 
+                        with gr.Group(visible=False) as mirror_correction_euler_options:
+                            gr.Markdown("🪞 **Mirror Correction Euler** — Euler Ancestral + semantic reflection probe")
+                            with gr.Row():
+                                self.mirror_correction_euler_eta = gr.Slider(
+                                    label='Eta',
+                                    minimum=0.0, maximum=2.0, value=1.0, step=0.01,
+                                    info="Ancestral noise coefficient. 0 = deterministic, 1 = full ancestral."
+                                )
+                                self.mirror_correction_euler_s_noise = gr.Slider(
+                                    label='Noise Scale',
+                                    minimum=0.0, maximum=2.0, value=1.0, step=0.01,
+                                    info="Multiplier on the ancestral noise added each step."
+                                )
+                            self.mirror_correction_euler_phase = gr.Slider(
+                                label='Correction Phase',
+                                minimum=0.0, maximum=1.0, value=0.5, step=0.01,
+                                info="Fraction of steps that get the 3-call semantic probe. 0.5 = first half (like KLY), 0.0 = plain Euler Ancestral."
+                            )
+
                         def on_solver_type_change(solver_type):
                             return {
                                 solver_options: gr.update(visible=solver_type == 'Adept Solver'),
                                 ancestral_solver_options: gr.update(visible=solver_type == 'Adept Ancestral Solver'),
-                                akashic_solver_options: gr.update(visible=solver_type == 'AkashicSolver')
+                                akashic_solver_options: gr.update(visible=solver_type == 'AkashicSolver'),
+                                mirror_correction_euler_options: gr.update(visible=solver_type == 'Mirror Correction Euler'),
                             }
                         
                         self.solver_type.change(
                             fn=on_solver_type_change,
                             inputs=[self.solver_type],
-                            outputs=[solver_options, ancestral_solver_options, akashic_solver_options]
+                            outputs=[solver_options, ancestral_solver_options, akashic_solver_options, mirror_correction_euler_options]
                         )
             
                     with gr.TabItem("Scheduler"):
