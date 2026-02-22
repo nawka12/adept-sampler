@@ -7,7 +7,17 @@ import traceback
 
 from modules import scripts
 import gradio as gr
-import k_diff.k_diffusion.sampling
+try:
+    import k_diff.k_diffusion.sampling
+except ModuleNotFoundError:
+    import types
+    import k_diffusion.sampling
+    k_diff = types.ModuleType('k_diff')
+    k_diff.k_diffusion = types.ModuleType('k_diff.k_diffusion')
+    k_diff.k_diffusion.sampling = k_diffusion.sampling
+    sys.modules['k_diff'] = k_diff
+    sys.modules['k_diff.k_diffusion'] = k_diff.k_diffusion
+    sys.modules['k_diff.k_diffusion.sampling'] = k_diffusion.sampling
 from functools import partial
 from typing import Any
 
