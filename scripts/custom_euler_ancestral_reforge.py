@@ -571,9 +571,10 @@ def sample_adept_ancestral_solver(model, x, sigmas, extra_args=None, callback=No
     enable_phase_noise = current_sampler_settings.get('adept_ancestral_phase_noise', False)
     phase_strength = current_sampler_settings.get('adept_ancestral_phase_strength', 0.5)
     enable_enhanced_derivative = current_sampler_settings.get('adept_ancestral_enhanced_derivative', False)
+    enable_mirror_correction = current_sampler_settings.get('adept_ancestral_mirror_correction', False)
     
     print(f"🚀 Enhanced Adept Ancestral Solver active (η: {base_eta:.2f}, s_noise: {base_s_noise:.2f})")
-    print(f"   Adaptive Eta: {enable_adaptive_eta}, Phase Noise: {enable_phase_noise}, Phase Strength: {phase_strength:.2f}, Enhanced Derivative: {enable_enhanced_derivative}")
+    print(f"   Adaptive Eta: {enable_adaptive_eta}, Phase Noise: {enable_phase_noise}, Phase Strength: {phase_strength:.2f}, Enhanced Derivative: {enable_enhanced_derivative}, Mirror Correction: {enable_mirror_correction}")
     
     # Get noise sampler for ancestral injection
     noise_sampler = get_noise_sampler(x)
@@ -641,6 +642,19 @@ def sample_adept_ancestral_solver(model, x, sigmas, extra_args=None, callback=No
         # Use ancestral dt instead of simple dt
         dt = sigma_down - sigma
         
+
+        # === MIRROR CORRECTION (Semantic Reflection Probe) ===
+        # Replaces KLY's −x probe with 2·D(x)−x (reflection through denoised prediction).
+        # Applied in first 60% of steps (foundation + structure phases).
+        # Costs 2 extra model calls per corrected step (3 total vs 1 standard).
+        if enable_mirror_correction and progress < 0.60 and sigma_next > 0:
+            x_probe = 2 * denoised - x
+            denoised_probe = model(x_probe, sigma * s_in, **extra_args)
+            d_probe = to_d(x_probe, sigma, denoised_probe)
+            x3 = x + ((d + d_probe) / 2) * dt
+            denoised3 = model(x3, sigma * s_in, **extra_args)
+            d3 = to_d(x3, sigma, denoised3)
+            d = (d + d3) / 2
         # Compute predictor step (simplified for ancestral compatibility)
         x_pred = x + d * dt
         
