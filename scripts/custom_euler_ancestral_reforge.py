@@ -182,6 +182,11 @@ current_sampler_settings = {
     'akashic_ndb_strength': 0.0,     # Native Detail Boost (0=disabled)
     'akashic_mirror_correction': False,
     'akashic_eqvae_mode': 'Off',     # EQ-VAE optimized mode: 'Off', 'Balanced'
+    # Mirror Correction Euler solver settings
+    'use_mirror_correction_euler': False,
+    'mirror_correction_euler_eta': 1.0,
+    'mirror_correction_euler_s_noise': 1.0,
+    'mirror_correction_euler_phase': 0.5,
     'vae_reflection': False,         # VAE reflection padding for EQ-VAE edge artifact fix
     # Additional CFG fixes (post-hoc techniques)
     'akashic_spectral_mod': False,   # Enable spectral modulation for frequency correction
@@ -318,6 +323,11 @@ def patch_samplers_globally():
                 use_akashic_solver = current_sampler_settings.get('use_akashic_solver', False)
                 if use_akashic_solver:
                     return sample_akashic_solver(active_model, x, final_sigmas, extra_args, callback, disable, generator, **kwargs)
+
+                # Priority 5: Mirror Correction Euler (clean semantic reflection solver)
+                use_mirror_correction_euler = current_sampler_settings.get('use_mirror_correction_euler', False)
+                if use_mirror_correction_euler:
+                    return sample_mirror_correction_euler(active_model, x, final_sigmas, extra_args, callback, disable, generator, **kwargs)
 
                 # Default: Call the original sampler with the (possibly) overridden schedule and enhanced model
                 return original_samplers[name](active_model, x, final_sigmas, extra_args, callback, disable, **kwargs)
@@ -2386,6 +2396,7 @@ class AdeptSamplerForge(scripts.Script):
         use_adept_solver = (solver_type == 'Adept Solver')
         use_adept_ancestral_solver = (solver_type == 'Adept Ancestral Solver')
         use_akashic_solver = (solver_type == 'AkashicSolver')
+        use_mirror_correction_euler = (solver_type == 'Mirror Correction Euler')
         
         # Set scheduler flags based on the radio button choice
         use_anime_schedule_v = (scheduler_override == "AOS-V (for v-prediction)")
