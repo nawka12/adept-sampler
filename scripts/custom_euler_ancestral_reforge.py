@@ -643,11 +643,17 @@ def sample_adept_ancestral_solver(model, x, sigmas, extra_args=None, callback=No
         dt = sigma_down - sigma
         
 
-        # === MIRROR CORRECTION (Standard Heun) ===
-        # Evaluates the model at the Euler endpoint for a 2nd-order Heun correction.
-        # Applied in first 30% of steps (foundation phase). 1 extra model call per corrected step.
-        if enable_mirror_correction and progress < 0.30 and sigma_next > 0:
-            x3 = x + d * dt
+        # === MIRROR CORRECTION (Semantic Reflection Probe) ===
+        # Replaces KLY's −x probe with 2·D(x)−x (reflection through denoised prediction).
+        # Applied in first 60% of steps (foundation + structure phases).
+        # Costs 2 extra model calls per corrected step (3 total vs 1 standard).
+        if enable_mirror_correction and progress < 0.60 and sigma_next > 0:
+            x_probe = 2 * denoised - x
+            denoised_probe = model(x_probe, sigma * s_in, **extra_args)
+            if extra_args.get('cond_scale', 1.0) > 7.0:
+                denoised_probe = apply_dynamic_thresholding(denoised_probe, percentile=0.995)
+            d_probe = to_d(x_probe, sigma, denoised_probe)
+            x3 = x + ((d + d_probe) / 2) * dt
             denoised3 = model(x3, sigma * s_in, **extra_args)
             if extra_args.get('cond_scale', 1.0) > 7.0:
                 denoised3 = apply_dynamic_thresholding(denoised3, percentile=0.995)
