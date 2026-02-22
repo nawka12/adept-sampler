@@ -650,11 +650,17 @@ def sample_adept_ancestral_solver(model, x, sigmas, extra_args=None, callback=No
         if enable_mirror_correction and progress < 0.60 and sigma_next > 0:
             x_probe = 2 * denoised - x
             denoised_probe = model(x_probe, sigma * s_in, **extra_args)
+            if extra_args.get('cond_scale', 1.0) > 7.0:
+                denoised_probe = apply_dynamic_thresholding(denoised_probe, percentile=0.995)
             d_probe = to_d(x_probe, sigma, denoised_probe)
             x3 = x + ((d + d_probe) / 2) * dt
             denoised3 = model(x3, sigma * s_in, **extra_args)
+            if extra_args.get('cond_scale', 1.0) > 7.0:
+                denoised3 = apply_dynamic_thresholding(denoised3, percentile=0.995)
             d3 = to_d(x3, sigma, denoised3)
             d = (d + d3) / 2
+            if torch.isnan(d).any() or torch.isinf(d).any():
+                d = torch.zeros_like(d)
         # Compute predictor step (simplified for ancestral compatibility)
         x_pred = x + d * dt
         
@@ -897,14 +903,25 @@ def sample_akashic_solver(model, x, sigmas, extra_args=None, callback=None,
         # === MIRROR CORRECTION (Semantic Reflection Probe) ===
         # Applied before d_history to ensure corrected d feeds into multi-step history.
         if enable_mirror_correction and progress < 0.60 and sigma_next > 0:
-            dt_probe = sigma_next - sigma
+            # Compute tau-adjusted dt to match sa_solver_step's deterministic step length.
+            _anc_sq = sigma_next ** 2 * (sigma ** 2 - sigma_next ** 2) / (sigma ** 2 + 1e-8)
+            _sigma_up = tau * (_anc_sq ** 0.5 if _anc_sq > 0 else 0.0)
+            _anc_down_sq = sigma_next ** 2 - _sigma_up ** 2
+            _sigma_down = _anc_down_sq ** 0.5 if _anc_down_sq >= 0 else sigma_next
+            dt_probe = _sigma_down - sigma
             x_probe = 2 * denoised - x
             denoised_probe = model(x_probe, sigma * s_in, **extra_args)
+            if cfg_scale > 7.0:
+                denoised_probe = apply_dynamic_thresholding(denoised_probe, percentile=0.995)
             d_probe = to_d(x_probe, sigma, denoised_probe)
             x3 = x + ((d + d_probe) / 2) * dt_probe
             denoised3 = model(x3, sigma * s_in, **extra_args)
+            if cfg_scale > 7.0:
+                denoised3 = apply_dynamic_thresholding(denoised3, percentile=0.995)
             d3 = to_d(x3, sigma, denoised3)
             d = (d + d3) / 2
+            if torch.isnan(d).any() or torch.isinf(d).any():
+                d = torch.zeros_like(d)
 
         # Store derivative in history for multi-step
         d_history.append((sigma, d))
