@@ -2088,6 +2088,7 @@ class AdeptSamplerForge(scripts.Script):
             (self.adept_ancestral_phase_noise, lambda p: str(p.get('adept_ancestral_phase_noise', 'false')).lower() == 'true' if 'adept_ancestral_phase_noise' in p else gr.update()),
             (self.adept_ancestral_phase_strength, lambda p: gr.update() if p.get('adept_ancestral_phase_strength') in (None, 'N/A') else float(p['adept_ancestral_phase_strength'])),
             (self.adept_ancestral_enhanced_derivative, lambda p: str(p.get('adept_ancestral_enhanced_derivative', 'false')).lower() == 'true' if 'adept_ancestral_enhanced_derivative' in p else gr.update()),
+            (self.adept_ancestral_mirror_correction, lambda p: str(p.get('adept_ancestral_mirror_correction', 'false')).lower() == 'true' if 'adept_ancestral_mirror_correction' in p else gr.update()),
             # Stochastic scheduler settings
             (self.stochastic_noise_type, lambda p: p.get('stochastic_noise_type', 'brownian') if 'stochastic_noise_type' in p else gr.update()),
             (self.stochastic_noise_scale, lambda p: gr.update() if p.get('stochastic_noise_scale') in (None, 'N/A') else float(p['stochastic_noise_scale'])),
@@ -2102,6 +2103,7 @@ class AdeptSamplerForge(scripts.Script):
             (self.akashic_phase_strength, lambda p: gr.update() if p.get('akashic_phase_strength') in (None, 'N/A') else float(p['akashic_phase_strength'])),
             (self.akashic_smea_strength, lambda p: gr.update() if p.get('akashic_smea_strength') in (None, 'N/A') else float(p['akashic_smea_strength'])),
             (self.akashic_ndb_strength, lambda p: gr.update() if p.get('akashic_ndb_strength') in (None, 'N/A') else float(p['akashic_ndb_strength'])),
+            (self.akashic_mirror_correction, lambda p: str(p.get('akashic_mirror_correction', 'false')).lower() == 'true' if 'akashic_mirror_correction' in p else gr.update()),
             (self.akashic_eqvae_mode, lambda p: p.get('akashic_eqvae_mode', 'Off') if 'akashic_eqvae_mode' in p else gr.update()),
             # Additional CFG Fixes settings
             (self.akashic_spectral_mod, lambda p: str(p.get('akashic_spectral_mod', 'false')).lower() == 'true' if 'akashic_spectral_mod' in p else gr.update()),
@@ -2147,9 +2149,10 @@ class AdeptSamplerForge(scripts.Script):
             self.solver_type, self.adept_solver_order, self.adept_solver_use_corrector,
             self.adept_ancestral_eta, self.adept_ancestral_s_noise,
             self.adept_ancestral_adaptive_eta, self.adept_ancestral_phase_noise, self.adept_ancestral_phase_strength, self.adept_ancestral_enhanced_derivative,
+            self.adept_ancestral_mirror_correction,
             self.akashic_tau, self.akashic_solver_order, self.akashic_base_eta, self.akashic_s_noise,
             self.akashic_adaptive_eta, self.akashic_use_ays, self.akashic_phase_strength, self.akashic_smea_strength,
-            self.akashic_ndb_strength,
+            self.akashic_ndb_strength, self.akashic_mirror_correction,
             self.akashic_eqvae_mode,
             # Additional CFG Fixes settings
             self.akashic_spectral_mod,
@@ -2175,9 +2178,10 @@ class AdeptSamplerForge(scripts.Script):
             solver_type, adept_solver_order, adept_solver_use_corrector,
             adept_ancestral_eta, adept_ancestral_s_noise,
             adept_ancestral_adaptive_eta, adept_ancestral_phase_noise, adept_ancestral_phase_strength, adept_ancestral_enhanced_derivative,
+            adept_ancestral_mirror_correction,
             akashic_tau, akashic_solver_order, akashic_base_eta, akashic_s_noise,
             akashic_adaptive_eta, akashic_use_ays, akashic_phase_strength, akashic_smea_strength,
-            akashic_ndb_strength, akashic_eqvae_mode,
+            akashic_ndb_strength, akashic_mirror_correction, akashic_eqvae_mode,
             # Additional CFG Fixes settings
             akashic_spectral_mod, akashic_spectral_percentile,
             akashic_combat_cfg_drift, akashic_combat_drift_intensity,
@@ -2254,6 +2258,8 @@ class AdeptSamplerForge(scripts.Script):
                     adept_ancestral_phase_strength = 0.5
             if "adept_ancestral_enhanced_derivative" in xyz:
                 adept_ancestral_enhanced_derivative = str(xyz["adept_ancestral_enhanced_derivative"]) == "True"
+            if "adept_ancestral_mirror_correction" in xyz:
+                adept_ancestral_mirror_correction = str(xyz["adept_ancestral_mirror_correction"]) == "True"
             # AkashicSolver XYZ overrides
             if "akashic_tau" in xyz:
                 try: akashic_tau = float(xyz["akashic_tau"])
@@ -2280,6 +2286,8 @@ class AdeptSamplerForge(scripts.Script):
             if "akashic_ndb_strength" in xyz:
                 try: akashic_ndb_strength = float(xyz["akashic_ndb_strength"])
                 except Exception: pass
+            if "akashic_mirror_correction" in xyz:
+                akashic_mirror_correction = str(xyz["akashic_mirror_correction"]) == "True"
             if "akashic_eqvae_mode" in xyz:
                 akashic_eqvae_mode = str(xyz["akashic_eqvae_mode"])
             # Additional CFG Fixes XYZ overrides
@@ -2394,6 +2402,7 @@ class AdeptSamplerForge(scripts.Script):
             'adept_ancestral_phase_noise': adept_ancestral_phase_noise,
             'adept_ancestral_phase_strength': adept_ancestral_phase_strength,
             'adept_ancestral_enhanced_derivative': adept_ancestral_enhanced_derivative,
+            'adept_ancestral_mirror_correction': adept_ancestral_mirror_correction,
             # AkashicSolver v2 settings
             'use_akashic_solver': use_akashic_solver and enable_custom,
             'use_akashic_aos': use_akashic_aos,
@@ -2406,6 +2415,7 @@ class AdeptSamplerForge(scripts.Script):
             'akashic_phase_strength': akashic_phase_strength,
             'akashic_smea_strength': akashic_smea_strength,
             'akashic_ndb_strength': akashic_ndb_strength,
+            'akashic_mirror_correction': akashic_mirror_correction,
             'akashic_eqvae_mode': akashic_eqvae_mode,
             # CFG Enhancement settings
             'akashic_spectral_mod': akashic_spectral_mod,
@@ -2479,6 +2489,7 @@ class AdeptSamplerForge(scripts.Script):
                 'adept_ancestral_phase_noise': adept_ancestral_phase_noise if use_adept_ancestral_solver else False,
                 'adept_ancestral_phase_strength': adept_ancestral_phase_strength if use_adept_ancestral_solver else 0.5,
                 'adept_ancestral_enhanced_derivative': adept_ancestral_enhanced_derivative if use_adept_ancestral_solver else False,
+                'adept_ancestral_mirror_correction': adept_ancestral_mirror_correction if use_adept_ancestral_solver else False,
                 # Stochastic scheduler settings
                 'stochastic_noise_type': stochastic_noise_type if custom_scheduler_type == 'Stochastic' else 'N/A',
                 'stochastic_noise_scale': stochastic_noise_scale if custom_scheduler_type == 'Stochastic' else 'N/A',
@@ -2493,6 +2504,7 @@ class AdeptSamplerForge(scripts.Script):
                 'akashic_phase_strength': akashic_phase_strength if use_akashic_solver else 'N/A',
                 'akashic_smea_strength': akashic_smea_strength if use_akashic_solver else 'N/A',
                 'akashic_ndb_strength': akashic_ndb_strength if use_akashic_solver else 'N/A',
+                'akashic_mirror_correction': akashic_mirror_correction if use_akashic_solver else False,
                 'akashic_eqvae_mode': akashic_eqvae_mode if use_akashic_solver else 'N/A',
                 # Additional CFG Fixes parameters
                 'akashic_spectral_mod': akashic_spectral_mod if use_akashic_solver else False,
@@ -3901,7 +3913,9 @@ def set_value(p, x: Any, xs: Any, *, field: str):
                      "use_enhanced_detail_phase", "disable_for_hr", "exp_cfg_to_zero",
                      "adept_solver_use_corrector", "adept_ancestral_adaptive_eta",
                      "adept_ancestral_phase_noise", "adept_ancestral_enhanced_derivative",
-                     "akashic_adaptive_eta", "akashic_use_ays", "vae_reflection"):
+                     "adept_ancestral_mirror_correction",
+                     "akashic_adaptive_eta", "akashic_use_ays", "akashic_mirror_correction",
+                     "vae_reflection"):
             # Boolean fields
             x = str(x).strip().lower() == "true"
         elif field == "akashic_eqvae_mode":
@@ -4098,6 +4112,18 @@ def make_axis_on_xyz_grid():
             "(Adept) Akashic Native Detail Boost",
             float,
             partial(set_value, field="akashic_ndb_strength"),
+        ),
+        xyz_grid.AxisOption(
+            "(Adept) Ancestral Mirror Correction",
+            str,
+            partial(set_value, field="adept_ancestral_mirror_correction"),
+            choices=lambda: ["True", "False"],
+        ),
+        xyz_grid.AxisOption(
+            "(Adept) Akashic Mirror Correction",
+            str,
+            partial(set_value, field="akashic_mirror_correction"),
+            choices=lambda: ["True", "False"],
         ),
         xyz_grid.AxisOption(
             "(Adept) Akashic EQ-VAE Mode",
