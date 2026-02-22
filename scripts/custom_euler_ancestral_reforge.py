@@ -772,6 +772,7 @@ def sample_akashic_solver(model, x, sigmas, extra_args=None, callback=None,
     solver_order = current_sampler_settings.get('akashic_solver_order', 2)
     smea_strength = current_sampler_settings.get('akashic_smea_strength', 0.0)
     ndb_strength = current_sampler_settings.get('akashic_ndb_strength', 0.0)
+    enable_mirror_correction = current_sampler_settings.get('akashic_mirror_correction', False)
     eqvae_mode_setting = current_sampler_settings.get('akashic_eqvae_mode', 'Off')
 
     # EQ-VAE parameter scaling: converts default values to EQ-VAE-optimized equivalents
@@ -808,7 +809,7 @@ def sample_akashic_solver(model, x, sigmas, extra_args=None, callback=None,
     else:
         print(f"🌀 AkashicSolver v2 active")
     print(f"   τ (tau): {base_tau:.2f}, η (eta): {base_eta:.2f}, s_noise: {base_s_noise:.2f}")
-    print(f"   Order: {solver_order}, Adaptive Eta: {enable_adaptive_eta}, Phase Strength: {phase_strength:.2f}")
+    print(f"   Order: {solver_order}, Adaptive Eta: {enable_adaptive_eta}, Phase Strength: {phase_strength:.2f}, Mirror Correction: {enable_mirror_correction}")
     if smea_strength > 0:
         print(f"   SMEA: {smea_strength:.2f} (high-res coherency)")
     if ndb_strength > 0:
@@ -892,7 +893,19 @@ def sample_akashic_solver(model, x, sigmas, extra_args=None, callback=None,
             d = torch.clamp(d, -sigma_adaptive_threshold, sigma_adaptive_threshold)
             if torch.isnan(d).any() or torch.isinf(d).any():
                 d = torch.zeros_like(d)
-        
+
+        # === MIRROR CORRECTION (Semantic Reflection Probe) ===
+        # Applied before d_history to ensure corrected d feeds into multi-step history.
+        if enable_mirror_correction and progress < 0.60 and sigma_next > 0:
+            dt_probe = sigma_next - sigma
+            x_probe = 2 * denoised - x
+            denoised_probe = model(x_probe, sigma * s_in, **extra_args)
+            d_probe = to_d(x_probe, sigma, denoised_probe)
+            x3 = x + ((d + d_probe) / 2) * dt_probe
+            denoised3 = model(x3, sigma * s_in, **extra_args)
+            d3 = to_d(x3, sigma, denoised3)
+            d = (d + d3) / 2
+
         # Store derivative in history for multi-step
         d_history.append((sigma, d))
         if len(d_history) > solver_order:
