@@ -168,6 +168,7 @@ current_sampler_settings = {
     'adept_ancestral_phase_noise': False,
     'adept_ancestral_phase_strength': 0.5,
     'adept_ancestral_enhanced_derivative': False,
+    'adept_ancestral_mirror_correction': False,
     # AkashicSolver v2 settings - SA-Solver base with AYS schedules
     'use_akashic_solver': False,
     'akashic_base_eta': 1.0,
@@ -179,6 +180,7 @@ current_sampler_settings = {
     'akashic_use_ays': False,        # Use AYS sigma schedules
     'akashic_smea_strength': 0.0,    # SMEA high-res coherency (0=disabled)
     'akashic_ndb_strength': 0.0,     # Native Detail Boost (0=disabled)
+    'akashic_mirror_correction': False,
     'akashic_eqvae_mode': 'Off',     # EQ-VAE optimized mode: 'Off', 'Balanced'
     'vae_reflection': False,         # VAE reflection padding for EQ-VAE edge artifact fix
     # Additional CFG fixes (post-hoc techniques)
