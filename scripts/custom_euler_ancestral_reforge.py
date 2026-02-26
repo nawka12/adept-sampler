@@ -2161,9 +2161,9 @@ class AdeptSamplerForge(scripts.Script):
             (self.akashic_phase_strength, lambda p: gr.update() if p.get('akashic_phase_strength') in (None, 'N/A') else float(p['akashic_phase_strength'])),
             (self.akashic_smea_strength, lambda p: gr.update() if p.get('akashic_smea_strength') in (None, 'N/A') else float(p['akashic_smea_strength'])),
             (self.akashic_ndb_strength, lambda p: gr.update() if p.get('akashic_ndb_strength') in (None, 'N/A') else float(p['akashic_ndb_strength'])),
-            (self.mirror_correction_euler_eta, lambda p: float(p['mirror_correction_euler_eta']) if 'mirror_correction_euler_eta' in p else gr.update()),
-            (self.mirror_correction_euler_s_noise, lambda p: float(p['mirror_correction_euler_s_noise']) if 'mirror_correction_euler_s_noise' in p else gr.update()),
-            (self.mirror_correction_euler_phase, lambda p: float(p['mirror_correction_euler_phase']) if 'mirror_correction_euler_phase' in p else gr.update()),
+            (self.mirror_correction_euler_eta, lambda p: gr.update() if p.get('mirror_correction_euler_eta') in (None, 'N/A') else float(p['mirror_correction_euler_eta'])),
+            (self.mirror_correction_euler_s_noise, lambda p: gr.update() if p.get('mirror_correction_euler_s_noise') in (None, 'N/A') else float(p['mirror_correction_euler_s_noise'])),
+            (self.mirror_correction_euler_phase, lambda p: gr.update() if p.get('mirror_correction_euler_phase') in (None, 'N/A') else float(p['mirror_correction_euler_phase'])),
             (self.akashic_eqvae_mode, lambda p: p.get('akashic_eqvae_mode', 'Off') if 'akashic_eqvae_mode' in p else gr.update()),
             # Additional CFG Fixes settings
             (self.akashic_spectral_mod, lambda p: str(p.get('akashic_spectral_mod', 'false')).lower() == 'true' if 'akashic_spectral_mod' in p else gr.update()),
