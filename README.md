@@ -28,7 +28,7 @@ This extension is developed and tested on **Stable Diffusion WebUI reForge**. Co
 | **Adept Solver** | A hybrid **Predictor-Corrector** pipeline. It utilizes a multi-step Adams-Bashforth integrator (derived from **DEIS**) for prediction and a **UniPC**-style corrector step. It integrates **DC-Solver**'s compensation logic to align predictor-corrector steps and uses **DPM-Solver++** dynamic thresholding for high-CFG stability. |
 | **Adept Ancestral Solver** | Enhanced ancestral sampling with adaptive step sizing, phase-aware noise injection, enhanced derivative computation, and dynamic eta scheduling. |
 | **AkashicSolver** | An optimized implementation of the **Stochastic Adams Solver (SA-Solver)** tailored for SDXL/EQ-VAE. It augments the standard SA-Solver with **SMEA** (Sinusoidal Multipass) interpolation for high-res coherence, phase-aware stochasticity control (Tau) to interpolate between ODE and SDE behaviors, and an **EQ-VAE Mode** with optimized noise scaling for EQ-VAE's cleaner latent space. |
-| **Mirror Correction Euler** | Euler Ancestral with a semantic reflection probe. In the first `Correction Phase` fraction of steps, uses a 3-call Heun correction: `x_probe = 2·D(x) − x` (reflection of x through its own denoised prediction). Unlike a naive `-x` probe, this probe lies on the denoising trajectory, giving a meaningful curvature estimate. Remaining steps are standard single-call Euler Ancestral. |
+| **Mirror Correction Euler** | Euler Ancestral with a semantic reflection probe. In the first `Correction Phase` fraction of steps, uses a 3-call Heun correction: `x_probe = 2·D(x) − x` (reflection of x through its own denoised prediction). Unlike a naive `-x` probe, this probe lies on the denoising trajectory, giving a meaningful curvature estimate. Remaining steps are standard single-call Euler Ancestral. Optional **Smooth Phase Decay** mode replaces the binary step cutoff with a continuous log-sigma weight modulated by gradient agreement for smoother transitions. |
 
 ### Schedulers
 
@@ -178,6 +178,29 @@ Correction Phase: 0.5  (first half of steps; increase for more correction, 0 = p
 | **High Diversity** | 1.1 | 1.05 | On | On | On |
 | **Stable** | 0.9 | 0.95 | On | On | On |
 
+## 🔍 Mirror Correction Euler Settings Reference
+
+| Setting | Range | Default | Description |
+|---------|-------|---------|-------------|
+| **Eta (η)** | 0.0–2.0 | 1.0 | Ancestral noise coefficient. 0 = deterministic ODE, 1 = full ancestral |
+| **Noise Scale** | 0.0–2.0 | 1.0 | Multiplier on the ancestral noise added each step |
+| **Correction Phase** | 0.0–1.0 | 0.5 | Fraction of steps that receive the 3-call semantic probe. 0.5 = first half (default), 0.0 = plain Euler Ancestral |
+| **Smooth Phase Decay** | On/Off | Off | Replaces binary cutoff with a continuous log-sigma weight (sqrt curve) scaled by gradient stability. Best for EQ-VAE smooth latents — produces a more natural phase transition visible in correction_phase XYZ sweeps |
+
+### Smooth Phase Decay details
+
+When enabled, correction strength is computed as:
+
+```
+correction_weight = sqrt(t)       # t ∈ [0,1] in log-sigma space, 1 = sigma_max
+effective_weight  = correction_weight × gradient_agreement
+d = d + effective_weight × (d_heun − d)   # soft blend instead of hard replace
+```
+
+- `gradient_agreement` = `max(0, 1 − ‖d − d_probe‖ / mean_norm)` — high when curvatures agree (smooth manifold)
+- Calls 2 and 3 are skipped automatically when `effective_weight < 0.001`, saving NFE at the tail of the phase
+- `smooth_phase=False` (default) preserves exact original binary behavior with zero algorithmic change
+
 ## 🔍 AkashicSolver Settings Reference
 
 | Setting | Range | Default | Description |
@@ -195,14 +218,6 @@ Correction Phase: 0.5  (first half of steps; increase for more correction, 0 = p
 | **Spectral Percentile** | 1.0–15.0 | 5.0 | Frequency threshold (lower = gentler boost) |
 | **Combat CFG Drift** | On/Off | Off | Recenters latent mean to remove cumulative CFG drift |
 | **Drift Correction Intensity** | 0.1–1.0 | 0.5 | How much drift to remove (lower = subtler) |
-
-## 🔍 Mirror Correction Euler Settings Reference
-
-| Setting | Range | Default | Description |
-|---------|-------|---------|-------------|
-| **Eta (η)** | 0.0–2.0 | 1.0 | Ancestral noise coefficient. 0 = deterministic, 1 = full ancestral |
-| **Noise Scale** | 0.0–2.0 | 1.0 | Multiplier on the ancestral noise added each step |
-| **Correction Phase** | 0.0–1.0 | 0.5 | Fraction of steps that use the 3-call semantic probe. 0.5 = first half (composition phase). 0.0 = plain Euler Ancestral |
 
 ## 📊 Samples
 

@@ -185,6 +185,7 @@ current_sampler_settings = {
     'mirror_correction_euler_eta': 1.0,
     'mirror_correction_euler_s_noise': 1.0,
     'mirror_correction_euler_phase': 0.5,
+    'mirror_correction_euler_smooth_phase': False,
     'vae_reflection': False,         # VAE reflection padding for EQ-VAE edge artifact fix
     # Additional CFG fixes (post-hoc techniques)
     'akashic_spectral_mod': False,   # Enable spectral modulation for frequency correction
@@ -570,9 +571,19 @@ def sample_mirror_correction_euler(model, x, sigmas, extra_args=None, callback=N
     eta = current_sampler_settings.get('mirror_correction_euler_eta', 1.0)
     s_noise = current_sampler_settings.get('mirror_correction_euler_s_noise', 1.0)
     correction_phase = current_sampler_settings.get('mirror_correction_euler_phase', 0.5)
+    smooth_phase = current_sampler_settings.get('mirror_correction_euler_smooth_phase', False)
 
     noise_sampler = get_noise_sampler(x)
     n_steps = len(sigmas) - 1
+
+    # Pre-compute log-sigma bounds for smooth phase mode
+    if smooth_phase and n_steps > 0:
+        sigma_max = sigmas[0].clamp(min=1e-6)
+        phase_idx = min(int(correction_phase * n_steps), n_steps - 1)
+        sigma_phase = sigmas[phase_idx].clamp(min=1e-6)
+        log_sigma_max = torch.log(sigma_max).item()
+        log_sigma_phase = torch.log(sigma_phase).item()
+        smooth_denom = max(log_sigma_max - log_sigma_phase, 1e-6)
 
     for i in range(n_steps):
         sigma = sigmas[i]
@@ -594,15 +605,38 @@ def sample_mirror_correction_euler(model, x, sigmas, extra_args=None, callback=N
             sigma_down = 0.0
         dt = sigma_down - sigma
 
-        # Mirror correction: semantic reflection probe
-        if progress < correction_phase and sigma_next > 0:
-            x_probe = 2 * denoised - x
-            d_probe = to_d(x_probe, sigma, model(x_probe, sigma * s_in, **extra_args))  # call 2
-            x3 = x + ((d + d_probe) / 2) * dt
-            d3 = to_d(x3, sigma, model(x3, sigma * s_in, **extra_args))  # call 3
-            d = (d + d3) / 2
-            if torch.isnan(d).any() or torch.isinf(d).any():
-                d = torch.zeros_like(d)
+        if smooth_phase:
+            # Smooth mode: log-sigma weight + gradient stability + soft blend
+            log_sig = torch.log(sigma.clamp(min=1e-6)).item()
+            t = max(0.0, min(1.0, (log_sig - log_sigma_phase) / smooth_denom))
+            correction_weight = t ** 0.5  # sqrt curve: steep early, shallow near phase_end
+
+            if correction_weight > 1e-3 and sigma_next > 0:
+                x_probe = 2 * denoised - x
+                d_probe = to_d(x_probe, sigma, model(x_probe, sigma * s_in, **extra_args))  # call 2
+
+                d_diff_norm = (d - d_probe).norm()
+                d_scale = (d.norm() + d_probe.norm()) / 2 + 1e-6
+                gradient_agreement = max(0.0, 1.0 - (d_diff_norm / d_scale).item())
+
+                effective_weight = correction_weight * gradient_agreement
+
+                if effective_weight > 1e-3:
+                    x3 = x + ((d + d_probe) / 2) * dt
+                    d3 = to_d(x3, sigma, model(x3, sigma * s_in, **extra_args))  # call 3
+                    d_heun = (d + d3) / 2
+                    if not (torch.isnan(d_heun).any() or torch.isinf(d_heun).any()):
+                        d = d + effective_weight * (d_heun - d)  # soft blend
+        else:
+            # Binary mode: exact original behavior
+            if progress < correction_phase and sigma_next > 0:
+                x_probe = 2 * denoised - x
+                d_probe = to_d(x_probe, sigma, model(x_probe, sigma * s_in, **extra_args))  # call 2
+                x3 = x + ((d + d_probe) / 2) * dt
+                d3 = to_d(x3, sigma, model(x3, sigma * s_in, **extra_args))  # call 3
+                d = (d + d3) / 2
+                if torch.isnan(d).any() or torch.isinf(d).any():
+                    d = torch.zeros_like(d)
 
         x = x + d * dt
         if sigma_next > 0:
@@ -1933,6 +1967,13 @@ class AdeptSamplerForge(scripts.Script):
                                 minimum=0.0, maximum=1.0, value=0.5, step=0.01,
                                 info="Fraction of steps that get the 3-call semantic probe. 0.5 = first half (like KLY), 0.0 = plain Euler Ancestral."
                             )
+                            with gr.Row():
+                                self.mirror_correction_euler_smooth_phase = gr.Checkbox(
+                                    label='Smooth Phase Decay',
+                                    value=False,
+                                    info="Use log-sigma decay instead of binary cutoff. Blends correction "
+                                         "strength with gradient stability — best for EQ-VAE smooth latents."
+                                )
 
                         def on_solver_type_change(solver_type):
                             return {
@@ -2164,6 +2205,7 @@ class AdeptSamplerForge(scripts.Script):
             (self.mirror_correction_euler_eta, lambda p: gr.update() if p.get('mirror_correction_euler_eta') in (None, 'N/A') else float(p['mirror_correction_euler_eta'])),
             (self.mirror_correction_euler_s_noise, lambda p: gr.update() if p.get('mirror_correction_euler_s_noise') in (None, 'N/A') else float(p['mirror_correction_euler_s_noise'])),
             (self.mirror_correction_euler_phase, lambda p: gr.update() if p.get('mirror_correction_euler_phase') in (None, 'N/A') else float(p['mirror_correction_euler_phase'])),
+            (self.mirror_correction_euler_smooth_phase, lambda p: str(p.get('mirror_correction_euler_smooth_phase', 'false')).lower() == 'true' if 'mirror_correction_euler_smooth_phase' in p else gr.update()),
             (self.akashic_eqvae_mode, lambda p: p.get('akashic_eqvae_mode', 'Off') if 'akashic_eqvae_mode' in p else gr.update()),
             # Additional CFG Fixes settings
             (self.akashic_spectral_mod, lambda p: str(p.get('akashic_spectral_mod', 'false')).lower() == 'true' if 'akashic_spectral_mod' in p else gr.update()),
@@ -2210,6 +2252,7 @@ class AdeptSamplerForge(scripts.Script):
             self.adept_ancestral_eta, self.adept_ancestral_s_noise,
             self.adept_ancestral_adaptive_eta, self.adept_ancestral_phase_noise, self.adept_ancestral_phase_strength, self.adept_ancestral_enhanced_derivative,
             self.mirror_correction_euler_eta, self.mirror_correction_euler_s_noise, self.mirror_correction_euler_phase,
+            self.mirror_correction_euler_smooth_phase,
             self.akashic_tau, self.akashic_solver_order, self.akashic_base_eta, self.akashic_s_noise,
             self.akashic_adaptive_eta, self.akashic_use_ays, self.akashic_phase_strength, self.akashic_smea_strength,
             self.akashic_ndb_strength,
@@ -2239,6 +2282,7 @@ class AdeptSamplerForge(scripts.Script):
             adept_ancestral_eta, adept_ancestral_s_noise,
             adept_ancestral_adaptive_eta, adept_ancestral_phase_noise, adept_ancestral_phase_strength, adept_ancestral_enhanced_derivative,
             mirror_correction_euler_eta, mirror_correction_euler_s_noise, mirror_correction_euler_phase,
+            mirror_correction_euler_smooth_phase,
             akashic_tau, akashic_solver_order, akashic_base_eta, akashic_s_noise,
             akashic_adaptive_eta, akashic_use_ays, akashic_phase_strength, akashic_smea_strength,
             akashic_ndb_strength, akashic_eqvae_mode,
@@ -2350,6 +2394,8 @@ class AdeptSamplerForge(scripts.Script):
                 mirror_correction_euler_s_noise = float(xyz["mirror_correction_euler_s_noise"])
             if "mirror_correction_euler_phase" in xyz:
                 mirror_correction_euler_phase = float(xyz["mirror_correction_euler_phase"])
+            if "mirror_correction_euler_smooth_phase" in xyz:
+                mirror_correction_euler_smooth_phase = str(xyz["mirror_correction_euler_smooth_phase"]) == "True"
             if "akashic_eqvae_mode" in xyz:
                 akashic_eqvae_mode = str(xyz["akashic_eqvae_mode"])
             # Additional CFG Fixes XYZ overrides
@@ -2470,6 +2516,7 @@ class AdeptSamplerForge(scripts.Script):
             'mirror_correction_euler_eta': mirror_correction_euler_eta,
             'mirror_correction_euler_s_noise': mirror_correction_euler_s_noise,
             'mirror_correction_euler_phase': mirror_correction_euler_phase,
+            'mirror_correction_euler_smooth_phase': mirror_correction_euler_smooth_phase,
             # AkashicSolver v2 settings
             'use_akashic_solver': use_akashic_solver and enable_custom,
             'use_akashic_aos': use_akashic_aos,
@@ -2572,6 +2619,7 @@ class AdeptSamplerForge(scripts.Script):
                 'mirror_correction_euler_eta': mirror_correction_euler_eta if use_mirror_correction_euler else 'N/A',
                 'mirror_correction_euler_s_noise': mirror_correction_euler_s_noise if use_mirror_correction_euler else 'N/A',
                 'mirror_correction_euler_phase': mirror_correction_euler_phase if use_mirror_correction_euler else 'N/A',
+                'mirror_correction_euler_smooth_phase': mirror_correction_euler_smooth_phase if use_mirror_correction_euler else 'N/A',
                 'akashic_eqvae_mode': akashic_eqvae_mode if use_akashic_solver else 'N/A',
                 # Additional CFG Fixes parameters
                 'akashic_spectral_mod': akashic_spectral_mod if use_akashic_solver else False,
@@ -3981,6 +4029,7 @@ def set_value(p, x: Any, xs: Any, *, field: str):
                      "adept_solver_use_corrector", "adept_ancestral_adaptive_eta",
                      "adept_ancestral_phase_noise", "adept_ancestral_enhanced_derivative",
                      "akashic_adaptive_eta", "akashic_use_ays",
+                     "mirror_correction_euler_smooth_phase",
                      "vae_reflection"):
             # Boolean fields
             x = str(x).strip().lower() == "true"
@@ -4190,6 +4239,17 @@ def make_axis_on_xyz_grid():
             "(Adept) Mirror Correction Euler Eta",
             float,
             partial(set_value, field="mirror_correction_euler_eta"),
+        ),
+        xyz_grid.AxisOption(
+            "(Adept) Mirror Correction Euler Smooth Phase",
+            str,
+            partial(set_value, field="mirror_correction_euler_smooth_phase"),
+            choices=lambda: ["True", "False"],
+        ),
+        xyz_grid.AxisOption(
+            "(Adept) Mirror Correction Euler Noise Scale",
+            float,
+            partial(set_value, field="mirror_correction_euler_s_noise"),
         ),
         xyz_grid.AxisOption(
             "(Adept) Akashic EQ-VAE Mode",
