@@ -572,6 +572,7 @@ def sample_mirror_correction_euler(model, x, sigmas, extra_args=None, callback=N
     s_noise = current_sampler_settings.get('mirror_correction_euler_s_noise', 1.0)
     correction_phase = current_sampler_settings.get('mirror_correction_euler_phase', 0.5)
     smooth_phase = current_sampler_settings.get('mirror_correction_euler_smooth_phase', False)
+    _probe_norm_limit = 5.0  # guard against out-of-distribution probe derivatives
 
     noise_sampler = get_noise_sampler(x)
     n_steps = len(sigmas) - 1
@@ -620,12 +621,18 @@ def sample_mirror_correction_euler(model, x, sigmas, extra_args=None, callback=N
                 if not (torch.isnan(d_heun).any() or torch.isinf(d_heun).any()):
                     d = d + correction_weight * (d_heun - d)  # soft blend
         else:
-            # Binary mode: exact original behavior
+            # Binary mode
             if progress < correction_phase and sigma_next > 0:
                 x_probe = 2 * denoised - x
                 d_probe = to_d(x_probe, sigma, model(x_probe, sigma * s_in, **extra_args))  # call 2
+                # guard: scale down probe derivative if it's wildly larger than d
+                d_norm = d.norm()
+                if d_norm > 0 and d_probe.norm() > _probe_norm_limit * d_norm:
+                    d_probe = d_probe * (d_norm / d_probe.norm())
                 x3 = x + ((d + d_probe) / 2) * dt
                 d3 = to_d(x3, sigma, model(x3, sigma * s_in, **extra_args))  # call 3
+                if d_norm > 0 and d3.norm() > _probe_norm_limit * d_norm:
+                    d3 = d3 * (d_norm / d3.norm())
                 d = (d + d3) / 2
                 if torch.isnan(d).any() or torch.isinf(d).any():
                     d = torch.zeros_like(d)
