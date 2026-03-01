@@ -614,15 +614,11 @@ def sample_mirror_correction_euler(model, x, sigmas, extra_args=None, callback=N
             if correction_weight > 1e-3 and sigma_next > 0:
                 x_probe = 2 * denoised - x
                 d_probe = to_d(x_probe, sigma, model(x_probe, sigma * s_in, **extra_args))  # call 2
-
-                effective_weight = correction_weight
-
-                if effective_weight > 1e-3:
-                    x3 = x + ((d + d_probe) / 2) * dt
-                    d3 = to_d(x3, sigma, model(x3, sigma * s_in, **extra_args))  # call 3
-                    d_heun = (d + d3) / 2
-                    if not (torch.isnan(d_heun).any() or torch.isinf(d_heun).any()):
-                        d = d + effective_weight * (d_heun - d)  # soft blend
+                x3 = x + ((d + d_probe) / 2) * dt
+                d3 = to_d(x3, sigma, model(x3, sigma * s_in, **extra_args))  # call 3
+                d_heun = (d + d3) / 2
+                if not (torch.isnan(d_heun).any() or torch.isinf(d_heun).any()):
+                    d = d + correction_weight * (d_heun - d)  # soft blend
         else:
             # Binary mode: exact original behavior
             if progress < correction_phase and sigma_next > 0:
