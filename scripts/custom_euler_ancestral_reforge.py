@@ -615,8 +615,15 @@ def sample_mirror_correction_euler(model, x, sigmas, extra_args=None, callback=N
             if correction_weight > 1e-3 and sigma_next > 0:
                 x_probe = 2 * denoised - x
                 d_probe = to_d(x_probe, sigma, model(x_probe, sigma * s_in, **extra_args))  # call 2
+                d_norm = d.norm()
+                d_probe_norm = d_probe.norm()
+                if d_norm > 0 and d_probe_norm > _probe_norm_limit * d_norm:
+                    d_probe = d_probe * (_probe_norm_limit * d_norm / d_probe_norm)
                 x3 = x + ((d + d_probe) / 2) * dt
                 d3 = to_d(x3, sigma, model(x3, sigma * s_in, **extra_args))  # call 3
+                d3_norm = d3.norm()
+                if d_norm > 0 and d3_norm > _probe_norm_limit * d_norm:
+                    d3 = d3 * (_probe_norm_limit * d_norm / d3_norm)
                 d_heun = (d + d3) / 2
                 if not (torch.isnan(d_heun).any() or torch.isinf(d_heun).any()):
                     d = d + correction_weight * (d_heun - d)  # soft blend
@@ -627,12 +634,14 @@ def sample_mirror_correction_euler(model, x, sigmas, extra_args=None, callback=N
                 d_probe = to_d(x_probe, sigma, model(x_probe, sigma * s_in, **extra_args))  # call 2
                 # guard: scale down probe derivative if it's wildly larger than d
                 d_norm = d.norm()
-                if d_norm > 0 and d_probe.norm() > _probe_norm_limit * d_norm:
-                    d_probe = d_probe * (d_norm / d_probe.norm())
+                d_probe_norm = d_probe.norm()
+                if d_norm > 0 and d_probe_norm > _probe_norm_limit * d_norm:
+                    d_probe = d_probe * (_probe_norm_limit * d_norm / d_probe_norm)
                 x3 = x + ((d + d_probe) / 2) * dt
                 d3 = to_d(x3, sigma, model(x3, sigma * s_in, **extra_args))  # call 3
-                if d_norm > 0 and d3.norm() > _probe_norm_limit * d_norm:
-                    d3 = d3 * (d_norm / d3.norm())
+                d3_norm = d3.norm()
+                if d_norm > 0 and d3_norm > _probe_norm_limit * d_norm:
+                    d3 = d3 * (_probe_norm_limit * d_norm / d3_norm)
                 d = (d + d3) / 2
                 if torch.isnan(d).any() or torch.isinf(d).any():
                     d = torch.zeros_like(d)
