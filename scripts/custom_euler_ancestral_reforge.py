@@ -606,7 +606,7 @@ def sample_mirror_correction_euler(model, x, sigmas, extra_args=None, callback=N
         dt = sigma_down - sigma
 
         if smooth_phase:
-            # Smooth mode: log-sigma weight + gradient stability + soft blend
+            # Smooth mode: log-sigma weight + soft blend
             log_sig = torch.log(sigma.clamp(min=1e-6)).item()
             t = max(0.0, min(1.0, (log_sig - log_sigma_phase) / smooth_denom))
             correction_weight = t ** 0.5  # sqrt curve: steep early, shallow near phase_end
@@ -615,11 +615,7 @@ def sample_mirror_correction_euler(model, x, sigmas, extra_args=None, callback=N
                 x_probe = 2 * denoised - x
                 d_probe = to_d(x_probe, sigma, model(x_probe, sigma * s_in, **extra_args))  # call 2
 
-                d_diff_norm = (d - d_probe).norm()
-                d_scale = (d.norm() + d_probe.norm()) / 2 + 1e-6
-                gradient_agreement = max(0.0, 1.0 - (d_diff_norm / d_scale).item())
-
-                effective_weight = correction_weight * gradient_agreement
+                effective_weight = correction_weight
 
                 if effective_weight > 1e-3:
                     x3 = x + ((d + d_probe) / 2) * dt
