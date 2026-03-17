@@ -192,14 +192,6 @@ current_sampler_settings = {
     'akashic_spectral_percentile': 5.0,  # Spectral modulation percentile threshold
     'akashic_combat_cfg_drift': False,  # Combat CFG mean drift
     'akashic_combat_drift_intensity': 0.5,  # Combat drift intensity (0-1)
-    # Enhanced Guidance settings (APG + Guidance Interval)
-    'akashic_apg_enabled': False,
-    'akashic_apg_eta': 1.0,
-    'akashic_apg_norm_threshold': 5.0,
-    'akashic_apg_momentum': 0.0,
-    'akashic_guidance_interval_enabled': False,
-    'akashic_guidance_start': 0.1,
-    'akashic_guidance_end': 0.9,
 }
 
 
@@ -1345,123 +1337,6 @@ def create_spectral_modulation_cfg_hook(multiplier=1.0, percentile=5.0):
     return spectral_cfg_hook
 
 
-def create_enhanced_guidance_pre_cfg_hook(
-    total_steps,
-    apg_enabled=True,
-    apg_eta=1.0,
-    apg_norm_threshold=5.0,
-    apg_momentum=0.0,
-    guidance_interval_enabled=False,
-    guidance_start=0.1,
-    guidance_end=0.9,
-):
-    """
-    Pre-CFG hook implementing Adaptive Projected Guidance (APG) with momentum
-    and Guidance Interval Limiting for AkashicSolver.
-
-    Registered via set_model_sampler_pre_cfg_function (list-based, non-destructive).
-    Operates on args["conds_out"] before CFG multiplication.
-
-    References:
-      - APG: arXiv 2410.02416
-      - Guidance Interval: arXiv 2404.07724 (Karras et al., NeurIPS 2024)
-      - Canonical APG impl: ldm_patched/contrib/nodes_apg.py
-    """
-    # Mutable list cells — the only way to mutate closed-over state in Python 3
-    step_counter = [0]      # incremented each call after progress is computed
-    running_avg = [0]       # guidance accumulator for momentum (scalar 0 = uninitialised)
-    prev_sigma = [None]     # last seen sigma, used to detect inpainting restarts
-
-    # Validate guidance interval parameters
-    _interval_active = guidance_interval_enabled and (guidance_start < guidance_end)
-    if guidance_interval_enabled and not _interval_active:
-        print(f"⚠️ Enhanced Guidance: guidance_start ({guidance_start}) >= guidance_end ({guidance_end}), interval limiting disabled.")
-
-    def project(v0, v1):
-        """Project v0 onto v1, return (parallel, orthogonal) components."""
-        v1_norm = torch.nn.functional.normalize(v1, dim=[-1, -2, -3])
-        v0_parallel = (v0 * v1_norm).sum(dim=[-1, -2, -3], keepdim=True) * v1_norm
-        v0_orthogonal = v0 - v0_parallel
-        return v0_parallel, v0_orthogonal
-
-    def pre_cfg_hook(args):
-        # 1. Guard: single-condition path (CFG disabled — uncond not evaluated)
-        if len(args["conds_out"]) < 2 or args["conds_out"][1] is None:
-            return args["conds_out"]
-
-        # 2. Extract values
-        cond       = args["conds_out"][0]
-        uncond     = args["conds_out"][1]
-        sigma      = args["sigma"][0]
-        cond_scale = args["cond_scale"]
-
-        # 3. Inpainting restart detection: sigma increasing means a new pass started
-        if prev_sigma[0] is not None and sigma > prev_sigma[0]:
-            step_counter[0] = 0
-            running_avg[0] = 0
-
-        # 4. Compute progress then increment counter
-        #    Range: [0, (N-1)/N] — never reaches 1.0, safe for 1-step edge case
-        progress = step_counter[0] / max(total_steps, 1)
-        step_counter[0] += 1
-
-        # 5. Save sigma for next call
-        prev_sigma[0] = sigma
-
-        # 6. Guidance interval check — true skip (zero-delta guidance)
-        if _interval_active:
-            if progress < guidance_start or progress > guidance_end:
-                # Replace cond with uncond so framework computes:
-                # uncond + scale*(uncond-uncond) = uncond  (no guidance)
-                return [uncond] + args["conds_out"][1:]
-
-        # 7. APG body
-        if not apg_enabled:
-            return args["conds_out"]
-
-        guidance = cond - uncond
-
-        # Momentum: running accumulator (canonical form from nodes_apg.py)
-        # norm_threshold is applied to the accumulated vector (intentional —
-        # constrains the smoothed direction, not per-step guidance)
-        if apg_momentum != 0:
-            if not torch.is_tensor(running_avg[0]):
-                running_avg[0] = guidance
-            else:
-                running_avg[0] = apg_momentum * running_avg[0] + guidance
-            guidance = running_avg[0]
-
-        # Norm threshold: soft clamp to prevent runaway guidance magnitude
-        if apg_norm_threshold > 0:
-            guidance_norm = guidance.norm(p=2, dim=[-1, -2, -3], keepdim=True)
-            scale = torch.minimum(
-                torch.ones_like(guidance_norm),
-                apg_norm_threshold / guidance_norm
-            )
-            guidance = guidance * scale
-
-        # Project guidance onto cond (not uncond — this is the correct APG reference)
-        guidance_parallel, guidance_orthogonal = project(guidance, cond)
-
-        # Reconstruct: orthogonal fully preserved, parallel scaled by eta
-        # eta=1.0 → standard CFG behaviour; eta=0.0 → pure orthogonal (full APG)
-        modified_guidance = guidance_orthogonal + apg_eta * guidance_parallel
-
-        # Output formulation (canonical from nodes_apg.py line 62).
-        # Pre-scales modified_guidance so that after the framework multiplies by
-        # cond_scale the net result is: cond + cond_scale * modified_guidance.
-        # Do NOT simplify — removing the division breaks output magnitude.
-        if cond_scale != 0:
-            modified_cond = (uncond + modified_guidance) + (cond - uncond) / cond_scale
-        else:
-            modified_cond = uncond + modified_guidance
-
-        # 8. Return — preserve any extra conds_out entries beyond index 1
-        return [modified_cond, uncond] + args["conds_out"][2:]
-
-    return pre_cfg_hook
-
-
 def apply_combat_cfg_drift(latent, method='mean', intensity=1.0):
     """
     Combat CFG Drift: Reduce mean drift from high CFG values.
@@ -2082,64 +1957,6 @@ class AdeptSamplerForge(scripts.Script):
                                 outputs=[combat_drift_options]
                             )
 
-                            # Enhanced Guidance Section
-                            gr.Markdown("---")
-                            gr.Markdown("**Enhanced Guidance** (APG + Guidance Interval)")
-                            with gr.Row():
-                                self.akashic_apg_enabled = gr.Checkbox(
-                                    label='APG',
-                                    value=False,
-                                    info="Adaptive Projected Guidance: reduces oversaturation"
-                                )
-                                self.akashic_guidance_interval_enabled = gr.Checkbox(
-                                    label='Guidance Interval',
-                                    value=False,
-                                    info="Restrict CFG to a progress window (skip harmful early/late steps)"
-                                )
-
-                            with gr.Group(visible=False) as apg_options:
-                                with gr.Row():
-                                    self.akashic_apg_eta = gr.Slider(
-                                        label='APG Eta',
-                                        minimum=-1.0, maximum=2.0, value=1.0, step=0.05,
-                                        info="Parallel guidance scale. 1.0=standard CFG, 0.0=full APG"
-                                    )
-                                    self.akashic_apg_norm_threshold = gr.Slider(
-                                        label='Norm Threshold',
-                                        minimum=0.0, maximum=50.0, value=5.0, step=0.5,
-                                        info="Clamp guidance vector magnitude (0=disabled)"
-                                    )
-                                self.akashic_apg_momentum = gr.Slider(
-                                    label='APG Momentum',
-                                    minimum=-5.0, maximum=1.0, value=0.0, step=0.05,
-                                    info="Guidance accumulator coefficient (0=disabled)"
-                                )
-
-                            with gr.Group(visible=False) as guidance_interval_options:
-                                with gr.Row():
-                                    self.akashic_guidance_start = gr.Slider(
-                                        label='Guidance Start',
-                                        minimum=0.0, maximum=1.0, value=0.1, step=0.05,
-                                        info="Skip guidance before this progress fraction"
-                                    )
-                                    self.akashic_guidance_end = gr.Slider(
-                                        label='Guidance End',
-                                        minimum=0.0, maximum=1.0, value=0.9, step=0.05,
-                                        info="Skip guidance after this progress fraction"
-                                    )
-
-                            # Visibility handlers for Enhanced Guidance
-                            self.akashic_apg_enabled.change(
-                                fn=lambda x: gr.update(visible=x),
-                                inputs=[self.akashic_apg_enabled],
-                                outputs=[apg_options]
-                            )
-                            self.akashic_guidance_interval_enabled.change(
-                                fn=lambda x: gr.update(visible=x),
-                                inputs=[self.akashic_guidance_interval_enabled],
-                                outputs=[guidance_interval_options]
-                            )
-
                         with gr.Group(visible=False) as mirror_correction_euler_options:
                             gr.Markdown("🪞 **Mirror Correction Euler** — Euler Ancestral + semantic reflection probe")
                             with gr.Row():
@@ -2404,14 +2221,6 @@ class AdeptSamplerForge(scripts.Script):
             (self.akashic_combat_cfg_drift, lambda p: str(p.get('akashic_combat_cfg_drift', 'false')).lower() == 'true' if 'akashic_combat_cfg_drift' in p else gr.update()),
             (self.akashic_combat_drift_intensity, lambda p: gr.update() if p.get('akashic_combat_drift_intensity') in (None, 'N/A') else float(p['akashic_combat_drift_intensity'])),
             (self.vae_reflection, lambda p: str(p.get('vae_reflection', 'false')).lower() == 'true' if 'vae_reflection' in p else gr.update()),
-            # Enhanced Guidance infotext
-            (self.akashic_apg_enabled, lambda p: str(p.get('akashic_apg_enabled', 'false')).lower() == 'true' if 'akashic_apg_enabled' in p else gr.update()),
-            (self.akashic_apg_eta, lambda p: gr.update() if p.get('akashic_apg_eta') in (None, 'N/A') else float(p['akashic_apg_eta'])),
-            (self.akashic_apg_norm_threshold, lambda p: gr.update() if p.get('akashic_apg_norm_threshold') in (None, 'N/A') else float(p['akashic_apg_norm_threshold'])),
-            (self.akashic_apg_momentum, lambda p: gr.update() if p.get('akashic_apg_momentum') in (None, 'N/A') else float(p['akashic_apg_momentum'])),
-            (self.akashic_guidance_interval_enabled, lambda p: str(p.get('akashic_guidance_interval_enabled', 'false')).lower() == 'true' if 'akashic_guidance_interval_enabled' in p else gr.update()),
-            (self.akashic_guidance_start, lambda p: gr.update() if p.get('akashic_guidance_start') in (None, 'N/A') else float(p['akashic_guidance_start'])),
-            (self.akashic_guidance_end, lambda p: gr.update() if p.get('akashic_guidance_end') in (None, 'N/A') else float(p['akashic_guidance_end'])),
         ]
 
         def scheduler_getter(params):
@@ -2462,14 +2271,6 @@ class AdeptSamplerForge(scripts.Script):
             self.akashic_combat_cfg_drift,
             self.akashic_combat_drift_intensity,
             self.vae_reflection,
-            # Enhanced Guidance
-            self.akashic_apg_enabled,
-            self.akashic_apg_eta,
-            self.akashic_apg_norm_threshold,
-            self.akashic_apg_momentum,
-            self.akashic_guidance_interval_enabled,
-            self.akashic_guidance_start,
-            self.akashic_guidance_end,
         ]
 
     def process_before_every_sampling(self, p, *script_args, **kwargs):
@@ -2497,9 +2298,6 @@ class AdeptSamplerForge(scripts.Script):
             akashic_spectral_mod, akashic_spectral_percentile,
             akashic_combat_cfg_drift, akashic_combat_drift_intensity,
             vae_reflection,
-            # Enhanced Guidance
-            akashic_apg_enabled, akashic_apg_eta, akashic_apg_norm_threshold, akashic_apg_momentum,
-            akashic_guidance_interval_enabled, akashic_guidance_start, akashic_guidance_end,
         ) = script_args
 
         # --- XYZ Grid overrides (if provided) ---
@@ -2746,14 +2544,6 @@ class AdeptSamplerForge(scripts.Script):
             'akashic_combat_cfg_drift': akashic_combat_cfg_drift,
             'akashic_combat_drift_intensity': akashic_combat_drift_intensity,
             'vae_reflection': vae_reflection,
-            # Enhanced Guidance
-            'akashic_apg_enabled': akashic_apg_enabled,
-            'akashic_apg_eta': akashic_apg_eta,
-            'akashic_apg_norm_threshold': akashic_apg_norm_threshold,
-            'akashic_apg_momentum': akashic_apg_momentum,
-            'akashic_guidance_interval_enabled': akashic_guidance_interval_enabled,
-            'akashic_guidance_start': akashic_guidance_start,
-            'akashic_guidance_end': akashic_guidance_end,
         })
 
         # --- VAE Reflection Handling ---
@@ -2781,35 +2571,6 @@ class AdeptSamplerForge(scripts.Script):
                     print(f"🌈 Spectral Modulation CFG hook active (percentile={akashic_spectral_percentile})")
             except Exception as e:
                 print(f"⚠️ Failed to apply Spectral Modulation CFG hook: {e}")
-
-        # --- Enhanced Guidance Pre-CFG Hook (APG + Guidance Interval) ---
-        if REFORGE_AVAILABLE and use_akashic_solver and (akashic_apg_enabled or akashic_guidance_interval_enabled):
-            try:
-                if hasattr(p, 'sd_model') and hasattr(p.sd_model, 'forge_objects'):
-                    unet = p.sd_model.forge_objects.unet.clone()
-                    enhanced_hook = create_enhanced_guidance_pre_cfg_hook(
-                        total_steps=max(p.steps, 1),
-                        apg_enabled=akashic_apg_enabled,
-                        apg_eta=akashic_apg_eta,
-                        apg_norm_threshold=akashic_apg_norm_threshold,
-                        apg_momentum=akashic_apg_momentum,
-                        guidance_interval_enabled=akashic_guidance_interval_enabled,
-                        guidance_start=akashic_guidance_start,
-                        guidance_end=akashic_guidance_end,
-                    )
-                    unet.set_model_sampler_pre_cfg_function(
-                        enhanced_hook,
-                        disable_cfg1_optimization=True,
-                    )
-                    p.sd_model.forge_objects.unet = unet
-                    parts = []
-                    if akashic_apg_enabled:
-                        parts.append(f"APG(η={akashic_apg_eta}, mom={akashic_apg_momentum})")
-                    if akashic_guidance_interval_enabled:
-                        parts.append(f"Interval[{akashic_guidance_start:.2f}–{akashic_guidance_end:.2f}]")
-                    print(f"✨ Enhanced Guidance active: {', '.join(parts)}")
-            except Exception as e:
-                print(f"⚠️ Failed to apply Enhanced Guidance hook: {e}")
 
         if enable_custom:
             if disable_reason:
@@ -2873,14 +2634,6 @@ class AdeptSamplerForge(scripts.Script):
                 'akashic_combat_cfg_drift': akashic_combat_cfg_drift if use_akashic_solver else False,
                 'akashic_combat_drift_intensity': akashic_combat_drift_intensity if use_akashic_solver and akashic_combat_cfg_drift else 'N/A',
                 'vae_reflection': vae_reflection,
-                # Enhanced Guidance
-                'akashic_apg_enabled': akashic_apg_enabled if use_akashic_solver else False,
-                'akashic_apg_eta': akashic_apg_eta if use_akashic_solver and akashic_apg_enabled else 'N/A',
-                'akashic_apg_norm_threshold': akashic_apg_norm_threshold if use_akashic_solver and akashic_apg_enabled else 'N/A',
-                'akashic_apg_momentum': akashic_apg_momentum if use_akashic_solver and akashic_apg_enabled else 'N/A',
-                'akashic_guidance_interval_enabled': akashic_guidance_interval_enabled if use_akashic_solver else False,
-                'akashic_guidance_start': akashic_guidance_start if use_akashic_solver and akashic_guidance_interval_enabled else 'N/A',
-                'akashic_guidance_end': akashic_guidance_end if use_akashic_solver and akashic_guidance_interval_enabled else 'N/A',
             })
         else:
             print("🔄 Using standard sampler")
