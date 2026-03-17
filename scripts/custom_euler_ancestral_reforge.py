@@ -2401,6 +2401,14 @@ class AdeptSamplerForge(scripts.Script):
             (self.akashic_combat_cfg_drift, lambda p: str(p.get('akashic_combat_cfg_drift', 'false')).lower() == 'true' if 'akashic_combat_cfg_drift' in p else gr.update()),
             (self.akashic_combat_drift_intensity, lambda p: gr.update() if p.get('akashic_combat_drift_intensity') in (None, 'N/A') else float(p['akashic_combat_drift_intensity'])),
             (self.vae_reflection, lambda p: str(p.get('vae_reflection', 'false')).lower() == 'true' if 'vae_reflection' in p else gr.update()),
+            # Enhanced Guidance infotext
+            (self.akashic_apg_enabled, lambda p: str(p.get('akashic_apg_enabled', 'false')).lower() == 'true' if 'akashic_apg_enabled' in p else gr.update()),
+            (self.akashic_apg_eta, lambda p: gr.update() if p.get('akashic_apg_eta') in (None, 'N/A') else float(p['akashic_apg_eta'])),
+            (self.akashic_apg_norm_threshold, lambda p: gr.update() if p.get('akashic_apg_norm_threshold') in (None, 'N/A') else float(p['akashic_apg_norm_threshold'])),
+            (self.akashic_apg_momentum, lambda p: gr.update() if p.get('akashic_apg_momentum') in (None, 'N/A') else float(p['akashic_apg_momentum'])),
+            (self.akashic_guidance_interval_enabled, lambda p: str(p.get('akashic_guidance_interval_enabled', 'false')).lower() == 'true' if 'akashic_guidance_interval_enabled' in p else gr.update()),
+            (self.akashic_guidance_start, lambda p: gr.update() if p.get('akashic_guidance_start') in (None, 'N/A') else float(p['akashic_guidance_start'])),
+            (self.akashic_guidance_end, lambda p: gr.update() if p.get('akashic_guidance_end') in (None, 'N/A') else float(p['akashic_guidance_end'])),
         ]
 
         def scheduler_getter(params):
@@ -2451,6 +2459,14 @@ class AdeptSamplerForge(scripts.Script):
             self.akashic_combat_cfg_drift,
             self.akashic_combat_drift_intensity,
             self.vae_reflection,
+            # Enhanced Guidance
+            self.akashic_apg_enabled,
+            self.akashic_apg_eta,
+            self.akashic_apg_norm_threshold,
+            self.akashic_apg_momentum,
+            self.akashic_guidance_interval_enabled,
+            self.akashic_guidance_start,
+            self.akashic_guidance_end,
         ]
 
     def process_before_every_sampling(self, p, *script_args, **kwargs):
@@ -2478,6 +2494,9 @@ class AdeptSamplerForge(scripts.Script):
             akashic_spectral_mod, akashic_spectral_percentile,
             akashic_combat_cfg_drift, akashic_combat_drift_intensity,
             vae_reflection,
+            # Enhanced Guidance
+            akashic_apg_enabled, akashic_apg_eta, akashic_apg_norm_threshold, akashic_apg_momentum,
+            akashic_guidance_interval_enabled, akashic_guidance_start, akashic_guidance_end,
         ) = script_args
 
         # --- XYZ Grid overrides (if provided) ---
@@ -2724,6 +2743,14 @@ class AdeptSamplerForge(scripts.Script):
             'akashic_combat_cfg_drift': akashic_combat_cfg_drift,
             'akashic_combat_drift_intensity': akashic_combat_drift_intensity,
             'vae_reflection': vae_reflection,
+            # Enhanced Guidance
+            'akashic_apg_enabled': akashic_apg_enabled,
+            'akashic_apg_eta': akashic_apg_eta,
+            'akashic_apg_norm_threshold': akashic_apg_norm_threshold,
+            'akashic_apg_momentum': akashic_apg_momentum,
+            'akashic_guidance_interval_enabled': akashic_guidance_interval_enabled,
+            'akashic_guidance_start': akashic_guidance_start,
+            'akashic_guidance_end': akashic_guidance_end,
         })
 
         # --- VAE Reflection Handling ---
@@ -2751,6 +2778,35 @@ class AdeptSamplerForge(scripts.Script):
                     print(f"🌈 Spectral Modulation CFG hook active (percentile={akashic_spectral_percentile})")
             except Exception as e:
                 print(f"⚠️ Failed to apply Spectral Modulation CFG hook: {e}")
+
+        # --- Enhanced Guidance Pre-CFG Hook (APG + Guidance Interval) ---
+        if REFORGE_AVAILABLE and (akashic_apg_enabled or akashic_guidance_interval_enabled):
+            try:
+                if hasattr(p, 'sd_model') and hasattr(p.sd_model, 'forge_objects'):
+                    unet = p.sd_model.forge_objects.unet.clone()
+                    enhanced_hook = create_enhanced_guidance_pre_cfg_hook(
+                        total_steps=max(p.steps, 1),
+                        apg_enabled=akashic_apg_enabled,
+                        apg_eta=akashic_apg_eta,
+                        apg_norm_threshold=akashic_apg_norm_threshold,
+                        apg_momentum=akashic_apg_momentum,
+                        guidance_interval_enabled=akashic_guidance_interval_enabled,
+                        guidance_start=akashic_guidance_start,
+                        guidance_end=akashic_guidance_end,
+                    )
+                    unet.set_model_sampler_pre_cfg_function(
+                        enhanced_hook,
+                        disable_cfg1_optimization=True,
+                    )
+                    p.sd_model.forge_objects.unet = unet
+                    parts = []
+                    if akashic_apg_enabled:
+                        parts.append(f"APG(η={akashic_apg_eta}, mom={akashic_apg_momentum})")
+                    if akashic_guidance_interval_enabled:
+                        parts.append(f"Interval[{akashic_guidance_start:.2f}–{akashic_guidance_end:.2f}]")
+                    print(f"✨ Enhanced Guidance active: {', '.join(parts)}")
+            except Exception as e:
+                print(f"⚠️ Failed to apply Enhanced Guidance hook: {e}")
 
         if enable_custom:
             if disable_reason:
@@ -2814,6 +2870,14 @@ class AdeptSamplerForge(scripts.Script):
                 'akashic_combat_cfg_drift': akashic_combat_cfg_drift if use_akashic_solver else False,
                 'akashic_combat_drift_intensity': akashic_combat_drift_intensity if use_akashic_solver and akashic_combat_cfg_drift else 'N/A',
                 'vae_reflection': vae_reflection,
+                # Enhanced Guidance
+                'akashic_apg_enabled': akashic_apg_enabled if use_akashic_solver else False,
+                'akashic_apg_eta': akashic_apg_eta if use_akashic_solver and akashic_apg_enabled else 'N/A',
+                'akashic_apg_norm_threshold': akashic_apg_norm_threshold if use_akashic_solver and akashic_apg_enabled else 'N/A',
+                'akashic_apg_momentum': akashic_apg_momentum if use_akashic_solver and akashic_apg_enabled else 'N/A',
+                'akashic_guidance_interval_enabled': akashic_guidance_interval_enabled if use_akashic_solver else False,
+                'akashic_guidance_start': akashic_guidance_start if use_akashic_solver and akashic_guidance_interval_enabled else 'N/A',
+                'akashic_guidance_end': akashic_guidance_end if use_akashic_solver and akashic_guidance_interval_enabled else 'N/A',
             })
         else:
             print("🔄 Using standard sampler")
