@@ -1449,7 +1449,7 @@ def create_enhanced_guidance_pre_cfg_hook(
 
         # Output formulation (canonical from nodes_apg.py line 62).
         # Pre-scales modified_guidance so that after the framework multiplies by
-        # cond_scale the net result is: uncond + cond_scale * modified_guidance.
+        # cond_scale the net result is: cond + cond_scale * modified_guidance.
         # Do NOT simplify — removing the division breaks output magnitude.
         modified_cond = (uncond + modified_guidance) + (cond - uncond) / cond_scale
 
