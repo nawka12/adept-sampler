@@ -2079,6 +2079,64 @@ class AdeptSamplerForge(scripts.Script):
                                 outputs=[combat_drift_options]
                             )
 
+                            # Enhanced Guidance Section
+                            gr.Markdown("---")
+                            gr.Markdown("**Enhanced Guidance** (APG + Guidance Interval)")
+                            with gr.Row():
+                                self.akashic_apg_enabled = gr.Checkbox(
+                                    label='APG',
+                                    value=False,
+                                    info="Adaptive Projected Guidance: reduces oversaturation"
+                                )
+                                self.akashic_guidance_interval_enabled = gr.Checkbox(
+                                    label='Guidance Interval',
+                                    value=False,
+                                    info="Restrict CFG to a progress window (skip harmful early/late steps)"
+                                )
+
+                            with gr.Group(visible=False) as apg_options:
+                                with gr.Row():
+                                    self.akashic_apg_eta = gr.Slider(
+                                        label='APG Eta',
+                                        minimum=-1.0, maximum=2.0, value=1.0, step=0.05,
+                                        info="Parallel guidance scale. 1.0=standard CFG, 0.0=full APG"
+                                    )
+                                    self.akashic_apg_norm_threshold = gr.Slider(
+                                        label='Norm Threshold',
+                                        minimum=0.0, maximum=50.0, value=5.0, step=0.5,
+                                        info="Clamp guidance vector magnitude (0=disabled)"
+                                    )
+                                self.akashic_apg_momentum = gr.Slider(
+                                    label='APG Momentum',
+                                    minimum=-5.0, maximum=1.0, value=0.0, step=0.05,
+                                    info="Guidance accumulator coefficient (0=disabled)"
+                                )
+
+                            with gr.Group(visible=False) as guidance_interval_options:
+                                with gr.Row():
+                                    self.akashic_guidance_start = gr.Slider(
+                                        label='Guidance Start',
+                                        minimum=0.0, maximum=1.0, value=0.1, step=0.05,
+                                        info="Skip guidance before this progress fraction"
+                                    )
+                                    self.akashic_guidance_end = gr.Slider(
+                                        label='Guidance End',
+                                        minimum=0.0, maximum=1.0, value=0.9, step=0.05,
+                                        info="Skip guidance after this progress fraction"
+                                    )
+
+                            # Visibility handlers for Enhanced Guidance
+                            self.akashic_apg_enabled.change(
+                                fn=lambda x: gr.update(visible=x),
+                                inputs=[self.akashic_apg_enabled],
+                                outputs=[apg_options]
+                            )
+                            self.akashic_guidance_interval_enabled.change(
+                                fn=lambda x: gr.update(visible=x),
+                                inputs=[self.akashic_guidance_interval_enabled],
+                                outputs=[guidance_interval_options]
+                            )
+
                         with gr.Group(visible=False) as mirror_correction_euler_options:
                             gr.Markdown("🪞 **Mirror Correction Euler** — Euler Ancestral + semantic reflection probe")
                             with gr.Row():
