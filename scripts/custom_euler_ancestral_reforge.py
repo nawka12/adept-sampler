@@ -1451,7 +1451,10 @@ def create_enhanced_guidance_pre_cfg_hook(
         # Pre-scales modified_guidance so that after the framework multiplies by
         # cond_scale the net result is: cond + cond_scale * modified_guidance.
         # Do NOT simplify — removing the division breaks output magnitude.
-        modified_cond = (uncond + modified_guidance) + (cond - uncond) / cond_scale
+        if cond_scale != 0:
+            modified_cond = (uncond + modified_guidance) + (cond - uncond) / cond_scale
+        else:
+            modified_cond = uncond + modified_guidance
 
         # 8. Return — preserve any extra conds_out entries beyond index 1
         return [modified_cond, uncond] + args["conds_out"][2:]
@@ -2780,7 +2783,7 @@ class AdeptSamplerForge(scripts.Script):
                 print(f"⚠️ Failed to apply Spectral Modulation CFG hook: {e}")
 
         # --- Enhanced Guidance Pre-CFG Hook (APG + Guidance Interval) ---
-        if REFORGE_AVAILABLE and (akashic_apg_enabled or akashic_guidance_interval_enabled):
+        if REFORGE_AVAILABLE and use_akashic_solver and (akashic_apg_enabled or akashic_guidance_interval_enabled):
             try:
                 if hasattr(p, 'sd_model') and hasattr(p.sd_model, 'forge_objects'):
                     unet = p.sd_model.forge_objects.unet.clone()
