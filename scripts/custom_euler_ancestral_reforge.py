@@ -192,6 +192,14 @@ current_sampler_settings = {
     'akashic_spectral_percentile': 5.0,  # Spectral modulation percentile threshold
     'akashic_combat_cfg_drift': False,  # Combat CFG mean drift
     'akashic_combat_drift_intensity': 0.5,  # Combat drift intensity (0-1)
+    # Enhanced Guidance settings (APG + Guidance Interval)
+    'akashic_apg_enabled': False,
+    'akashic_apg_eta': 1.0,
+    'akashic_apg_norm_threshold': 5.0,
+    'akashic_apg_momentum': 0.0,
+    'akashic_guidance_interval_enabled': False,
+    'akashic_guidance_start': 0.1,
+    'akashic_guidance_end': 0.9,
 }
 
 
