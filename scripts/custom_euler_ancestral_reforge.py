@@ -1345,6 +1345,120 @@ def create_spectral_modulation_cfg_hook(multiplier=1.0, percentile=5.0):
     return spectral_cfg_hook
 
 
+def create_enhanced_guidance_pre_cfg_hook(
+    total_steps,
+    apg_enabled=True,
+    apg_eta=1.0,
+    apg_norm_threshold=5.0,
+    apg_momentum=0.0,
+    guidance_interval_enabled=False,
+    guidance_start=0.1,
+    guidance_end=0.9,
+):
+    """
+    Pre-CFG hook implementing Adaptive Projected Guidance (APG) with momentum
+    and Guidance Interval Limiting for AkashicSolver.
+
+    Registered via set_model_sampler_pre_cfg_function (list-based, non-destructive).
+    Operates on args["conds_out"] before CFG multiplication.
+
+    References:
+      - APG: arXiv 2410.02416
+      - Guidance Interval: arXiv 2404.07724 (Karras et al., NeurIPS 2024)
+      - Canonical APG impl: ldm_patched/contrib/nodes_apg.py
+    """
+    # Mutable list cells — the only way to mutate closed-over state in Python 3
+    step_counter = [0]      # incremented each call after progress is computed
+    running_avg = [0]       # guidance accumulator for momentum (scalar 0 = uninitialised)
+    prev_sigma = [None]     # last seen sigma, used to detect inpainting restarts
+
+    # Validate guidance interval parameters
+    _interval_active = guidance_interval_enabled and (guidance_start < guidance_end)
+    if guidance_interval_enabled and not _interval_active:
+        print(f"⚠️ Enhanced Guidance: guidance_start ({guidance_start}) >= guidance_end ({guidance_end}), interval limiting disabled.")
+
+    def project(v0, v1):
+        """Project v0 onto v1, return (parallel, orthogonal) components."""
+        v1_norm = torch.nn.functional.normalize(v1, dim=[-1, -2, -3])
+        v0_parallel = (v0 * v1_norm).sum(dim=[-1, -2, -3], keepdim=True) * v1_norm
+        v0_orthogonal = v0 - v0_parallel
+        return v0_parallel, v0_orthogonal
+
+    def pre_cfg_hook(args):
+        # 1. Guard: single-condition path (CFG disabled — uncond not evaluated)
+        if len(args["conds_out"]) < 2 or args["conds_out"][1] is None:
+            return args["conds_out"]
+
+        # 2. Extract values
+        cond       = args["conds_out"][0]
+        uncond     = args["conds_out"][1]
+        sigma      = args["sigma"][0]
+        cond_scale = args["cond_scale"]
+
+        # 3. Inpainting restart detection: sigma increasing means a new pass started
+        if prev_sigma[0] is not None and sigma > prev_sigma[0]:
+            step_counter[0] = 0
+            running_avg[0] = 0
+
+        # 4. Compute progress then increment counter
+        #    Range: [0, (N-1)/N] — never reaches 1.0, safe for 1-step edge case
+        progress = step_counter[0] / max(total_steps, 1)
+        step_counter[0] += 1
+
+        # 5. Save sigma for next call
+        prev_sigma[0] = sigma
+
+        # 6. Guidance interval check — true skip (zero-delta guidance)
+        if _interval_active:
+            if progress < guidance_start or progress > guidance_end:
+                # Replace cond with uncond so framework computes:
+                # uncond + scale*(uncond-uncond) = uncond  (no guidance)
+                return [uncond] + args["conds_out"][1:]
+
+        # 7. APG body
+        if not apg_enabled:
+            return args["conds_out"]
+
+        guidance = cond - uncond
+
+        # Momentum: running accumulator (canonical form from nodes_apg.py)
+        # norm_threshold is applied to the accumulated vector (intentional —
+        # constrains the smoothed direction, not per-step guidance)
+        if apg_momentum != 0:
+            if not torch.is_tensor(running_avg[0]):
+                running_avg[0] = guidance
+            else:
+                running_avg[0] = apg_momentum * running_avg[0] + guidance
+            guidance = running_avg[0]
+
+        # Norm threshold: soft clamp to prevent runaway guidance magnitude
+        if apg_norm_threshold > 0:
+            guidance_norm = guidance.norm(p=2, dim=[-1, -2, -3], keepdim=True)
+            scale = torch.minimum(
+                torch.ones_like(guidance_norm),
+                apg_norm_threshold / guidance_norm
+            )
+            guidance = guidance * scale
+
+        # Project guidance onto cond (not uncond — this is the correct APG reference)
+        guidance_parallel, guidance_orthogonal = project(guidance, cond)
+
+        # Reconstruct: orthogonal fully preserved, parallel scaled by eta
+        # eta=1.0 → standard CFG behaviour; eta=0.0 → pure orthogonal (full APG)
+        modified_guidance = guidance_orthogonal + apg_eta * guidance_parallel
+
+        # Output formulation (canonical from nodes_apg.py line 62).
+        # Pre-scales modified_guidance so that after the framework multiplies by
+        # cond_scale the net result is: uncond + cond_scale * modified_guidance.
+        # Do NOT simplify — removing the division breaks output magnitude.
+        modified_cond = (uncond + modified_guidance) + (cond - uncond) / cond_scale
+
+        # 8. Return — preserve any extra conds_out entries beyond index 1
+        return [modified_cond, uncond] + args["conds_out"][2:]
+
+    return pre_cfg_hook
+
+
 def apply_combat_cfg_drift(latent, method='mean', intensity=1.0):
     """
     Combat CFG Drift: Reduce mean drift from high CFG values.
