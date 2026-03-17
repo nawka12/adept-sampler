@@ -35,3 +35,6 @@ env/
 
 # Research documents (not part of the extension)
 RESEARCH_*.md
+
+# Superpowers planning docs (local only)
+docs/
