@@ -1515,6 +1515,75 @@ def compute_smea_factor(progress, smea_strength=0.5):
     return 1.0 - smea_strength * (1.0 - smea_interp)
 
 
+def compute_adaptive_noise_scale(denoised, prev_denoised, sigma, sigma_prev, sigma_next,
+                                  base_s_noise, threshold_low=0.05, threshold_high=0.15,
+                                  boost_ceiling=1.25, dampen_floor=0.85,
+                                  sigma_high_guard=5.0, sigma_low_guard=0.5):
+    """
+    Adaptive noise scale using sigma-normalized prediction divergence.
+
+    Measures how much the model "changed its mind" between adjacent steps,
+    normalized by the log-sigma step size. Returns an adjusted s_noise value.
+
+    Phase guardrails: only active when sigma_low_guard < sigma < sigma_high_guard.
+    Response is asymmetric: conservative about lowering noise (floor 0.85x),
+    more permissive about boosting (ceiling 1.25x). Dead zone prevents
+    micro-adjustments from cascading into SDE feedback loops.
+
+    Args:
+        denoised: Raw model prediction at current step (before post-processing)
+        prev_denoised: Raw model prediction at previous step
+        sigma: Current sigma value
+        sigma_prev: Previous sigma value
+        sigma_next: Next sigma value (for guardrail check)
+        base_s_noise: The fully-computed effective s_noise to modulate
+        threshold_low: Below this divergence, boost noise (default 0.05)
+        threshold_high: Above this divergence, dampen noise (default 0.15)
+        boost_ceiling: Maximum boost multiplier (default 1.25)
+        dampen_floor: Minimum dampen multiplier (default 0.85)
+        sigma_high_guard: Bypass when sigma above this (structural phase)
+        sigma_low_guard: Bypass when sigma_next below this (cleanup phase)
+
+    Returns:
+        Tuple of (adjusted_s_noise, divergence_value, action_string)
+        action_string is one of "boost", "dampen", "none", "bypass"
+    """
+    sigma_val = sigma.item() if torch.is_tensor(sigma) else float(sigma)
+    sigma_next_val = sigma_next.item() if torch.is_tensor(sigma_next) else float(sigma_next)
+    sigma_prev_val = sigma_prev.item() if torch.is_tensor(sigma_prev) else float(sigma_prev)
+
+    # Phase guardrails: bypass outside texture phase
+    # Note: low guard uses sigma_next (not sigma) because noise injection magnitude
+    # is proportional to sigma_up which depends on sigma_next — when sigma_next < 0.5,
+    # noise contribution is negligible regardless of scaling.
+    if sigma_val > sigma_high_guard or sigma_next_val < sigma_low_guard:
+        return base_s_noise, 0.0, "bypass"
+
+    # Compute sigma-normalized prediction divergence
+    # Frobenius norm for both (resolution-invariant since ratio cancels)
+    diff_norm = torch.norm(denoised - prev_denoised).item()
+    denoised_norm = torch.norm(denoised).item()
+    log_sigma_step = abs(math.log(sigma_val / (sigma_prev_val + 1e-8)))
+
+    denominator = denoised_norm * log_sigma_step + 1e-8
+    divergence = diff_norm / denominator
+
+    # Asymmetric response with dead zone
+    if divergence < threshold_low:
+        # Model very consistent — safe to explore with more noise
+        t = (threshold_low - divergence) / (threshold_low + 1e-8)
+        scale = 1.0 + t * (boost_ceiling - 1.0)
+        return base_s_noise * scale, divergence, "boost"
+    elif divergence > threshold_high:
+        # Model erratic — conservative noise reduction
+        t = min(1.0, (divergence - threshold_high) / (threshold_high + 1e-8))
+        scale = 1.0 - t * (1.0 - dampen_floor)
+        return base_s_noise * scale, divergence, "dampen"
+    else:
+        # Dead zone — no adjustment
+        return base_s_noise, divergence, "none"
+
+
 def compute_native_detail_boost(progress, ndb_strength=0.0):
     """
     Native Detail Boost (NDB): Enhances detail emergence at native resolution.
