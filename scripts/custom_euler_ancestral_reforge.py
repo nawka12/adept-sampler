@@ -2360,7 +2360,7 @@ class AdeptSamplerForge(scripts.Script):
             mirror_correction_euler_eta, mirror_correction_euler_s_noise, mirror_correction_euler_phase,
             mirror_correction_euler_smooth_phase,
             akashic_tau, akashic_solver_order, akashic_base_eta, akashic_s_noise,
-            akashic_adaptive_eta, akashic_use_ays, akashic_phase_strength, akashic_smea_strength,
+            akashic_adaptive_eta, akashic_adaptive_noise, akashic_use_ays, akashic_phase_strength, akashic_smea_strength,
             akashic_ndb_strength, akashic_eqvae_mode,
             # Additional CFG Fixes settings
             akashic_spectral_mod, akashic_spectral_percentile,
@@ -2454,6 +2454,8 @@ class AdeptSamplerForge(scripts.Script):
                 except Exception: pass
             if "akashic_adaptive_eta" in xyz:
                 akashic_adaptive_eta = str(xyz["akashic_adaptive_eta"]) == "True"
+            if "akashic_adaptive_noise" in xyz:
+                akashic_adaptive_noise = str(xyz["akashic_adaptive_noise"]) == "True"
             if "akashic_use_ays" in xyz:
                 akashic_use_ays = str(xyz["akashic_use_ays"]) == "True"
             if "akashic_phase_strength" in xyz:
@@ -2604,6 +2606,7 @@ class AdeptSamplerForge(scripts.Script):
             'akashic_base_eta': akashic_base_eta,
             'akashic_s_noise': akashic_s_noise,
             'akashic_adaptive_eta': akashic_adaptive_eta,
+            'akashic_adaptive_noise': akashic_adaptive_noise,
             'akashic_use_ays': akashic_use_ays,
             'akashic_phase_strength': akashic_phase_strength,
             'akashic_smea_strength': akashic_smea_strength,
