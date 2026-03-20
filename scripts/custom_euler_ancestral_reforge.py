@@ -876,6 +876,7 @@ def sample_akashic_solver(model, x, sigmas, extra_args=None, callback=None,
     smea_strength = current_sampler_settings.get('akashic_smea_strength', 0.0)
     ndb_strength = current_sampler_settings.get('akashic_ndb_strength', 0.0)
     eqvae_mode_setting = current_sampler_settings.get('akashic_eqvae_mode', 'Off')
+    adaptive_noise_enabled = current_sampler_settings.get('akashic_adaptive_noise', False)
 
     # EQ-VAE parameter scaling: converts default values to EQ-VAE-optimized equivalents
     # Parse early so we can apply scaling before anything else
@@ -928,6 +929,8 @@ def sample_akashic_solver(model, x, sigmas, extra_args=None, callback=None,
         print(f"   ✨ CFG Fixes: {', '.join(extras)}")
     if not cfg_settings['akashic_dynamic_threshold']:
         print(f"   ⚠️ Dynamic Thresholding disabled")
+    if adaptive_noise_enabled:
+        print(f"   Adaptive Noise: ON (auto-adjusting s_noise per step)")
 
     # Get noise sampler for stochastic injection
     noise_sampler = get_noise_sampler(x)
@@ -936,6 +939,9 @@ def sample_akashic_solver(model, x, sigmas, extra_args=None, callback=None,
 
     # Multi-step history for SA-Solver (stores (sigma, derivative) tuples)
     d_history = []
+    # Adaptive noise state (stores raw model output for divergence computation)
+    prev_denoised_raw = None
+    sigma_prev = None
 
     for i in range(total_steps):
         sigma = sigmas[i]
@@ -972,6 +978,9 @@ def sample_akashic_solver(model, x, sigmas, extra_args=None, callback=None,
 
         # === MODEL PREDICTION ===
         denoised = model(x, sigma * s_in, **extra_args)
+
+        # Store raw model output for adaptive noise (before any post-processing)
+        denoised_raw = denoised.clone() if adaptive_noise_enabled else None
 
         # Apply dynamic thresholding for stability at high CFG
         cfg_scale = extra_args.get('cond_scale', 1.0)
@@ -1026,6 +1035,14 @@ def sample_akashic_solver(model, x, sigmas, extra_args=None, callback=None,
 
         effective_s_noise *= noise_multiplier
 
+        # === ADAPTIVE NOISE SCALE (final multiplier) ===
+        if adaptive_noise_enabled and prev_denoised_raw is not None and sigma_next > 0:
+            effective_s_noise, divergence, action = compute_adaptive_noise_scale(
+                denoised_raw, prev_denoised_raw, sigma, sigma_prev, sigma_next,
+                effective_s_noise
+            )
+            print(f"   Step {i}/{total_steps}: Adaptive s_noise={effective_s_noise:.3f} (div={divergence:.4f}, {action})")
+
         # Execute SA-Solver step
         x, sigma_up = sa_solver_step(
             x=x,
@@ -1039,7 +1056,12 @@ def sample_akashic_solver(model, x, sigmas, extra_args=None, callback=None,
             ndb_strength=ndb_strength,
             progress=progress,
         )
-        
+
+        # Update adaptive noise state for next iteration
+        if adaptive_noise_enabled:
+            prev_denoised_raw = denoised_raw
+            sigma_prev = sigma
+
         # === ERROR HANDLING ===
         if torch.isnan(x).any() or torch.isinf(x).any():
             cfg_scale = extra_args.get('cond_scale', 1.0)
@@ -1062,6 +1084,10 @@ def sample_akashic_solver(model, x, sigmas, extra_args=None, callback=None,
             
             # Clear history to reset multi-step
             d_history.clear()
+            # Invalidate adaptive noise state after recovery
+            if adaptive_noise_enabled:
+                prev_denoised_raw = None
+                sigma_prev = None
             print("   Recovery successful. Multi-step history cleared.")
         
         # Callback for progress tracking
