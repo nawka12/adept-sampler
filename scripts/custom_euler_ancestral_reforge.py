@@ -2272,6 +2272,7 @@ class AdeptSamplerForge(scripts.Script):
             (self.akashic_base_eta, lambda p: gr.update() if p.get('akashic_base_eta') in (None, 'N/A') else float(p['akashic_base_eta'])),
             (self.akashic_s_noise, lambda p: gr.update() if p.get('akashic_s_noise') in (None, 'N/A') else float(p['akashic_s_noise'])),
             (self.akashic_adaptive_eta, lambda p: str(p.get('akashic_adaptive_eta', 'true')).lower() == 'true' if 'akashic_adaptive_eta' in p else gr.update()),
+            (self.akashic_adaptive_noise, lambda p: str(p.get('akashic_adaptive_noise', 'false')).lower() == 'true' if 'akashic_adaptive_noise' in p else gr.update()),
             (self.akashic_use_ays, lambda p: str(p.get('akashic_use_ays', 'false')).lower() == 'true' if 'akashic_use_ays' in p else gr.update()),
             (self.akashic_phase_strength, lambda p: gr.update() if p.get('akashic_phase_strength') in (None, 'N/A') else float(p['akashic_phase_strength'])),
             (self.akashic_smea_strength, lambda p: gr.update() if p.get('akashic_smea_strength') in (None, 'N/A') else float(p['akashic_smea_strength'])),
@@ -2695,6 +2696,7 @@ class AdeptSamplerForge(scripts.Script):
                 'akashic_base_eta': akashic_base_eta if use_akashic_solver else 'N/A',
                 'akashic_s_noise': akashic_s_noise if use_akashic_solver else 'N/A',
                 'akashic_adaptive_eta': akashic_adaptive_eta if use_akashic_solver else 'N/A',
+                'akashic_adaptive_noise': akashic_adaptive_noise if use_akashic_solver else 'N/A',
                 'akashic_use_ays': akashic_use_ays if use_akashic_solver else 'N/A',
                 'akashic_phase_strength': akashic_phase_strength if use_akashic_solver else 'N/A',
                 'akashic_smea_strength': akashic_smea_strength if use_akashic_solver else 'N/A',
@@ -4296,6 +4298,12 @@ def make_axis_on_xyz_grid():
             "(Adept) Akashic Adaptive Eta",
             str,
             partial(set_value, field="akashic_adaptive_eta"),
+            choices=lambda: ["True", "False"],
+        ),
+        xyz_grid.AxisOption(
+            "(Adept) Akashic Adaptive Noise",
+            str,
+            partial(set_value, field="akashic_adaptive_noise"),
             choices=lambda: ["True", "False"],
         ),
         xyz_grid.AxisOption(
