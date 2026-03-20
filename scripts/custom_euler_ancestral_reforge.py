@@ -939,9 +939,9 @@ def sample_akashic_solver(model, x, sigmas, extra_args=None, callback=None,
 
     # Multi-step history for SA-Solver (stores (sigma, derivative) tuples)
     d_history = []
-    # Adaptive noise state (stores raw model output for divergence computation)
+    # Adaptive noise state: tracks prediction change magnitude between steps
     prev_denoised_raw = None
-    sigma_prev = None
+    prev_change_norm = None
 
     for i in range(total_steps):
         sigma = sigmas[i]
@@ -1036,12 +1036,19 @@ def sample_akashic_solver(model, x, sigmas, extra_args=None, callback=None,
         effective_s_noise *= noise_multiplier
 
         # === ADAPTIVE NOISE SCALE (final multiplier) ===
-        if adaptive_noise_enabled and prev_denoised_raw is not None and sigma_next > 0:
-            effective_s_noise, divergence, action = compute_adaptive_noise_scale(
-                denoised_raw, prev_denoised_raw, sigma, sigma_prev, sigma_next,
+        # Compute current prediction change magnitude
+        if adaptive_noise_enabled and prev_denoised_raw is not None:
+            change_norm = torch.norm(denoised_raw - prev_denoised_raw).item()
+        else:
+            change_norm = None
+
+        if adaptive_noise_enabled and change_norm is not None and prev_change_norm is not None and sigma_next > 0:
+            effective_s_noise, ratio, action = compute_adaptive_noise_scale(
+                change_norm, prev_change_norm, sigma, sigma_next,
                 effective_s_noise
             )
-            print(f"   Step {i}/{total_steps}: Adaptive s_noise={effective_s_noise:.3f} (div={divergence:.4f}, {action})")
+            _sv = sigma.item() if torch.is_tensor(sigma) else float(sigma)
+            print(f"   Step {i}/{total_steps}: σ={_sv:.4f} | change={change_norm:.2f} prev={prev_change_norm:.2f} ratio={ratio:.3f} → s_noise={effective_s_noise:.3f} ({action})")
 
         # Execute SA-Solver step
         x, sigma_up = sa_solver_step(
@@ -1081,13 +1088,14 @@ def sample_akashic_solver(model, x, sigmas, extra_args=None, callback=None,
             d_history.clear()
             if adaptive_noise_enabled:
                 prev_denoised_raw = None
-                sigma_prev = None
+                prev_change_norm = None
             print("   Recovery successful. Multi-step history cleared.")
         else:
             # Update adaptive noise state only on clean steps
             if adaptive_noise_enabled:
+                if change_norm is not None:
+                    prev_change_norm = change_norm
                 prev_denoised_raw = denoised_raw
-                sigma_prev = sigma
         
         # Callback for progress tracking
         if callback is not None:
@@ -1540,15 +1548,21 @@ def compute_smea_factor(progress, smea_strength=0.5):
     return 1.0 - smea_strength * (1.0 - smea_interp)
 
 
-def compute_adaptive_noise_scale(denoised, prev_denoised, sigma, sigma_prev, sigma_next,
-                                  base_s_noise, threshold_low=0.05, threshold_high=0.15,
+def compute_adaptive_noise_scale(change_norm, prev_change_norm, sigma, sigma_next,
+                                  base_s_noise, ratio_low=0.5, ratio_high=1.5,
                                   boost_ceiling=1.25, dampen_floor=0.85,
-                                  sigma_high_guard=5.0, sigma_low_guard=0.5):
+                                  sigma_high_guard=5.0, sigma_low_guard=0.3):
     """
-    Adaptive noise scale using sigma-normalized prediction divergence.
+    Adaptive noise scale using consecutive prediction change ratio.
 
-    Measures how much the model "changed its mind" between adjacent steps,
-    normalized by the log-sigma step size. Returns an adjusted s_noise value.
+    Compares the rate of prediction change between adjacent steps.
+    A stable model has a smoothly decreasing change rate (ratio ≈ 0.7-1.0).
+    A struggling model shows sudden spikes (ratio >> 1.5) or crashes (ratio << 0.5)
+    in the change rate that deviate from the natural convergence trend.
+
+    This metric is self-normalizing: by comparing adjacent changes, it is immune
+    to the non-stationary baseline (prediction differences naturally decrease as
+    sigma decreases during diffusion sampling).
 
     Phase guardrails: only active when sigma_low_guard < sigma < sigma_high_guard.
     Response is asymmetric: conservative about lowering noise (floor 0.85x),
@@ -1556,57 +1570,46 @@ def compute_adaptive_noise_scale(denoised, prev_denoised, sigma, sigma_prev, sig
     micro-adjustments from cascading into SDE feedback loops.
 
     Args:
-        denoised: Raw model prediction at current step (before post-processing)
-        prev_denoised: Raw model prediction at previous step
+        change_norm: ||denoised_i - denoised_{i-1}|| (current step change magnitude)
+        prev_change_norm: ||denoised_{i-1} - denoised_{i-2}|| (previous step change magnitude)
         sigma: Current sigma value
-        sigma_prev: Previous sigma value
         sigma_next: Next sigma value (for guardrail check)
         base_s_noise: The fully-computed effective s_noise to modulate
-        threshold_low: Below this divergence, boost noise (default 0.05)
-        threshold_high: Above this divergence, dampen noise (default 0.15)
+        ratio_low: Below this ratio, boost noise (model suddenly confident, default 0.5)
+        ratio_high: Above this ratio, dampen noise (model suddenly erratic, default 1.5)
         boost_ceiling: Maximum boost multiplier (default 1.25)
         dampen_floor: Minimum dampen multiplier (default 0.85)
         sigma_high_guard: Bypass when sigma above this (structural phase)
-        sigma_low_guard: Bypass when sigma_next below this (cleanup phase)
+        sigma_low_guard: Bypass when sigma below this (cleanup phase)
 
     Returns:
-        Tuple of (adjusted_s_noise, divergence_value, action_string)
+        Tuple of (adjusted_s_noise, ratio_value, action_string)
         action_string is one of "boost", "dampen", "none", "bypass"
     """
     sigma_val = sigma.item() if torch.is_tensor(sigma) else float(sigma)
     sigma_next_val = sigma_next.item() if torch.is_tensor(sigma_next) else float(sigma_next)
-    sigma_prev_val = sigma_prev.item() if torch.is_tensor(sigma_prev) else float(sigma_prev)
 
     # Phase guardrails: bypass outside texture phase
-    # Note: low guard uses sigma_next (not sigma) because noise injection magnitude
-    # is proportional to sigma_up which depends on sigma_next — when sigma_next < 0.5,
-    # noise contribution is negligible regardless of scaling.
     if sigma_val > sigma_high_guard or sigma_next_val < sigma_low_guard:
         return base_s_noise, 0.0, "bypass"
 
-    # Compute sigma-normalized prediction divergence
-    # Frobenius norm for both (resolution-invariant since ratio cancels)
-    diff_norm = torch.norm(denoised - prev_denoised).item()
-    denoised_norm = torch.norm(denoised).item()
-    log_sigma_step = abs(math.log(sigma_val / (sigma_prev_val + 1e-8)))
-
-    denominator = denoised_norm * log_sigma_step + 1e-8
-    divergence = diff_norm / denominator
+    # Consecutive prediction change ratio (self-normalizing)
+    ratio = change_norm / (prev_change_norm + 1e-8)
 
     # Asymmetric response with dead zone
-    if divergence < threshold_low:
-        # Model very consistent — safe to explore with more noise
-        t = (threshold_low - divergence) / (threshold_low + 1e-8)
+    if ratio < ratio_low:
+        # Model suddenly very confident — safe to explore with more noise
+        t = min(1.0, (ratio_low - ratio) / (ratio_low + 1e-8))
         scale = 1.0 + t * (boost_ceiling - 1.0)
-        return base_s_noise * scale, divergence, "boost"
-    elif divergence > threshold_high:
-        # Model erratic — conservative noise reduction
-        t = min(1.0, (divergence - threshold_high) / (threshold_high + 1e-8))
+        return base_s_noise * scale, ratio, "boost"
+    elif ratio > ratio_high:
+        # Model suddenly erratic — conservative noise reduction
+        t = min(1.0, (ratio - ratio_high) / (ratio_high + 1e-8))
         scale = 1.0 - t * (1.0 - dampen_floor)
-        return base_s_noise * scale, divergence, "dampen"
+        return base_s_noise * scale, ratio, "dampen"
     else:
         # Dead zone — no adjustment
-        return base_s_noise, divergence, "none"
+        return base_s_noise, ratio, "none"
 
 
 def compute_native_detail_boost(progress, ndb_strength=0.0):
