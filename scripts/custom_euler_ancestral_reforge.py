@@ -1943,6 +1943,11 @@ class AdeptSamplerForge(scripts.Script):
                                     value=False,
                                     info="Use Align Your Steps optimized schedule"
                                 )
+                                self.akashic_adaptive_noise = gr.Checkbox(
+                                    label='Adaptive Noise Scale',
+                                    value=False,
+                                    info="Auto-adjusts s_noise based on model behavior"
+                                )
                             
                             with gr.Row():
                                 self.akashic_phase_strength = gr.Slider(
@@ -2324,7 +2329,7 @@ class AdeptSamplerForge(scripts.Script):
             self.mirror_correction_euler_eta, self.mirror_correction_euler_s_noise, self.mirror_correction_euler_phase,
             self.mirror_correction_euler_smooth_phase,
             self.akashic_tau, self.akashic_solver_order, self.akashic_base_eta, self.akashic_s_noise,
-            self.akashic_adaptive_eta, self.akashic_use_ays, self.akashic_phase_strength, self.akashic_smea_strength,
+            self.akashic_adaptive_eta, self.akashic_adaptive_noise, self.akashic_use_ays, self.akashic_phase_strength, self.akashic_smea_strength,
             self.akashic_ndb_strength,
             self.akashic_eqvae_mode,
             # Additional CFG Fixes settings
