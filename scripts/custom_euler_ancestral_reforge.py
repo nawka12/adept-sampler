@@ -180,6 +180,7 @@ current_sampler_settings = {
     'akashic_smea_strength': 0.0,    # SMEA high-res coherency (0=disabled)
     'akashic_ndb_strength': 0.0,     # Native Detail Boost (0=disabled)
     'akashic_eqvae_mode': 'Off',     # EQ-VAE optimized mode: 'Off', 'Balanced'
+    'akashic_adaptive_noise': False,  # Adaptive noise scale (auto-adjusts s_noise per step)
     # Mirror Correction Euler solver settings
     'use_mirror_correction_euler': False,
     'mirror_correction_euler_eta': 1.0,
@@ -192,6 +193,7 @@ current_sampler_settings = {
     'akashic_spectral_percentile': 5.0,  # Spectral modulation percentile threshold
     'akashic_combat_cfg_drift': False,  # Combat CFG mean drift
     'akashic_combat_drift_intensity': 0.5,  # Combat drift intensity (0-1)
+    'akashic_dynamic_threshold': True,   # Dynamic thresholding at CFG > 7
 }
 
 
@@ -405,9 +407,9 @@ def sample_adept_solver(model, x, sigmas, extra_args=None, callback=None, disabl
         
         # Apply dynamic thresholding (from DPM-Solver++)
         # This improves stability at high CFG scales
-        if extra_args.get('cond_scale', 1.0) > 7.0:
+        if current_sampler_settings.get('akashic_dynamic_threshold', True) and extra_args.get('cond_scale', 1.0) > 7.0:
             denoised = apply_dynamic_thresholding(denoised, percentile=0.995)
-        
+
         # Compute derivative in log-SNR space for better numerical properties
         # Inspired by DPM-Solver-v3's optimal parameterization
         d = to_d(x, sigma, denoised)
@@ -489,7 +491,7 @@ def sample_adept_solver(model, x, sigmas, extra_args=None, callback=None, disabl
             # Evaluate model at predicted point
             denoised_pred = model(x_pred, sigma_next * s_in, **extra_args)
             
-            if extra_args.get('cond_scale', 1.0) > 7.0:
+            if current_sampler_settings.get('akashic_dynamic_threshold', True) and extra_args.get('cond_scale', 1.0) > 7.0:
                 denoised_pred = apply_dynamic_thresholding(denoised_pred, percentile=0.995)
 
             d_pred = to_d(x_pred, sigma_next, denoised_pred)
@@ -720,9 +722,9 @@ def sample_adept_ancestral_solver(model, x, sigmas, extra_args=None, callback=No
         denoised = model(x, sigma * s_in, **extra_args)
         
         # Apply dynamic thresholding (from DPM-Solver++)
-        if extra_args.get('cond_scale', 1.0) > 7.0:
+        if current_sampler_settings.get('akashic_dynamic_threshold', True) and extra_args.get('cond_scale', 1.0) > 7.0:
             denoised = apply_dynamic_thresholding(denoised, percentile=0.995)
-        
+
         # === ENHANCED DERIVATIVE COMPUTATION ===
         if enable_enhanced_derivative:
             d = to_d_enhanced_ancestral(x, sigma, denoised, adaptive_eta, progress, generator)
@@ -890,6 +892,7 @@ def sample_akashic_solver(model, x, sigmas, extra_args=None, callback=None,
         'akashic_spectral_percentile': current_sampler_settings.get('akashic_spectral_percentile', 5.0),
         'akashic_combat_cfg_drift': current_sampler_settings.get('akashic_combat_cfg_drift', False),
         'akashic_combat_drift_intensity': current_sampler_settings.get('akashic_combat_drift_intensity', 0.5),
+        'akashic_dynamic_threshold': current_sampler_settings.get('akashic_dynamic_threshold', True),
     }
     cfg_enhancement_active = (
         cfg_settings['akashic_spectral_mod']
@@ -923,6 +926,8 @@ def sample_akashic_solver(model, x, sigmas, extra_args=None, callback=None,
         if cfg_settings['akashic_combat_cfg_drift']:
             extras.append("CombatDrift")
         print(f"   ✨ CFG Fixes: {', '.join(extras)}")
+    if not cfg_settings['akashic_dynamic_threshold']:
+        print(f"   ⚠️ Dynamic Thresholding disabled")
 
     # Get noise sampler for stochastic injection
     noise_sampler = get_noise_sampler(x)
@@ -970,7 +975,7 @@ def sample_akashic_solver(model, x, sigmas, extra_args=None, callback=None,
 
         # Apply dynamic thresholding for stability at high CFG
         cfg_scale = extra_args.get('cond_scale', 1.0)
-        if cfg_scale > 7.0:
+        if current_sampler_settings.get('akashic_dynamic_threshold', True) and cfg_scale > 7.0:
             denoised = apply_dynamic_thresholding(denoised, percentile=0.995)
 
         # === POST-HOC CFG FIXES (Combat Drift) ===
@@ -1379,50 +1384,6 @@ def apply_combat_cfg_drift(latent, method='mean', intensity=1.0):
     except Exception as e:
         print(f"⚠️ Combat CFG drift failed: {e}")
         return latent
-
-
-def compute_phase_aware_cfg_scale(base_scale, progress, alpha=2.0, beta=2.0):
-    """
-    Phase-Aware CFG Scaling: Adjust CFG scale based on sampling progress.
-
-    Inspired by β-CFG (arXiv:2502.10574).
-
-    CFG effectiveness varies by sampling phase:
-    - Early: Lower CFG allows manifold exploration
-    - Middle: Higher CFG for prompt adherence
-    - Late: Lower CFG to stay on data manifold
-
-    Args:
-        base_scale: The user-specified CFG scale
-        progress: Sampling progress (0.0 to 1.0)
-        alpha: Beta distribution alpha parameter. Default: 2.0
-        beta: Beta distribution beta parameter. Default: 2.0
-
-    Returns:
-        Adjusted CFG scale for the current step
-    """
-    try:
-        # Use a simple polynomial approximation of beta distribution
-        # Beta(2,2) peaks at 0.5 with a smooth curve
-        # f(x) = 6 * x * (1-x) for Beta(2,2), normalized to peak at 1
-        if alpha == 2.0 and beta == 2.0:
-            # Simple case: symmetric peak at 0.5
-            scale_factor = 4.0 * progress * (1.0 - progress)  # Peaks at 1.0 when progress=0.5
-            scale_factor = 0.7 + 0.6 * scale_factor  # Range: 0.7 to 1.3
-        else:
-            # General case: use polynomial approximation
-            # Mode of Beta(a,b) is at (a-1)/(a+b-2)
-            mode = (alpha - 1.0) / (alpha + beta - 2.0) if (alpha + beta) > 2 else 0.5
-            # Create a smooth curve that peaks at the mode
-            dist_from_mode = abs(progress - mode)
-            scale_factor = 1.0 - 0.3 * dist_from_mode * 2  # Simple linear falloff
-            scale_factor = max(0.7, min(1.3, scale_factor))
-
-        return base_scale * scale_factor
-
-    except Exception as e:
-        print(f"⚠️ Phase-aware CFG scaling failed: {e}")
-        return base_scale
 
 
 def apply_cfg_techniques(denoised, x, sigma, cfg_scale, progress, settings):
@@ -1929,6 +1890,11 @@ class AdeptSamplerForge(scripts.Script):
                                     value=False,
                                     info="Re-center latent mean"
                                 )
+                                self.akashic_dynamic_threshold = gr.Checkbox(
+                                    label='Dynamic Thresholding',
+                                    value=True,
+                                    info="Clip extreme activations when CFG > 7 (disable if you handle high-CFG artifacts another way)"
+                                )
 
                             with gr.Group(visible=False) as spectral_options:
                                 self.akashic_spectral_percentile = gr.Slider(
@@ -2220,6 +2186,7 @@ class AdeptSamplerForge(scripts.Script):
             (self.akashic_spectral_percentile, lambda p: gr.update() if p.get('akashic_spectral_percentile') in (None, 'N/A') else float(p['akashic_spectral_percentile'])),
             (self.akashic_combat_cfg_drift, lambda p: str(p.get('akashic_combat_cfg_drift', 'false')).lower() == 'true' if 'akashic_combat_cfg_drift' in p else gr.update()),
             (self.akashic_combat_drift_intensity, lambda p: gr.update() if p.get('akashic_combat_drift_intensity') in (None, 'N/A') else float(p['akashic_combat_drift_intensity'])),
+            (self.akashic_dynamic_threshold, lambda p: str(p.get('akashic_dynamic_threshold', 'true')).lower() == 'true' if 'akashic_dynamic_threshold' in p else gr.update()),
             (self.vae_reflection, lambda p: str(p.get('vae_reflection', 'false')).lower() == 'true' if 'vae_reflection' in p else gr.update()),
         ]
 
@@ -2270,6 +2237,7 @@ class AdeptSamplerForge(scripts.Script):
             self.akashic_spectral_percentile,
             self.akashic_combat_cfg_drift,
             self.akashic_combat_drift_intensity,
+            self.akashic_dynamic_threshold,
             self.vae_reflection,
         ]
 
@@ -2297,6 +2265,7 @@ class AdeptSamplerForge(scripts.Script):
             # Additional CFG Fixes settings
             akashic_spectral_mod, akashic_spectral_percentile,
             akashic_combat_cfg_drift, akashic_combat_drift_intensity,
+            akashic_dynamic_threshold,
             vae_reflection,
         ) = script_args
 
@@ -2414,6 +2383,8 @@ class AdeptSamplerForge(scripts.Script):
                 except Exception: pass
             if "akashic_combat_cfg_drift" in xyz:
                 akashic_combat_cfg_drift = str(xyz["akashic_combat_cfg_drift"]) == "True"
+            if "akashic_dynamic_threshold" in xyz:
+                akashic_dynamic_threshold = str(xyz["akashic_dynamic_threshold"]) == "True"
             if "vae_reflection" in xyz:
                 vae_reflection = str(xyz["vae_reflection"]) == "True"
 
@@ -2543,6 +2514,7 @@ class AdeptSamplerForge(scripts.Script):
             'akashic_spectral_percentile': akashic_spectral_percentile,
             'akashic_combat_cfg_drift': akashic_combat_cfg_drift,
             'akashic_combat_drift_intensity': akashic_combat_drift_intensity,
+            'akashic_dynamic_threshold': akashic_dynamic_threshold,
             'vae_reflection': vae_reflection,
         })
 
@@ -2633,6 +2605,7 @@ class AdeptSamplerForge(scripts.Script):
                 'akashic_spectral_mod': akashic_spectral_mod if use_akashic_solver else False,
                 'akashic_combat_cfg_drift': akashic_combat_cfg_drift if use_akashic_solver else False,
                 'akashic_combat_drift_intensity': akashic_combat_drift_intensity if use_akashic_solver and akashic_combat_cfg_drift else 'N/A',
+                'akashic_dynamic_threshold': akashic_dynamic_threshold,
                 'vae_reflection': vae_reflection,
             })
         else:
