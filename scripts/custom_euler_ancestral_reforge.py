@@ -1047,8 +1047,10 @@ def sample_akashic_solver(model, x, sigmas, extra_args=None, callback=None,
                 change_norm, prev_change_norm, sigma, sigma_next,
                 effective_s_noise
             )
-            _sv = sigma.item() if torch.is_tensor(sigma) else float(sigma)
-            print(f"   Step {i}/{total_steps}: σ={_sv:.4f} | change={change_norm:.2f} prev={prev_change_norm:.2f} ratio={ratio:.3f} → s_noise={effective_s_noise:.3f} ({action})")
+            # Only log when an actual adjustment is made (boost or dampen)
+            if action in ("boost", "dampen"):
+                _sv = sigma.item() if torch.is_tensor(sigma) else float(sigma)
+                print(f"   Step {i}/{total_steps}: Adaptive noise {action} (ratio={ratio:.3f}, s_noise={effective_s_noise:.3f})")
 
         # Execute SA-Solver step
         x, sigma_up = sa_solver_step(
