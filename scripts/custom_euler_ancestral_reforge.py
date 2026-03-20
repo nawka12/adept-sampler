@@ -1057,38 +1057,37 @@ def sample_akashic_solver(model, x, sigmas, extra_args=None, callback=None,
             progress=progress,
         )
 
-        # Update adaptive noise state for next iteration
-        if adaptive_noise_enabled:
-            prev_denoised_raw = denoised_raw
-            sigma_prev = sigma
-
         # === ERROR HANDLING ===
         if torch.isnan(x).any() or torch.isinf(x).any():
             cfg_scale = extra_args.get('cond_scale', 1.0)
             print(f"❌ AkashicSolver v2: NaN/Inf detected at step {i}/{total_steps}!")
             print(f"   Sigma: {sigma.item():.4f} → {sigma_next.item():.4f}, CFG: {cfg_scale}")
             print(f"   Tau: {tau:.3f}, Order: {solver_order}")
-            
+
             if i == 0:
                 raise RuntimeError("NaN/Inf on first step - check model/inputs")
-            
+
             # Recovery attempt with fallback to simple Euler step
             print("   Attempting recovery with conservative Euler step...")
             denoised_safe = model(x, sigma * s_in, **extra_args)
             if torch.isnan(denoised_safe).any():
                 raise RuntimeError("Model producing NaN - reduce CFG scale or check model")
-            
+
             d_safe = to_d(x, sigma, denoised_safe)
             dt_safe = (sigma_next - sigma) * 0.5
             x = x + d_safe * dt_safe
-            
-            # Clear history to reset multi-step
+
+            # Clear history to reset multi-step; invalidate adaptive noise state
             d_history.clear()
-            # Invalidate adaptive noise state after recovery
             if adaptive_noise_enabled:
                 prev_denoised_raw = None
                 sigma_prev = None
             print("   Recovery successful. Multi-step history cleared.")
+        else:
+            # Update adaptive noise state only on clean steps
+            if adaptive_noise_enabled:
+                prev_denoised_raw = denoised_raw
+                sigma_prev = sigma
         
         # Callback for progress tracking
         if callback is not None:
