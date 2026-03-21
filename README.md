@@ -27,7 +27,7 @@ This extension is developed and tested on **Stable Diffusion WebUI reForge**. Co
 |--------|-------------|
 | **Adept Solver** | A hybrid **Predictor-Corrector** pipeline. It utilizes a multi-step Adams-Bashforth integrator (derived from **DEIS**) for prediction and a **UniPC**-style corrector step. It integrates **DC-Solver**'s compensation logic to align predictor-corrector steps and uses **DPM-Solver++** dynamic thresholding for high-CFG stability. |
 | **Adept Ancestral Solver** | Enhanced ancestral sampling with adaptive step sizing, phase-aware noise injection, enhanced derivative computation, and dynamic eta scheduling. |
-| **AkashicSolver** | An optimized implementation of the **Stochastic Adams Solver (SA-Solver)** tailored for SDXL/EQ-VAE. It augments the standard SA-Solver with **SMEA** (Sinusoidal Multipass) interpolation for high-res coherence, phase-aware stochasticity control (Tau) to interpolate between ODE and SDE behaviors, and an **EQ-VAE Mode** with optimized noise scaling for EQ-VAE's cleaner latent space. |
+| **AkashicSolver** | An optimized implementation of the **Stochastic Adams Solver (SA-Solver)** tailored for SDXL/EQ-VAE. It augments the standard SA-Solver with **SMEA** (Sinusoidal Multipass) interpolation for high-res coherence, phase-aware stochasticity control (Tau) to interpolate between ODE and SDE behaviors, and **Adaptive Noise Scale** which auto-calibrates s_noise based on model behavior. |
 | **Mirror Correction Euler** | Euler Ancestral with a semantic reflection probe. In the first `Correction Phase` fraction of steps, uses a 3-call Heun correction: `x_probe = 2·D(x) − x` (reflection of x through its own denoised prediction). Unlike a naive `-x` probe, this probe lies on the denoising trajectory, giving a meaningful curvature estimate. Remaining steps are standard single-call Euler Ancestral. Optional **Smooth Phase Decay** mode replaces the binary step cutoff with a continuous log-sigma weight modulated by gradient agreement for smoother transitions. |
 
 ### Schedulers
@@ -67,7 +67,7 @@ A continuous power-function schedule designed for the smooth latent space of EQ-
 | **Detail Enhancement** | High-frequency detail boosting using frequency separation. Configurable strength and separation radius. |
 | **Native Detail Boost** | A frequency-separation tool for the AkashicSolver. It applies a Gaussian blur to the input noise to isolate high-frequency components, then selectively boosts them during the sampling process to maximize texture emergence at native resolutions. |
 | **SMEA** | High-resolution coherency feature (for >1024px) that prevents duplicated subjects and warped anatomy. |
-| **EQ-VAE Mode** | Optimizes AkashicSolver for EQ-VAE's cleaner latent space (~56% lower latent noise). Applies balanced noise scaling, shifted phase boundaries, and tuned frequency separation for optimal sharpness. |
+| **Adaptive Noise Scale** | Available on AkashicSolver, Adept Ancestral, and Mirror Correction Euler. Runs a short calibration pass to measure sigma-relative prediction divergence, then restarts the generation with an auto-computed s_noise correction. Replaces the old EQ-VAE Mode — works with any model, not just EQ-VAE. |
 | **Content-Aware Pacing** | An adaptive scheduling algorithm for Euler Ancestral. It monitors the variance of the latent derivative at every step; once variance drops below a stability threshold (indicating structure coherence), it automatically switches the sampler from the composition phase to the detail refinement phase. |
 | **Spectral Modulation** | (AkashicSolver) Frequency-domain CFG correction based on Clybius's approach. Applies a spectral boost to noise predictions, with a configurable percentile threshold to control how aggressively high-frequency components are emphasized. |
 | **Combat CFG Drift** | (AkashicSolver) Recenters the latent mean to counter cumulative drift caused by high CFG values. Configurable correction intensity. Auto-disabled for inpaint/ADetailer passes to avoid composite artifacts. |
@@ -129,7 +129,7 @@ Adaptive Eta: On
 Phase Strength: 0.5-0.6
 SMEA: 0.0 (off for native res) / 0.1-0.2 (for >1.5x native)
 Native Detail Boost: 0.3-0.5 (for native res detail)
-EQ-VAE Mode: Balanced
+Adaptive Noise Scale: On (auto-calibrates s_noise for your model)
 ```
 
 ### AkashicSolver with AkashicEQFlow (for EQ-VAE models)
@@ -140,12 +140,12 @@ Scheduler: AkashicEQFlow
 τ (tau): 0.55-0.65
 Order: 2
 η (eta): 1.0
-Noise Scale: 0.9-1.0
+Noise Scale: 1.0
 Adaptive Eta: On
 Phase Strength: 0.5-0.6
 SMEA: 0.0 (off for native res) / 0.1-0.2 (for >1.5x native)
 Native Detail Boost: 0.2-0.4
-EQ-VAE Mode: Off or Balanced (model-dependent)
+Adaptive Noise Scale: On
 ```
 
 **Tip**: Enable Additional CFG Fixes (Spectral Modulation, Combat CFG Drift) for EQ-VAE models if needed.
@@ -213,7 +213,7 @@ d = d + effective_weight × (d_heun − d)   # soft blend instead of hard replac
 | **Phase Strength** | 0.0–1.0 | 0.5 | Intensity of phase-aware adaptations |
 | **SMEA Strength** | 0.0–1.0 | 0.0 | High-res coherency (use for >1024px only) |
 | **Native Detail Boost** | 0.0–1.0 | 0.0 | High-frequency noise boost for native res detail |
-| **EQ-VAE Mode** | Off/Balanced | Off | Optimizes noise scaling and phase boundaries for EQ-VAE models |
+| **Adaptive Noise Scale** | On/Off | Off | Auto-calibrates s_noise via prediction divergence analysis. Replaces EQ-VAE Mode |
 | **Spectral Modulation** | On/Off | Off | Frequency-domain CFG correction |
 | **Spectral Percentile** | 1.0–15.0 | 5.0 | Frequency threshold (lower = gentler boost) |
 | **Combat CFG Drift** | On/Off | Off | Recenters latent mean to remove cumulative CFG drift |

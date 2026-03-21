@@ -168,6 +168,7 @@ current_sampler_settings = {
     'adept_ancestral_phase_noise': False,
     'adept_ancestral_phase_strength': 0.5,
     'adept_ancestral_enhanced_derivative': False,
+    'adept_ancestral_adaptive_noise': False,
     # AkashicSolver v2 settings - SA-Solver base with AYS schedules
     'use_akashic_solver': False,
     'akashic_base_eta': 1.0,
@@ -179,7 +180,6 @@ current_sampler_settings = {
     'akashic_use_ays': False,        # Use AYS sigma schedules
     'akashic_smea_strength': 0.0,    # SMEA high-res coherency (0=disabled)
     'akashic_ndb_strength': 0.0,     # Native Detail Boost (0=disabled)
-    'akashic_eqvae_mode': 'Off',     # EQ-VAE optimized mode: 'Off', 'Balanced'
     'akashic_adaptive_noise': False,  # Adaptive noise scale (auto-adjusts s_noise per step)
     # Mirror Correction Euler solver settings
     'use_mirror_correction_euler': False,
@@ -187,6 +187,7 @@ current_sampler_settings = {
     'mirror_correction_euler_s_noise': 1.0,
     'mirror_correction_euler_phase': 0.5,
     'mirror_correction_euler_smooth_phase': False,
+    'mirror_correction_adaptive_noise': False,
     'vae_reflection': False,         # VAE reflection padding for EQ-VAE edge artifact fix
     # Additional CFG fixes (post-hoc techniques)
     'akashic_spectral_mod': False,   # Enable spectral modulation for frequency correction
@@ -574,6 +575,7 @@ def sample_mirror_correction_euler(model, x, sigmas, extra_args=None, callback=N
     s_noise = current_sampler_settings.get('mirror_correction_euler_s_noise', 1.0)
     correction_phase = current_sampler_settings.get('mirror_correction_euler_phase', 0.5)
     smooth_phase = current_sampler_settings.get('mirror_correction_euler_smooth_phase', False)
+    adaptive_noise_enabled = current_sampler_settings.get('mirror_correction_adaptive_noise', False)
     _probe_norm_limit = 5.0  # guard against out-of-distribution probe derivatives
 
     noise_sampler = get_noise_sampler(x)
@@ -588,12 +590,23 @@ def sample_mirror_correction_euler(model, x, sigmas, extra_args=None, callback=N
         log_sigma_phase = torch.log(sigma_phase).item()
         smooth_denom = max(log_sigma_max - log_sigma_phase, 1e-6)
 
-    for i in range(n_steps):
+    # Adaptive noise state
+    prev_denoised_raw = None
+    prev_change_norm = None
+    excess_samples = []
+    adaptive_correction = None
+    x_initial = x.clone() if adaptive_noise_enabled else None
+    if adaptive_noise_enabled:
+        print(f"   Adaptive Noise: ON (auto-adjusting s_noise per step)")
+
+    i = 0
+    while i < n_steps:
         sigma = sigmas[i]
         sigma_next = sigmas[i + 1]
         progress = i / max(len(sigmas) - 1, 1)
 
         denoised = model(x, sigma * s_in, **extra_args)  # call 1 (always)
+        denoised_raw = denoised.clone() if adaptive_noise_enabled else None
         if callback is not None:
             callback({'x': x, 'i': i, 'sigma': sigma, 'sigma_hat': sigma, 'denoised': denoised})
 
@@ -649,8 +662,30 @@ def sample_mirror_correction_euler(model, x, sigmas, extra_args=None, callback=N
                     d = torch.zeros_like(d)
 
         x = x + d * dt
+
+        # Adaptive noise: compute effective s_noise
+        effective_s_noise = s_noise
+        if adaptive_noise_enabled:
+            effective_s_noise, change_norm, adaptive_correction, should_restart = adaptive_noise_step(
+                denoised_raw, prev_denoised_raw, prev_change_norm,
+                sigma, sigma_next, excess_samples, adaptive_correction,
+                effective_s_noise, i, n_steps
+            )
+            if should_restart and x_initial is not None:
+                print(f"   🔄 Restarting generation with corrected s_noise...")
+                x = x_initial.clone()
+                prev_denoised_raw = None
+                prev_change_norm = None
+                x_initial = None
+                i = 0
+                continue
+            prev_change_norm = change_norm
+            prev_denoised_raw = denoised_raw
+
         if sigma_next > 0:
-            x = x + noise_sampler(sigma, sigma_next) * s_noise * sigma_up
+            x = x + noise_sampler(sigma, sigma_next) * effective_s_noise * sigma_up
+
+        i += 1
 
     return x
 
@@ -687,17 +722,29 @@ def sample_adept_ancestral_solver(model, x, sigmas, extra_args=None, callback=No
     enable_phase_noise = current_sampler_settings.get('adept_ancestral_phase_noise', False)
     phase_strength = current_sampler_settings.get('adept_ancestral_phase_strength', 0.5)
     enable_enhanced_derivative = current_sampler_settings.get('adept_ancestral_enhanced_derivative', False)
-    
+    adaptive_noise_enabled = current_sampler_settings.get('adept_ancestral_adaptive_noise', False)
+
     print(f"🚀 Enhanced Adept Ancestral Solver active (η: {base_eta:.2f}, s_noise: {base_s_noise:.2f})")
     print(f"   Adaptive Eta: {enable_adaptive_eta}, Phase Noise: {enable_phase_noise}, Phase Strength: {phase_strength:.2f}, Enhanced Derivative: {enable_enhanced_derivative}")
-    
+    if adaptive_noise_enabled:
+        print(f"   Adaptive Noise: ON (auto-adjusting s_noise per step)")
+
     # Get noise sampler for ancestral injection
     noise_sampler = get_noise_sampler(x)
-    
+
     # Initialize history for multistep
     model_outputs = []
-    
-    for i in range(len(sigmas) - 1):
+
+    # Adaptive noise state
+    prev_denoised_raw = None
+    prev_change_norm = None
+    excess_samples = []
+    adaptive_correction = None
+    n_steps = len(sigmas) - 1
+    x_initial = x.clone() if adaptive_noise_enabled else None
+
+    i = 0
+    while i < n_steps:
         sigma = sigmas[i]
         sigma_next = sigmas[i + 1]
         
@@ -720,7 +767,8 @@ def sample_adept_ancestral_solver(model, x, sigmas, extra_args=None, callback=No
         # === PREDICTOR STEP ===
         # Get current model prediction
         denoised = model(x, sigma * s_in, **extra_args)
-        
+        denoised_raw = denoised.clone() if adaptive_noise_enabled else None
+
         # Apply dynamic thresholding (from DPM-Solver++)
         if current_sampler_settings.get('akashic_dynamic_threshold', True) and extra_args.get('cond_scale', 1.0) > 7.0:
             denoised = apply_dynamic_thresholding(denoised, percentile=0.995)
@@ -782,40 +830,62 @@ def sample_adept_ancestral_solver(model, x, sigmas, extra_args=None, callback=No
                 adaptive_s_noise = base_s_noise * noise_multiplier
             else:
                 adaptive_s_noise = base_s_noise
-            
+
+            # Adaptive noise: modulate final s_noise
+            if adaptive_noise_enabled:
+                adaptive_s_noise, change_norm, adaptive_correction, should_restart = adaptive_noise_step(
+                    denoised_raw, prev_denoised_raw, prev_change_norm,
+                    sigma, sigma_next, excess_samples, adaptive_correction,
+                    adaptive_s_noise, i, n_steps
+                )
+                if should_restart and x_initial is not None:
+                    print(f"   🔄 Restarting generation with corrected s_noise...")
+                    x = x_initial.clone()
+                    model_outputs = []
+                    prev_denoised_raw = None
+                    prev_change_norm = None
+                    x_initial = None
+                    i = 0
+                    continue
+                prev_change_norm = change_norm
+                prev_denoised_raw = denoised_raw
+
             # Generate noise with adaptive scaling
             noise = noise_sampler(sigma, sigma_next) * adaptive_s_noise * sigma_up
             x = x_pred + noise
         else:
             x = x_pred
-        
+
         # Robust error handling with recovery
         if torch.isnan(x).any() or torch.isinf(x).any():
             cfg_scale = extra_args.get('cond_scale', 1.0)
-            print(f"❌ CRITICAL: NaN/Inf detected at step {i}/{len(sigmas)-1}!")
+            print(f"❌ CRITICAL: NaN/Inf detected at step {i}/{n_steps}!")
             print(f"   Sigma: {sigma.item():.4f} → {sigma_next.item():.4f}")
             print(f"   CFG Scale: {cfg_scale}")
             print(f"   Order: {order}, Corrector: {use_corrector}")
-            
+
             # Try recovery with simpler method
             if i == 0:
                 # Can't recover on first step
                 raise RuntimeError("NaN/Inf on first step - check model/inputs")
-            
+
             # Fallback: use last known good state with reduced step
             print("   Attempting recovery with conservative Euler step...")
             denoised_safe = model(x, sigma * s_in, **extra_args)
             if torch.isnan(denoised_safe).any():
                 raise RuntimeError("Model producing NaN - check CFG scale and model")
-            
+
             d_safe = to_d(x, sigma, denoised_safe)
             dt_safe = (sigma_next - sigma) * 0.5  # Reduced step size
             x = x + d_safe * dt_safe
-            
-            # Disable corrector for remaining steps
+
+            # Disable corrector for remaining steps; invalidate adaptive state
             use_corrector = False
+            if adaptive_noise_enabled:
+                prev_denoised_raw = None
+                prev_change_norm = None
             print("   Recovery successful. Corrector disabled for stability.")
-        
+
         # Callback for progress tracking
         if callback is not None:
             callback({
@@ -825,7 +895,9 @@ def sample_adept_ancestral_solver(model, x, sigmas, extra_args=None, callback=No
                 'sigma_hat': sigma,
                 'denoised': denoised
             })
-    
+
+        i += 1
+
     return x
 
 
@@ -875,17 +947,7 @@ def sample_akashic_solver(model, x, sigmas, extra_args=None, callback=None,
     solver_order = current_sampler_settings.get('akashic_solver_order', 2)
     smea_strength = current_sampler_settings.get('akashic_smea_strength', 0.0)
     ndb_strength = current_sampler_settings.get('akashic_ndb_strength', 0.0)
-    eqvae_mode_setting = current_sampler_settings.get('akashic_eqvae_mode', 'Off')
     adaptive_noise_enabled = current_sampler_settings.get('akashic_adaptive_noise', False)
-
-    # EQ-VAE parameter scaling: converts default values to EQ-VAE-optimized equivalents
-    # Parse early so we can apply scaling before anything else
-    if isinstance(eqvae_mode_setting, bool):
-        _eqvae_active = eqvae_mode_setting
-    else:
-        _eqvae_active = eqvae_mode_setting == 'Balanced'
-    if _eqvae_active:
-        base_s_noise *= 0.9  # 1.0 → 0.9: EQ-VAE's cleaner latent space needs less noise
 
     # Get Additional CFG Fixes settings
     cfg_settings = {
@@ -900,18 +962,7 @@ def sample_akashic_solver(model, x, sigmas, extra_args=None, callback=None,
         or cfg_settings['akashic_combat_cfg_drift']
     )
 
-    # Parse EQ-VAE mode setting
-    if isinstance(eqvae_mode_setting, bool):
-        # Backwards compatibility with old boolean setting
-        eqvae_mode = eqvae_mode_setting
-    else:
-        eqvae_mode = eqvae_mode_setting == 'Balanced'
-
-    if eqvae_mode:
-        print(f"🌀 AkashicSolver v2 [EQ-VAE BALANCED] active")
-        print(f"   Optimized for EQ-VAE's cleaner latent space")
-    else:
-        print(f"🌀 AkashicSolver v2 active")
+    print(f"🌀 AkashicSolver v2 active")
     print(f"   τ (tau): {base_tau:.2f}, η (eta): {base_eta:.2f}, s_noise: {base_s_noise:.2f}")
     print(f"   Order: {solver_order}, Adaptive Eta: {enable_adaptive_eta}, Phase Strength: {phase_strength:.2f}")
     if smea_strength > 0:
@@ -939,11 +990,18 @@ def sample_akashic_solver(model, x, sigmas, extra_args=None, callback=None,
 
     # Multi-step history for SA-Solver (stores (sigma, derivative) tuples)
     d_history = []
-    # Adaptive noise state: tracks prediction change magnitude between steps
+    # Adaptive noise state: warmup collects excess samples, then applies global correction
     prev_denoised_raw = None
     prev_change_norm = None
+    excess_samples = []          # Sigma-relative excess ratios collected during warmup
+    adaptive_correction = None   # Global correction factor (set after warmup)
+    ADAPTIVE_WARMUP = 5          # Texture-phase samples needed before calibrating
 
-    for i in range(total_steps):
+    # Save initial state — if adaptive noise calibrates a correction, we restart from scratch
+    x_initial = x.clone() if adaptive_noise_enabled else None
+
+    i = 0
+    while i < total_steps:
         sigma = sigmas[i]
         sigma_next = sigmas[i + 1]
         
@@ -1036,21 +1094,49 @@ def sample_akashic_solver(model, x, sigmas, extra_args=None, callback=None,
         effective_s_noise *= noise_multiplier
 
         # === ADAPTIVE NOISE SCALE (final multiplier) ===
-        # Compute current prediction change magnitude
+        # Compute prediction change magnitude from raw model outputs
         if adaptive_noise_enabled and prev_denoised_raw is not None:
             change_norm = torch.norm(denoised_raw - prev_denoised_raw).item()
         else:
             change_norm = None
 
-        if adaptive_noise_enabled and change_norm is not None and prev_change_norm is not None and sigma_next > 0:
-            effective_s_noise, ratio, action = compute_adaptive_noise_scale(
-                change_norm, prev_change_norm, sigma, sigma_next,
-                effective_s_noise
-            )
-            # Only log when an actual adjustment is made (boost or dampen)
-            if action in ("boost", "dampen"):
-                _sv = sigma.item() if torch.is_tensor(sigma) else float(sigma)
-                print(f"   Step {i}/{total_steps}: Adaptive noise {action} (ratio={ratio:.3f}, s_noise={effective_s_noise:.3f})")
+        if adaptive_noise_enabled and sigma_next > 0:
+            sigma_val = sigma.item() if torch.is_tensor(sigma) else float(sigma)
+            sigma_next_val = sigma_next.item() if torch.is_tensor(sigma_next) else float(sigma_next)
+            in_texture_phase = 0.5 < sigma_val < 5.0
+
+            if adaptive_correction is not None:
+                # Post-warmup: apply calibrated correction to all remaining steps
+                effective_s_noise *= adaptive_correction
+                print(f"   Step {i}/{total_steps}: σ={sigma_val:.4f} → s_noise={effective_s_noise:.3f} (correction={adaptive_correction:.3f})")
+
+            elif in_texture_phase and change_norm is not None and prev_change_norm is not None:
+                # Warmup: collect sigma-relative excess samples
+                change_ratio = change_norm / (prev_change_norm + 1e-8)
+                sigma_ratio = sigma_next_val / (sigma_val + 1e-8)
+                excess = change_ratio / (sigma_ratio + 1e-8)
+                excess_samples.append(excess)
+
+                print(f"   Step {i}/{total_steps}: σ={sigma_val:.4f} | change={change_norm:.2f} prev={prev_change_norm:.2f} ratio={change_ratio:.3f} σ_ratio={sigma_ratio:.3f} excess={excess:.3f} [warmup {len(excess_samples)}/{ADAPTIVE_WARMUP}]")
+
+                if len(excess_samples) >= ADAPTIVE_WARMUP:
+                    adaptive_correction, median_excess = compute_adaptive_noise_scale(
+                        excess_samples, effective_s_noise
+                    )
+                    print(f"   >> Adaptive calibration complete: median_excess={median_excess:.3f} → correction={adaptive_correction:.3f}")
+                    # Restart generation with correction applied from step 0
+                    if x_initial is not None:
+                        print(f"   🔄 Restarting generation with corrected s_noise...")
+                        x = x_initial.clone()
+                        d_history = []
+                        prev_denoised_raw = None
+                        prev_change_norm = None
+                        x_initial = None  # Prevent double restart
+                        i = 0
+                        continue
+                    effective_s_noise *= adaptive_correction
+            else:
+                print(f"   Step {i}/{total_steps}: σ={sigma_val:.4f} | change={'N/A' if change_norm is None else f'{change_norm:.2f}'} (collecting...)")
 
         # Execute SA-Solver step
         x, sigma_up = sa_solver_step(
@@ -1098,7 +1184,7 @@ def sample_akashic_solver(model, x, sigmas, extra_args=None, callback=None,
                 if change_norm is not None:
                     prev_change_norm = change_norm
                 prev_denoised_raw = denoised_raw
-        
+
         # Callback for progress tracking
         if callback is not None:
             callback({
@@ -1108,7 +1194,9 @@ def sample_akashic_solver(model, x, sigmas, extra_args=None, callback=None,
                 'sigma_hat': sigma,
                 'denoised': denoised
             })
-    
+
+        i += 1
+
     return x
 
 
@@ -1550,68 +1638,98 @@ def compute_smea_factor(progress, smea_strength=0.5):
     return 1.0 - smea_strength * (1.0 - smea_interp)
 
 
-def compute_adaptive_noise_scale(change_norm, prev_change_norm, sigma, sigma_next,
-                                  base_s_noise, ratio_low=0.5, ratio_high=1.5,
-                                  boost_ceiling=1.25, dampen_floor=0.85,
-                                  sigma_high_guard=5.0, sigma_low_guard=0.3):
+def compute_adaptive_noise_scale(excess_samples, base_s_noise,
+                                  correction_power=0.5,
+                                  dampen_floor=0.80, boost_ceiling=1.15):
     """
-    Adaptive noise scale using consecutive prediction change ratio.
+    Adaptive noise scale using calibrated sigma-relative excess.
 
-    Compares the rate of prediction change between adjacent steps.
-    A stable model has a smoothly decreasing change rate (ratio ≈ 0.7-1.0).
-    A struggling model shows sudden spikes (ratio >> 1.5) or crashes (ratio << 0.5)
-    in the change rate that deviate from the natural convergence trend.
+    After collecting excess ratio samples during a warmup window inside the
+    texture phase, computes a single global correction factor based on the
+    median excess. This separates the GLOBAL calibration problem (is s_noise
+    right for this model?) from per-step noise.
 
-    This metric is self-normalizing: by comparing adjacent changes, it is immune
-    to the non-stationary baseline (prediction differences naturally decrease as
-    sigma decreases during diffusion sampling).
-
-    Phase guardrails: only active when sigma_low_guard < sigma < sigma_high_guard.
-    Response is asymmetric: conservative about lowering noise (floor 0.85x),
-    more permissive about boosting (ceiling 1.25x). Dead zone prevents
-    micro-adjustments from cascading into SDE feedback loops.
+    The excess ratio measures how much noise is slowing down convergence:
+        excess = (change_i / change_{i-1}) / (sigma_{i+1} / sigma_i)
+    When excess > 1.0, the model converges slower than sigma predicts,
+    meaning noise is fighting the model's progress.
 
     Args:
-        change_norm: ||denoised_i - denoised_{i-1}|| (current step change magnitude)
-        prev_change_norm: ||denoised_{i-1} - denoised_{i-2}|| (previous step change magnitude)
-        sigma: Current sigma value
-        sigma_next: Next sigma value (for guardrail check)
-        base_s_noise: The fully-computed effective s_noise to modulate
-        ratio_low: Below this ratio, boost noise (model suddenly confident, default 0.5)
-        ratio_high: Above this ratio, dampen noise (model suddenly erratic, default 1.5)
-        boost_ceiling: Maximum boost multiplier (default 1.25)
-        dampen_floor: Minimum dampen multiplier (default 0.85)
-        sigma_high_guard: Bypass when sigma above this (structural phase)
-        sigma_low_guard: Bypass when sigma below this (cleanup phase)
+        excess_samples: List of excess ratio values from warmup window
+        base_s_noise: The effective s_noise to modulate
+        correction_power: How aggressively to correct (0.5 = square root)
+        dampen_floor: Minimum correction multiplier (default 0.80)
+        boost_ceiling: Maximum correction multiplier (default 1.15)
 
     Returns:
-        Tuple of (adjusted_s_noise, ratio_value, action_string)
-        action_string is one of "boost", "dampen", "none", "bypass"
+        Tuple of (correction_factor, median_excess)
     """
-    sigma_val = sigma.item() if torch.is_tensor(sigma) else float(sigma)
-    sigma_next_val = sigma_next.item() if torch.is_tensor(sigma_next) else float(sigma_next)
+    if not excess_samples:
+        return 1.0, 0.0
 
-    # Phase guardrails: bypass outside texture phase
-    if sigma_val > sigma_high_guard or sigma_next_val < sigma_low_guard:
-        return base_s_noise, 0.0, "bypass"
+    sorted_samples = sorted(excess_samples)
+    median_excess = sorted_samples[len(sorted_samples) // 2]
 
-    # Consecutive prediction change ratio (self-normalizing)
-    ratio = change_norm / (prev_change_norm + 1e-8)
-
-    # Asymmetric response with dead zone
-    if ratio < ratio_low:
-        # Model suddenly very confident — safe to explore with more noise
-        t = min(1.0, (ratio_low - ratio) / (ratio_low + 1e-8))
-        scale = 1.0 + t * (boost_ceiling - 1.0)
-        return base_s_noise * scale, ratio, "boost"
-    elif ratio > ratio_high:
-        # Model suddenly erratic — conservative noise reduction
-        t = min(1.0, (ratio - ratio_high) / (ratio_high + 1e-8))
-        scale = 1.0 - t * (1.0 - dampen_floor)
-        return base_s_noise * scale, ratio, "dampen"
+    # Correction: bring excess toward 1.0
+    # excess=1.0 → correction=1.0 (perfect calibration)
+    # excess=1.2 → correction=1/1.2^0.5 ≈ 0.91 (reduce noise ~9%)
+    # excess=0.8 → correction=1/0.8^0.5 ≈ 1.12 (boost noise ~12%)
+    if median_excess > 0:
+        correction = 1.0 / (median_excess ** correction_power)
     else:
-        # Dead zone — no adjustment
-        return base_s_noise, ratio, "none"
+        correction = 1.0
+
+    correction = max(dampen_floor, min(boost_ceiling, correction))
+    return correction, median_excess
+
+
+def adaptive_noise_step(denoised_raw, prev_denoised_raw, prev_change_norm,
+                        sigma, sigma_next, excess_samples, adaptive_correction,
+                        base_s_noise, step_idx, total_steps, warmup=5):
+    """
+    Process one step of adaptive noise calibration.
+
+    Call after getting raw model output and before noise injection.
+    Handles warmup collection, calibration trigger, and correction application.
+
+    Returns:
+        (effective_s_noise, change_norm, adaptive_correction, should_restart)
+    """
+    # Compute prediction change magnitude
+    if prev_denoised_raw is not None:
+        change_norm = torch.norm(denoised_raw - prev_denoised_raw).item()
+    else:
+        change_norm = None
+
+    effective_s_noise = base_s_noise
+    should_restart = False
+
+    if sigma_next > 0:
+        sigma_val = sigma.item() if torch.is_tensor(sigma) else float(sigma)
+        sigma_next_val = sigma_next.item() if torch.is_tensor(sigma_next) else float(sigma_next)
+        in_texture_phase = 0.5 < sigma_val < 5.0
+
+        if adaptive_correction is not None:
+            effective_s_noise *= adaptive_correction
+            print(f"   Step {step_idx}/{total_steps}: σ={sigma_val:.4f} → s_noise={effective_s_noise:.3f} (correction={adaptive_correction:.3f})")
+        elif in_texture_phase and change_norm is not None and prev_change_norm is not None:
+            change_ratio = change_norm / (prev_change_norm + 1e-8)
+            sigma_ratio = sigma_next_val / (sigma_val + 1e-8)
+            excess = change_ratio / (sigma_ratio + 1e-8)
+            excess_samples.append(excess)
+
+            print(f"   Step {step_idx}/{total_steps}: σ={sigma_val:.4f} | change={change_norm:.2f} prev={prev_change_norm:.2f} ratio={change_ratio:.3f} σ_ratio={sigma_ratio:.3f} excess={excess:.3f} [warmup {len(excess_samples)}/{warmup}]")
+
+            if len(excess_samples) >= warmup:
+                adaptive_correction, median_excess = compute_adaptive_noise_scale(
+                    excess_samples, effective_s_noise
+                )
+                print(f"   >> Adaptive calibration complete: median_excess={median_excess:.3f} → correction={adaptive_correction:.3f}")
+                should_restart = True
+        else:
+            print(f"   Step {step_idx}/{total_steps}: σ={sigma_val:.4f} | change={'N/A' if change_norm is None else f'{change_norm:.2f}'} (collecting...)")
+
+    return effective_s_noise, change_norm, adaptive_correction, should_restart
 
 
 def compute_native_detail_boost(progress, ndb_strength=0.0):
@@ -1888,6 +2006,11 @@ class AdeptSamplerForge(scripts.Script):
                                     value=False,
                                     info="Adjusts noise by phase."
                                 )
+                                self.adept_ancestral_adaptive_noise = gr.Checkbox(
+                                    label='Adaptive Noise Scale',
+                                    value=False,
+                                    info="Auto-adjusts s_noise based on model behavior"
+                                )
 
                             with gr.Group(visible=False) as phase_strength_group:
                                 self.adept_ancestral_phase_strength = gr.Slider(
@@ -1971,12 +2094,6 @@ class AdeptSamplerForge(scripts.Script):
                                     minimum=0.0, maximum=1.0, value=0.0, step=0.05,
                                     info="Enhances detail at native res (0=off)"
                                 )
-                                self.akashic_eqvae_mode = gr.Dropdown(
-                                    label='EQ-VAE Mode',
-                                    choices=['Off', 'Balanced'],
-                                    value='Off',
-                                    info="Optimized for EQ-VAE's cleaner latents"
-                                )
 
 
 
@@ -2051,6 +2168,11 @@ class AdeptSamplerForge(scripts.Script):
                                     value=False,
                                     info="Use log-sigma decay instead of binary cutoff. Blends correction "
                                          "strength with gradient stability — best for EQ-VAE smooth latents."
+                                )
+                                self.mirror_correction_adaptive_noise = gr.Checkbox(
+                                    label='Adaptive Noise Scale',
+                                    value=False,
+                                    info="Auto-adjusts s_noise based on model behavior"
                                 )
 
                         def on_solver_type_change(solver_type):
@@ -2266,6 +2388,7 @@ class AdeptSamplerForge(scripts.Script):
             (self.adept_ancestral_phase_noise, lambda p: str(p.get('adept_ancestral_phase_noise', 'false')).lower() == 'true' if 'adept_ancestral_phase_noise' in p else gr.update()),
             (self.adept_ancestral_phase_strength, lambda p: gr.update() if p.get('adept_ancestral_phase_strength') in (None, 'N/A') else float(p['adept_ancestral_phase_strength'])),
             (self.adept_ancestral_enhanced_derivative, lambda p: str(p.get('adept_ancestral_enhanced_derivative', 'false')).lower() == 'true' if 'adept_ancestral_enhanced_derivative' in p else gr.update()),
+            (self.adept_ancestral_adaptive_noise, lambda p: str(p.get('adept_ancestral_adaptive_noise', 'false')).lower() == 'true' if 'adept_ancestral_adaptive_noise' in p else gr.update()),
             # Stochastic scheduler settings
             (self.stochastic_noise_type, lambda p: p.get('stochastic_noise_type', 'brownian') if 'stochastic_noise_type' in p else gr.update()),
             (self.stochastic_noise_scale, lambda p: gr.update() if p.get('stochastic_noise_scale') in (None, 'N/A') else float(p['stochastic_noise_scale'])),
@@ -2285,7 +2408,9 @@ class AdeptSamplerForge(scripts.Script):
             (self.mirror_correction_euler_s_noise, lambda p: gr.update() if p.get('mirror_correction_euler_s_noise') in (None, 'N/A') else float(p['mirror_correction_euler_s_noise'])),
             (self.mirror_correction_euler_phase, lambda p: gr.update() if p.get('mirror_correction_euler_phase') in (None, 'N/A') else float(p['mirror_correction_euler_phase'])),
             (self.mirror_correction_euler_smooth_phase, lambda p: str(p.get('mirror_correction_euler_smooth_phase', 'false')).lower() == 'true' if 'mirror_correction_euler_smooth_phase' in p else gr.update()),
-            (self.akashic_eqvae_mode, lambda p: p.get('akashic_eqvae_mode', 'Off') if 'akashic_eqvae_mode' in p else gr.update()),
+            (self.mirror_correction_adaptive_noise, lambda p: str(p.get('mirror_correction_adaptive_noise', 'false')).lower() == 'true' if 'mirror_correction_adaptive_noise' in p else gr.update()),
+            # EQ-VAE Mode fallback: old metadata with Balanced → set Noise Scale to 0.9
+            (self.akashic_s_noise, lambda p: 0.9 if p.get('akashic_eqvae_mode') == 'Balanced' else gr.update()),
             # Additional CFG Fixes settings
             (self.akashic_spectral_mod, lambda p: str(p.get('akashic_spectral_mod', 'false')).lower() == 'true' if 'akashic_spectral_mod' in p else gr.update()),
             (self.akashic_spectral_percentile, lambda p: gr.update() if p.get('akashic_spectral_percentile') in (None, 'N/A') else float(p['akashic_spectral_percentile'])),
@@ -2330,13 +2455,12 @@ class AdeptSamplerForge(scripts.Script):
             self.exp_cfg_to_zero,
             self.solver_type, self.adept_solver_order, self.adept_solver_use_corrector,
             self.adept_ancestral_eta, self.adept_ancestral_s_noise,
-            self.adept_ancestral_adaptive_eta, self.adept_ancestral_phase_noise, self.adept_ancestral_phase_strength, self.adept_ancestral_enhanced_derivative,
+            self.adept_ancestral_adaptive_eta, self.adept_ancestral_phase_noise, self.adept_ancestral_phase_strength, self.adept_ancestral_enhanced_derivative, self.adept_ancestral_adaptive_noise,
             self.mirror_correction_euler_eta, self.mirror_correction_euler_s_noise, self.mirror_correction_euler_phase,
-            self.mirror_correction_euler_smooth_phase,
+            self.mirror_correction_euler_smooth_phase, self.mirror_correction_adaptive_noise,
             self.akashic_tau, self.akashic_solver_order, self.akashic_base_eta, self.akashic_s_noise,
             self.akashic_adaptive_eta, self.akashic_adaptive_noise, self.akashic_use_ays, self.akashic_phase_strength, self.akashic_smea_strength,
             self.akashic_ndb_strength,
-            self.akashic_eqvae_mode,
             # Additional CFG Fixes settings
             self.akashic_spectral_mod,
             self.akashic_spectral_percentile,
@@ -2361,12 +2485,12 @@ class AdeptSamplerForge(scripts.Script):
             exp_cfg_to_zero,
             solver_type, adept_solver_order, adept_solver_use_corrector,
             adept_ancestral_eta, adept_ancestral_s_noise,
-            adept_ancestral_adaptive_eta, adept_ancestral_phase_noise, adept_ancestral_phase_strength, adept_ancestral_enhanced_derivative,
+            adept_ancestral_adaptive_eta, adept_ancestral_phase_noise, adept_ancestral_phase_strength, adept_ancestral_enhanced_derivative, adept_ancestral_adaptive_noise,
             mirror_correction_euler_eta, mirror_correction_euler_s_noise, mirror_correction_euler_phase,
-            mirror_correction_euler_smooth_phase,
+            mirror_correction_euler_smooth_phase, mirror_correction_adaptive_noise,
             akashic_tau, akashic_solver_order, akashic_base_eta, akashic_s_noise,
             akashic_adaptive_eta, akashic_adaptive_noise, akashic_use_ays, akashic_phase_strength, akashic_smea_strength,
-            akashic_ndb_strength, akashic_eqvae_mode,
+            akashic_ndb_strength,
             # Additional CFG Fixes settings
             akashic_spectral_mod, akashic_spectral_percentile,
             akashic_combat_cfg_drift, akashic_combat_drift_intensity,
@@ -2444,6 +2568,8 @@ class AdeptSamplerForge(scripts.Script):
                     adept_ancestral_phase_strength = 0.5
             if "adept_ancestral_enhanced_derivative" in xyz:
                 adept_ancestral_enhanced_derivative = str(xyz["adept_ancestral_enhanced_derivative"]) == "True"
+            if "adept_ancestral_adaptive_noise" in xyz:
+                adept_ancestral_adaptive_noise = str(xyz["adept_ancestral_adaptive_noise"]) == "True"
             # AkashicSolver XYZ overrides
             if "akashic_tau" in xyz:
                 try: akashic_tau = float(xyz["akashic_tau"])
@@ -2480,8 +2606,8 @@ class AdeptSamplerForge(scripts.Script):
                 mirror_correction_euler_phase = float(xyz["mirror_correction_euler_phase"])
             if "mirror_correction_euler_smooth_phase" in xyz:
                 mirror_correction_euler_smooth_phase = str(xyz["mirror_correction_euler_smooth_phase"]) == "True"
-            if "akashic_eqvae_mode" in xyz:
-                akashic_eqvae_mode = str(xyz["akashic_eqvae_mode"])
+            if "mirror_correction_adaptive_noise" in xyz:
+                mirror_correction_adaptive_noise = str(xyz["mirror_correction_adaptive_noise"]) == "True"
             # Additional CFG Fixes XYZ overrides
             if "akashic_spectral_mod" in xyz:
                 akashic_spectral_mod = str(xyz["akashic_spectral_mod"]) == "True"
@@ -2597,12 +2723,14 @@ class AdeptSamplerForge(scripts.Script):
             'adept_ancestral_phase_noise': adept_ancestral_phase_noise,
             'adept_ancestral_phase_strength': adept_ancestral_phase_strength,
             'adept_ancestral_enhanced_derivative': adept_ancestral_enhanced_derivative,
+            'adept_ancestral_adaptive_noise': adept_ancestral_adaptive_noise,
             # Mirror Correction Euler settings
             'use_mirror_correction_euler': use_mirror_correction_euler and enable_custom,
             'mirror_correction_euler_eta': mirror_correction_euler_eta,
             'mirror_correction_euler_s_noise': mirror_correction_euler_s_noise,
             'mirror_correction_euler_phase': mirror_correction_euler_phase,
             'mirror_correction_euler_smooth_phase': mirror_correction_euler_smooth_phase,
+            'mirror_correction_adaptive_noise': mirror_correction_adaptive_noise,
             # AkashicSolver v2 settings
             'use_akashic_solver': use_akashic_solver and enable_custom,
             'use_akashic_aos': use_akashic_aos,
@@ -2616,7 +2744,6 @@ class AdeptSamplerForge(scripts.Script):
             'akashic_phase_strength': akashic_phase_strength,
             'akashic_smea_strength': akashic_smea_strength,
             'akashic_ndb_strength': akashic_ndb_strength,
-            'akashic_eqvae_mode': akashic_eqvae_mode,
             # CFG Enhancement settings
             'akashic_spectral_mod': akashic_spectral_mod,
             'akashic_spectral_percentile': akashic_spectral_percentile,
@@ -2690,6 +2817,7 @@ class AdeptSamplerForge(scripts.Script):
                 'adept_ancestral_phase_noise': adept_ancestral_phase_noise if use_adept_ancestral_solver else False,
                 'adept_ancestral_phase_strength': adept_ancestral_phase_strength if use_adept_ancestral_solver else 0.5,
                 'adept_ancestral_enhanced_derivative': adept_ancestral_enhanced_derivative if use_adept_ancestral_solver else False,
+                'adept_ancestral_adaptive_noise': adept_ancestral_adaptive_noise if use_adept_ancestral_solver else False,
                 # Stochastic scheduler settings
                 'stochastic_noise_type': stochastic_noise_type if custom_scheduler_type == 'Stochastic' else 'N/A',
                 'stochastic_noise_scale': stochastic_noise_scale if custom_scheduler_type == 'Stochastic' else 'N/A',
@@ -2709,7 +2837,7 @@ class AdeptSamplerForge(scripts.Script):
                 'mirror_correction_euler_s_noise': mirror_correction_euler_s_noise if use_mirror_correction_euler else 'N/A',
                 'mirror_correction_euler_phase': mirror_correction_euler_phase if use_mirror_correction_euler else 'N/A',
                 'mirror_correction_euler_smooth_phase': mirror_correction_euler_smooth_phase if use_mirror_correction_euler else 'N/A',
-                'akashic_eqvae_mode': akashic_eqvae_mode if use_akashic_solver else 'N/A',
+                'mirror_correction_adaptive_noise': mirror_correction_adaptive_noise if use_mirror_correction_euler else 'N/A',
                 # Additional CFG Fixes parameters
                 'akashic_spectral_mod': akashic_spectral_mod if use_akashic_solver else False,
                 'akashic_combat_cfg_drift': akashic_combat_cfg_drift if use_akashic_solver else False,
@@ -4123,9 +4251,6 @@ def set_value(p, x: Any, xs: Any, *, field: str):
                      "vae_reflection"):
             # Boolean fields
             x = str(x).strip().lower() == "true"
-        elif field == "akashic_eqvae_mode":
-            # String dropdown field
-            x = str(x) if x in ("Off", "Balanced") else "Off"
         elif field in ("eta", "s_noise", "entropic_scheduler_power", "detail_enhancement_strength",
                        "detail_separation_radius", "pacing_coherence_sensitivity",
                        "adept_ancestral_eta", "adept_ancestral_s_noise", "adept_ancestral_phase_strength", 
@@ -4346,12 +4471,6 @@ def make_axis_on_xyz_grid():
             "(Adept) Mirror Correction Euler Noise Scale",
             float,
             partial(set_value, field="mirror_correction_euler_s_noise"),
-        ),
-        xyz_grid.AxisOption(
-            "(Adept) Akashic EQ-VAE Mode",
-            str,
-            partial(set_value, field="akashic_eqvae_mode"),
-            choices=lambda: ["Off", "Balanced"],
         ),
         xyz_grid.AxisOption(
             "(Adept) VAE Reflection",
