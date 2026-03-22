@@ -595,6 +595,8 @@ def sample_mirror_correction_euler(model, x, sigmas, extra_args=None, callback=N
     prev_change_norm = None
     excess_samples = []
     adaptive_correction = None
+    excess_bins = {'structural': [], 'texture': [], 'cleanup': []} if adaptive_noise_enabled else None
+    adaptive_bin_corrections = None
     x_initial = x.clone() if adaptive_noise_enabled else None
     if adaptive_noise_enabled:
         print(f"   Adaptive Noise: ON (auto-adjusting s_noise per step)")
@@ -666,16 +668,18 @@ def sample_mirror_correction_euler(model, x, sigmas, extra_args=None, callback=N
         # Adaptive noise: compute effective s_noise
         effective_s_noise = s_noise
         if adaptive_noise_enabled:
-            effective_s_noise, change_norm, adaptive_correction, should_restart = adaptive_noise_step(
+            effective_s_noise, change_norm, adaptive_correction, should_restart, adaptive_bin_corrections = adaptive_noise_step(
                 denoised_raw, prev_denoised_raw, prev_change_norm,
                 sigma, sigma_next, excess_samples, adaptive_correction,
-                effective_s_noise, i, n_steps
+                effective_s_noise, i, n_steps,
+                binned_enabled=True, excess_bins=excess_bins,
+                adaptive_bin_corrections=adaptive_bin_corrections
             )
             if should_restart and x_initial is not None:
-                print(f"   🔄 Restarting generation with corrected s_noise...")
                 x = x_initial.clone()
                 prev_denoised_raw = None
                 prev_change_norm = None
+                excess_bins = {'structural': [], 'texture': [], 'cleanup': []}
                 x_initial = None
                 i = 0
                 continue
@@ -740,6 +744,8 @@ def sample_adept_ancestral_solver(model, x, sigmas, extra_args=None, callback=No
     prev_change_norm = None
     excess_samples = []
     adaptive_correction = None
+    excess_bins = {'structural': [], 'texture': [], 'cleanup': []} if adaptive_noise_enabled else None
+    adaptive_bin_corrections = None
     n_steps = len(sigmas) - 1
     x_initial = x.clone() if adaptive_noise_enabled else None
 
@@ -833,17 +839,19 @@ def sample_adept_ancestral_solver(model, x, sigmas, extra_args=None, callback=No
 
             # Adaptive noise: modulate final s_noise
             if adaptive_noise_enabled:
-                adaptive_s_noise, change_norm, adaptive_correction, should_restart = adaptive_noise_step(
+                adaptive_s_noise, change_norm, adaptive_correction, should_restart, adaptive_bin_corrections = adaptive_noise_step(
                     denoised_raw, prev_denoised_raw, prev_change_norm,
                     sigma, sigma_next, excess_samples, adaptive_correction,
-                    adaptive_s_noise, i, n_steps
+                    adaptive_s_noise, i, n_steps,
+                    binned_enabled=True, excess_bins=excess_bins,
+                    adaptive_bin_corrections=adaptive_bin_corrections
                 )
                 if should_restart and x_initial is not None:
-                    print(f"   🔄 Restarting generation with corrected s_noise...")
                     x = x_initial.clone()
                     model_outputs = []
                     prev_denoised_raw = None
                     prev_change_norm = None
+                    excess_bins = {'structural': [], 'texture': [], 'cleanup': []}
                     x_initial = None
                     i = 0
                     continue
@@ -948,6 +956,7 @@ def sample_akashic_solver(model, x, sigmas, extra_args=None, callback=None,
     smea_strength = current_sampler_settings.get('akashic_smea_strength', 0.0)
     ndb_strength = current_sampler_settings.get('akashic_ndb_strength', 0.0)
     adaptive_noise_enabled = current_sampler_settings.get('akashic_adaptive_noise', False)
+    adaptive_noise_binned = adaptive_noise_enabled  # Always use phase-binned correction
 
     # Get Additional CFG Fixes settings
     cfg_settings = {
@@ -995,6 +1004,8 @@ def sample_akashic_solver(model, x, sigmas, extra_args=None, callback=None,
     prev_change_norm = None
     excess_samples = []          # Sigma-relative excess ratios collected during warmup
     adaptive_correction = None   # Global correction factor (set after warmup)
+    excess_bins = {'structural': [], 'texture': [], 'cleanup': []} if adaptive_noise_binned else None
+    adaptive_bin_corrections = None
     ADAPTIVE_WARMUP = 5          # Texture-phase samples needed before calibrating
 
     # Save initial state — if adaptive noise calibrates a correction, we restart from scratch
@@ -1096,7 +1107,7 @@ def sample_akashic_solver(model, x, sigmas, extra_args=None, callback=None,
         # === ADAPTIVE NOISE SCALE (final multiplier) ===
         # Compute prediction change magnitude from raw model outputs
         if adaptive_noise_enabled and prev_denoised_raw is not None:
-            change_norm = torch.norm(denoised_raw - prev_denoised_raw).item()
+            change_norm = torch.norm((denoised_raw - prev_denoised_raw).flatten(1), dim=1).mean().item()
         else:
             change_norm = None
 
@@ -1106,37 +1117,59 @@ def sample_akashic_solver(model, x, sigmas, extra_args=None, callback=None,
             in_texture_phase = 0.5 < sigma_val < 5.0
 
             if adaptive_correction is not None:
-                # Post-warmup: apply calibrated correction to all remaining steps
-                effective_s_noise *= adaptive_correction
-                print(f"   Step {i}/{total_steps}: σ={sigma_val:.4f} → s_noise={effective_s_noise:.3f} (correction={adaptive_correction:.3f})")
+                # Post-restart: apply calibrated correction
+                if adaptive_noise_binned and adaptive_bin_corrections is not None:
+                    correction = get_phase_correction(sigma_val, adaptive_bin_corrections, adaptive_correction)
+                    effective_s_noise *= correction
+                else:
+                    effective_s_noise *= adaptive_correction
 
-            elif in_texture_phase and change_norm is not None and prev_change_norm is not None:
+            elif change_norm is not None and prev_change_norm is not None:
                 # Warmup: collect sigma-relative excess samples
                 change_ratio = change_norm / (prev_change_norm + 1e-8)
                 sigma_ratio = sigma_next_val / (sigma_val + 1e-8)
                 excess = change_ratio / (sigma_ratio + 1e-8)
-                excess_samples.append(excess)
 
-                print(f"   Step {i}/{total_steps}: σ={sigma_val:.4f} | change={change_norm:.2f} prev={prev_change_norm:.2f} ratio={change_ratio:.3f} σ_ratio={sigma_ratio:.3f} excess={excess:.3f} [warmup {len(excess_samples)}/{ADAPTIVE_WARMUP}]")
+                # Bin the excess sample by sigma phase
+                if adaptive_noise_binned and excess_bins is not None:
+                    if sigma_val > 5.0:
+                        excess_bins['structural'].append(excess)
+                    elif sigma_val > 0.5:
+                        excess_bins['texture'].append(excess)
+                    else:
+                        excess_bins['cleanup'].append(excess)
 
-                if len(excess_samples) >= ADAPTIVE_WARMUP:
-                    adaptive_correction, median_excess = compute_adaptive_noise_scale(
-                        excess_samples, effective_s_noise
-                    )
-                    print(f"   >> Adaptive calibration complete: median_excess={median_excess:.3f} → correction={adaptive_correction:.3f}")
-                    # Restart generation with correction applied from step 0
-                    if x_initial is not None:
-                        print(f"   🔄 Restarting generation with corrected s_noise...")
-                        x = x_initial.clone()
-                        d_history = []
-                        prev_denoised_raw = None
-                        prev_change_norm = None
-                        x_initial = None  # Prevent double restart
-                        i = 0
-                        continue
-                    effective_s_noise *= adaptive_correction
+                # Texture-phase samples drive the warmup trigger
+                if in_texture_phase:
+                    excess_samples.append(excess)
+
+                    if len(excess_samples) >= ADAPTIVE_WARMUP:
+                        adaptive_correction, median_excess = compute_adaptive_noise_scale(
+                            excess_samples, effective_s_noise
+                        )
+                        if adaptive_noise_binned and excess_bins is not None:
+                            adaptive_bin_corrections = compute_binned_corrections(
+                                excess_bins, adaptive_correction
+                            )
+                            bin_info = {k: f"{v:.3f}" for k, v in adaptive_bin_corrections.items()}
+                            print(f"   Adaptive Noise calibrated: global={adaptive_correction:.3f}, binned={bin_info}")
+                        else:
+                            print(f"   Adaptive Noise calibrated: correction={adaptive_correction:.3f}")
+                        # Restart generation with correction applied from step 0
+                        if x_initial is not None:
+                            x = x_initial.clone()
+                            d_history = []
+                            prev_denoised_raw = None
+                            prev_change_norm = None
+                            excess_bins = {'structural': [], 'texture': [], 'cleanup': []} if adaptive_noise_binned else None
+                            x_initial = None  # Prevent double restart
+                            i = 0
+                            continue
+                        effective_s_noise *= adaptive_correction
+                else:
+                    pass  # Non-texture phase, silently collecting
             else:
-                print(f"   Step {i}/{total_steps}: σ={sigma_val:.4f} | change={'N/A' if change_norm is None else f'{change_norm:.2f}'} (collecting...)")
+                pass  # Waiting for first comparison pair
 
         # Execute SA-Solver step
         x, sigma_up = sa_solver_step(
@@ -1683,21 +1716,61 @@ def compute_adaptive_noise_scale(excess_samples, base_s_noise,
     return correction, median_excess
 
 
+def compute_binned_corrections(excess_bins, global_correction,
+                                correction_power=0.5, dampen_floor=0.80,
+                                boost_ceiling=1.15, min_samples=3):
+    """
+    Compute per-phase corrections from binned excess samples.
+
+    Bins with fewer than min_samples fall back to the global correction.
+
+    Returns:
+        Dict mapping bin name to correction factor.
+    """
+    bin_corrections = {}
+    for bin_name, samples in excess_bins.items():
+        if len(samples) >= min_samples:
+            correction, _ = compute_adaptive_noise_scale(
+                samples, 1.0, correction_power, dampen_floor, boost_ceiling
+            )
+            bin_corrections[bin_name] = correction
+        else:
+            bin_corrections[bin_name] = global_correction
+    return bin_corrections
+
+
+def get_phase_correction(sigma_val, bin_corrections, global_correction):
+    """Look up the appropriate correction for the current sigma phase."""
+    if bin_corrections is None:
+        return global_correction
+    if sigma_val > 5.0:
+        return bin_corrections.get('structural', global_correction)
+    elif sigma_val > 0.5:
+        return bin_corrections.get('texture', global_correction)
+    else:
+        return bin_corrections.get('cleanup', global_correction)
+
+
 def adaptive_noise_step(denoised_raw, prev_denoised_raw, prev_change_norm,
                         sigma, sigma_next, excess_samples, adaptive_correction,
-                        base_s_noise, step_idx, total_steps, warmup=5):
+                        base_s_noise, step_idx, total_steps, warmup=5,
+                        binned_enabled=False, excess_bins=None,
+                        adaptive_bin_corrections=None):
     """
     Process one step of adaptive noise calibration.
 
     Call after getting raw model output and before noise injection.
     Handles warmup collection, calibration trigger, and correction application.
+    When binned_enabled=True, also collects excess into phase bins and computes
+    per-phase corrections at calibration time.
 
     Returns:
-        (effective_s_noise, change_norm, adaptive_correction, should_restart)
+        (effective_s_noise, change_norm, adaptive_correction, should_restart,
+         adaptive_bin_corrections)
     """
     # Compute prediction change magnitude
     if prev_denoised_raw is not None:
-        change_norm = torch.norm(denoised_raw - prev_denoised_raw).item()
+        change_norm = torch.norm((denoised_raw - prev_denoised_raw).flatten(1), dim=1).mean().item()
     else:
         change_norm = None
 
@@ -1710,26 +1783,49 @@ def adaptive_noise_step(denoised_raw, prev_denoised_raw, prev_change_norm,
         in_texture_phase = 0.5 < sigma_val < 5.0
 
         if adaptive_correction is not None:
-            effective_s_noise *= adaptive_correction
-            print(f"   Step {step_idx}/{total_steps}: σ={sigma_val:.4f} → s_noise={effective_s_noise:.3f} (correction={adaptive_correction:.3f})")
-        elif in_texture_phase and change_norm is not None and prev_change_norm is not None:
+            # Post-restart: apply correction
+            if binned_enabled and adaptive_bin_corrections is not None:
+                correction = get_phase_correction(sigma_val, adaptive_bin_corrections, adaptive_correction)
+                effective_s_noise *= correction
+            else:
+                effective_s_noise *= adaptive_correction
+        elif change_norm is not None and prev_change_norm is not None:
             change_ratio = change_norm / (prev_change_norm + 1e-8)
             sigma_ratio = sigma_next_val / (sigma_val + 1e-8)
             excess = change_ratio / (sigma_ratio + 1e-8)
-            excess_samples.append(excess)
 
-            print(f"   Step {step_idx}/{total_steps}: σ={sigma_val:.4f} | change={change_norm:.2f} prev={prev_change_norm:.2f} ratio={change_ratio:.3f} σ_ratio={sigma_ratio:.3f} excess={excess:.3f} [warmup {len(excess_samples)}/{warmup}]")
+            # Bin the excess sample by sigma phase
+            if binned_enabled and excess_bins is not None:
+                if sigma_val > 5.0:
+                    excess_bins['structural'].append(excess)
+                elif sigma_val > 0.5:
+                    excess_bins['texture'].append(excess)
+                else:
+                    excess_bins['cleanup'].append(excess)
 
-            if len(excess_samples) >= warmup:
-                adaptive_correction, median_excess = compute_adaptive_noise_scale(
-                    excess_samples, effective_s_noise
-                )
-                print(f"   >> Adaptive calibration complete: median_excess={median_excess:.3f} → correction={adaptive_correction:.3f}")
-                should_restart = True
+            # Texture-phase samples drive the warmup trigger
+            if in_texture_phase:
+                excess_samples.append(excess)
+
+                if len(excess_samples) >= warmup:
+                    adaptive_correction, median_excess = compute_adaptive_noise_scale(
+                        excess_samples, effective_s_noise
+                    )
+                    if binned_enabled and excess_bins is not None:
+                        adaptive_bin_corrections = compute_binned_corrections(
+                            excess_bins, adaptive_correction
+                        )
+                        bin_info = {k: f"{v:.3f}" for k, v in adaptive_bin_corrections.items()}
+                        print(f"   Adaptive Noise calibrated: global={adaptive_correction:.3f}, binned={bin_info}")
+                    else:
+                        print(f"   Adaptive Noise calibrated: correction={adaptive_correction:.3f}")
+                    should_restart = True
+            else:
+                pass  # Non-texture phase, silently collecting
         else:
-            print(f"   Step {step_idx}/{total_steps}: σ={sigma_val:.4f} | change={'N/A' if change_norm is None else f'{change_norm:.2f}'} (collecting...)")
+            pass  # Waiting for first comparison pair
 
-    return effective_s_noise, change_norm, adaptive_correction, should_restart
+    return effective_s_noise, change_norm, adaptive_correction, should_restart, adaptive_bin_corrections
 
 
 def compute_native_detail_boost(progress, ndb_strength=0.0):
@@ -2075,7 +2171,7 @@ class AdeptSamplerForge(scripts.Script):
                                     value=False,
                                     info="Auto-adjusts s_noise based on model behavior"
                                 )
-                            
+
                             with gr.Row():
                                 self.akashic_phase_strength = gr.Slider(
                                     label='Phase Strength',
