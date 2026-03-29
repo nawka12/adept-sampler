@@ -3599,14 +3599,17 @@ class AdeptSamplerForge(scripts.Script):
 
     def create_akashic_eqflow_sigmas(self, sigma_max, sigma_min, num_steps, device='cpu'):
         """
-        AkashicEQFlow: robust crossover-focused log-SNR schedule for EQ-VAE models.
+        AkashicEQFlow: crossover-focused log-SNR schedule for EQ-VAE models.
 
-        Robust formulation:
-        - Milder crossover concentration for high-step stability
-        - Adaptive width with higher minimum floor (avoid narrow spikes)
-        - Asymmetric but restrained detail-side emphasis
-        - Hybrid blend with Karras prior in lambda space
-        - Ratio cap + ratio slew-rate limiting for multi-step stability
+        Concentrates steps around the structure-to-detail transition (logSNR ≈ 0)
+        where diffusion models make their most consequential decisions. Uses CDF
+        inversion of a smooth density function — the density's continuity inherently
+        produces smooth step ratios without post-hoc clamping.
+
+        Distinct from AkashicAOS: AkashicAOS warps a Karras ramp with a power
+        function (detail-progressive bias). EQFlow constructs step placement from
+        scratch via a crossover-peaked density in logSNR space, giving it a
+        fundamentally different step distribution profile.
         """
         if num_steps <= 0:
             return torch.zeros(1, device=device)
@@ -3616,46 +3619,34 @@ class AdeptSamplerForge(scripts.Script):
         lambda_max = -2.0 * math.log(max(float(sigma_min), 1e-10))  # cleanest
         lambda_range = max(lambda_max - lambda_min, 1e-8)
 
-        # === ADAPTIVE CENTER SHIFT (MILD) ===
-        # Keep center near crossover with a conservative detailward shift.
-        # This avoids over-pulling steps from either tail at high step counts.
+        # === ADAPTIVE CENTER ===
         step_factor = min(1.0, max(0.0, (num_steps - 16) / 30.0))
         lambda_center = 0.20 + 0.15 * step_factor
         u_center = (lambda_center - lambda_min) / lambda_range
         u_center = float(min(0.88, max(0.12, u_center)))
 
-        # === ADAPTIVE SHAPE (ROBUST) ===
-        # Use gentler concentration and a wider minimum width floor. The target
-        # is to preserve crossover benefits while keeping adjacent ratios smooth.
-        concentration = min(3.2, max(1.35, 1.1 + num_steps / 16.0))
-        base_width = min(0.30, max(0.18, 0.31 - 0.0028 * num_steps))
+        # === DENSITY CONSTRUCTION ===
+        # Gentle concentration + wide width = smooth density = smooth ratios.
+        # No post-hoc ratio clamping needed.
+        concentration = min(2.2, max(1.0, 0.8 + num_steps / 20.0))
+        base_width = min(0.38, max(0.22, 0.40 - 0.003 * num_steps))
 
-        # Asymmetry is retained but restrained to improve stability.
-        width_left = base_width * 1.06
-        width_right = base_width * 0.94
-        detail_side_gain = 1.08 + 0.04 * step_factor
-
-        # === CDF INVERSION WITH ASYMMETRIC DENSITY ===
-        N = 1200
+        N = 400
         t = torch.linspace(0, 1, N, device=device)
         delta = t - u_center
-        left_core = torch.exp(-((delta / width_left) ** 2) / 2.0)
-        right_core = detail_side_gain * torch.exp(-((delta / width_right) ** 2) / 2.0)
-        crossover_core = torch.where(delta <= 0, left_core, right_core)
+        crossover_core = torch.exp(-((delta / base_width) ** 2) / 2.0)
 
-        # Keep both tails alive so crossover concentration never starves early
-        # composition or late refinement.
-        detail_floor = 0.08 * (t ** 1.4)
-        composition_floor = 0.05 * ((1 - t) ** 1.7)
+        # Tail floors keep composition and detail regions populated
+        detail_floor = 0.15 * (t ** 1.2)
+        composition_floor = 0.10 * ((1 - t) ** 1.5)
         density = 1.0 + concentration * crossover_core + detail_floor + composition_floor
 
-        # Trapezoidal CDF
-        dt = 1.0 / (N - 1)
+        # === CDF INVERSION ===
+        dt_cdf = 1.0 / (N - 1)
         cdf = torch.zeros(N, device=device)
-        cdf[1:] = torch.cumsum((density[:-1] + density[1:]) * 0.5 * dt, dim=0)
+        cdf[1:] = torch.cumsum((density[:-1] + density[1:]) * 0.5 * dt_cdf, dim=0)
         cdf = cdf / cdf[-1].clamp(min=1e-12)
 
-        # Invert CDF
         targets = torch.linspace(0, 1, num_steps, device=device)
         indices = torch.searchsorted(cdf, targets).clamp(1, N - 1)
         lo = indices - 1
@@ -3663,50 +3654,18 @@ class AdeptSamplerForge(scripts.Script):
         frac = (targets - cdf[lo]) / (cdf[hi] - cdf[lo]).clamp(min=1e-12)
         u_steps = t[lo] + frac * (t[hi] - t[lo])
 
-        # === LOG-SNR -> SIGMA (WITH KARRAS PRIOR BLEND) ===
-        # Blend EQFlow crossover placement with a Karras baseline to improve
-        # high-step robustness under multi-step integration.
-        lambdas_eqflow = lambda_min + u_steps * lambda_range
-
-        rho = min(10.0, max(7.0, 7.0 + 1.5 * (22.0 / max(num_steps, 12))))
-        u_karras = torch.linspace(0, 1, num_steps, device=device)
-        min_inv_rho = sigma_min ** (1 / rho)
-        max_inv_rho = sigma_max ** (1 / rho)
-        sigmas_karras = (max_inv_rho + u_karras * (min_inv_rho - max_inv_rho)) ** rho
-        lambdas_karras = -2.0 * torch.log(sigmas_karras.clamp(min=1e-10))
-
-        # Higher blend at higher steps: keep EQFlow character while inheriting
-        # Karras regularity where long trajectories are most fragile.
-        blend_eqflow = min(0.60, max(0.35, 0.38 + num_steps / 200.0))
-        lambdas = (1.0 - blend_eqflow) * lambdas_karras + blend_eqflow * lambdas_eqflow
+        # === LOG-SNR -> SIGMA ===
+        lambdas = lambda_min + u_steps * lambda_range
         sigmas = torch.exp(-lambdas / 2.0)
 
-        # === STABILITY SAFETY ===
-        # Ratio cap plus slew-rate limiting keeps adjacent ratio changes smooth,
-        # which is critical for robust AB multi-step coefficients.
-        if num_steps >= 40:
-            max_ratio = 1.50
-        elif num_steps >= 28:
-            max_ratio = 1.55
-        elif num_steps >= 18:
-            max_ratio = 1.65
-        else:
-            max_ratio = 1.85
-        ratio_slew = 1.18
-        prev_ratio = None
-
+        # Force exact endpoints
         sigmas[0] = sigma_max
+        sigmas[-1] = sigma_min
+
+        # Monotonicity guarantee (rarely needed — density smoothness handles this)
         for i in range(1, len(sigmas)):
             if sigmas[i] >= sigmas[i - 1]:
                 sigmas[i] = sigmas[i - 1] * 0.995
-            ratio = float((sigmas[i - 1] / sigmas[i].clamp(min=1e-10)).item())
-            ratio = min(ratio, max_ratio)
-            if prev_ratio is not None:
-                ratio = min(ratio, prev_ratio * ratio_slew)
-                ratio = max(ratio, prev_ratio / ratio_slew)
-            ratio = max(1.001, ratio)
-            sigmas[i] = sigmas[i - 1] / ratio
-            prev_ratio = ratio
 
         return torch.cat([sigmas, torch.zeros(1, device=device)])
 
