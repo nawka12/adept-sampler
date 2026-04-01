@@ -4166,8 +4166,6 @@ def list_supported_schedulers():
         "None (use WebUI sampler schedule)",
         "Entropic",
         "SNR-Optimized",
-        "Constant-Rate",
-        "Adaptive-Optimized",
         "Cosine-Annealed",
         "LogSNR-Uniform",
         "Tanh Mid-Boost",
@@ -4175,10 +4173,7 @@ def list_supported_schedulers():
         "Jittered-Karras",
         "Hybrid JYS-Karras",
         "AYS-SDXL",
-        "Stochastic",
-        # JYS (Jump Your Steps) - Dynamic
-        "JYS (Dynamic)",
-        # AOS variants
+        # AOS variants (V/ε deprecated; prefer AkashicAOS family)
         "AOS-V (for v-prediction)",
         "AOS-ε (for ε-prediction)",
         "AkashicAOS",
@@ -4223,8 +4218,6 @@ def compute_custom_sigma_schedule(sigmas: torch.Tensor, scheduler_name: str, *, 
     mapping = {
         "Entropic": lambda: forge.create_entropic_sigmas(sigma_max, sigma_min, num_steps, entropic_power, device),
         "SNR-Optimized": lambda: forge.create_snr_optimized_sigmas(sigma_max, sigma_min, num_steps, device),
-        "Constant-Rate": lambda: forge.create_constant_rate_sigmas(sigma_max, sigma_min, num_steps, device),
-        "Adaptive-Optimized": lambda: forge.create_adaptive_optimized_sigmas(sigma_max, sigma_min, num_steps, device),
         "Cosine-Annealed": lambda: forge.create_cosine_sigmas(sigma_max, sigma_min, num_steps, device),
         "LogSNR-Uniform": lambda: forge.create_logsnr_uniform_sigmas(sigma_max, sigma_min, num_steps, device),
         "Tanh Mid-Boost": lambda: forge.create_tanh_midboost_sigmas(sigma_max, sigma_min, num_steps, device),
@@ -4232,13 +4225,6 @@ def compute_custom_sigma_schedule(sigmas: torch.Tensor, scheduler_name: str, *, 
         "Jittered-Karras": lambda: forge.create_jittered_karras_sigmas(sigma_max, sigma_min, num_steps, device),
         "Hybrid JYS-Karras": lambda: forge.create_hybrid_jys_karras_sigmas(sigma_max, sigma_min, num_steps, device),
         "AYS-SDXL": lambda: forge.create_ays_sdxl_sigmas(sigma_max, sigma_min, num_steps, device),
-        "Stochastic": lambda: forge.create_stochastic_sigmas(
-            sigma_max, sigma_min, num_steps, device,
-            current_sampler_settings.get('stochastic_noise_type', 'brownian'),
-            current_sampler_settings.get('stochastic_noise_scale', 0.3),
-            current_sampler_settings.get('stochastic_base_schedule', 'karras')
-        ),
-        "JYS (Dynamic)": lambda: forge.create_jys_sigmas(sigma_max, sigma_min, num_steps, device),
         "AOS-V (for v-prediction)": lambda: forge.create_aos_v_sigmas(sigma_max, sigma_min, num_steps, device),
         "AOS-ε (for ε-prediction)": lambda: forge.create_aos_e_sigmas(sigma_max, sigma_min, num_steps, device),
         "AkashicAOS": lambda: forge.create_aos_akashic_sigmas(sigma_max, sigma_min, num_steps, device),
