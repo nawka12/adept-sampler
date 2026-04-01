@@ -2291,8 +2291,7 @@ class AdeptSamplerForge(scripts.Script):
                         universal_choices = [
                             "None (use WebUI sampler schedule)",
                             "Entropic",
-                            "Constant-Rate",
-                            "Adaptive-Optimized",
+                            "SNR-Optimized",
                             "Cosine-Annealed",
                             "LogSNR-Uniform",
                             "Tanh Mid-Boost",
@@ -2300,12 +2299,9 @@ class AdeptSamplerForge(scripts.Script):
                             "Jittered-Karras",
                             "Hybrid JYS-Karras",
                             "AYS-SDXL",
-                            "Stochastic",
-                            "JYS (Dynamic)",
                         ]
                         vpred_choices = [
                             "AOS-V (for v-prediction)",
-                            "SNR-Optimized",
                         ]
                         eps_choices = [
                             "AOS-ε (for ε-prediction)",
@@ -2334,26 +2330,6 @@ class AdeptSamplerForge(scripts.Script):
                                 info="Controls timestep clustering. >1 clusters steps at the start (high detail)."
                             )
 
-                        with gr.Group(visible=False) as stochastic_options:
-                            self.stochastic_noise_type = gr.Dropdown(
-                                label='Noise Type',
-                                value='brownian',
-                                choices=['brownian', 'uniform', 'normal'],
-                                info="Type of randomness to inject into timestep selection."
-                            )
-                            self.stochastic_noise_scale = gr.Slider(
-                                label='Noise Scale',
-                                minimum=0.0, maximum=1.0,
-                                value=0.3, step=0.05,
-                                info="Amount of randomness (0.0 = deterministic, higher = more random)."
-                            )
-                            self.stochastic_base_schedule = gr.Dropdown(
-                                label='Base Schedule',
-                                value='karras',
-                                choices=['karras', 'uniform', 'cosine'],
-                                info="Base timestep distribution before adding randomness."
-                            )
-                        
 
 
                         with gr.Group(visible=False) as aos_plus_options:
@@ -2376,7 +2352,6 @@ class AdeptSamplerForge(scripts.Script):
                             return {
                                 aos_plus_options: gr.update(visible=is_aos),
                                 entropic_options: gr.update(visible=scheduler == "Entropic"),
-                                stochastic_options: gr.update(visible=scheduler == "Stochastic")
                             }
 
                         def on_category_change(category):
@@ -2385,33 +2360,30 @@ class AdeptSamplerForge(scripts.Script):
                                     self.scheduler_override: gr.update(choices=universal_choices, value="None (use WebUI sampler schedule)"),
                                     aos_plus_options: gr.update(visible=False),
                                     entropic_options: gr.update(visible=False),
-                                    stochastic_options: gr.update(visible=False),
                                 }
                             elif category == "V-Prediction":
                                 return {
                                     self.scheduler_override: gr.update(choices=vpred_choices, value="AOS-V (for v-prediction)"),
                                     aos_plus_options: gr.update(visible=True),
                                     entropic_options: gr.update(visible=False),
-                                    stochastic_options: gr.update(visible=False),
                                 }
                             else:
                                 return {
                                     self.scheduler_override: gr.update(choices=eps_choices, value="AOS-ε (for ε-prediction)"),
                                     aos_plus_options: gr.update(visible=True),
                                     entropic_options: gr.update(visible=False),
-                                    stochastic_options: gr.update(visible=False),
                                 }
 
                         self.scheduler_override.change(
                             on_scheduler_change,
                             inputs=[self.scheduler_override],
-                            outputs=[aos_plus_options, entropic_options, stochastic_options]
+                            outputs=[aos_plus_options, entropic_options]
                         )
 
                         self.scheduler_category.change(
                             on_category_change,
                             inputs=[self.scheduler_category],
-                            outputs=[self.scheduler_override, aos_plus_options, entropic_options, stochastic_options]
+                            outputs=[self.scheduler_override, aos_plus_options, entropic_options]
                         )
 
 
