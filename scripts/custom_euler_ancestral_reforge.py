@@ -3307,7 +3307,12 @@ class AdeptSamplerForge(scripts.Script):
             return simple_noise_sampler
 
     def create_aos_v_sigmas(self, sigma_max, sigma_min, num_steps, device='cpu'):
-        """Memory-efficient AOS-V schedule creation."""
+        """AOS-V schedule for v-prediction models.
+
+        Deprecated: prefer AkashicAOS or AkashicAOS Alt, which use a continuous
+        curve and avoid the phase-boundary step-size discontinuities present here.
+        Kept for backwards compatibility with saved settings.
+        """
         rho = 7.0
         
         p1_steps = int(num_steps * 0.2)
@@ -3336,7 +3341,12 @@ class AdeptSamplerForge(scripts.Script):
         return torch.cat([ramp, torch.zeros(1, device=device)])
 
     def create_aos_e_sigmas(self, sigma_max, sigma_min, num_steps, device='cpu'):
-        """Creates a three-phase noise schedule optimized for anime aesthetics on epsilon-prediction models."""
+        """AOS-ε schedule for epsilon-prediction models.
+
+        Deprecated: prefer AkashicAOS or AkashicAOS Alt, which use a continuous
+        curve and avoid the phase-boundary step-size discontinuities present here.
+        Kept for backwards compatibility with saved settings.
+        """
         rho = 7.0  # karras-ve rho, could be tuned (e.g., 6.0) for epsilon models
         
         # Epsilon model phases: longer foundation, gentler start
@@ -3667,7 +3677,7 @@ class AdeptSamplerForge(scripts.Script):
 
         return sigmas
 
-    def create_entropic_sigmas(self, sigma_max, sigma_min, num_steps, power=3.0, device='cpu'):
+    def create_entropic_sigmas(self, sigma_max, sigma_min, num_steps, power=6.0, device='cpu'):
         """Create sigmas based on an entropic-like power schedule."""
         rho = 7.0  # karras-ve rho
         
