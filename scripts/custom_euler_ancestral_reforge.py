@@ -2457,10 +2457,6 @@ class AdeptSamplerForge(scripts.Script):
             (self.adept_ancestral_phase_strength, lambda p: gr.update() if p.get('adept_ancestral_phase_strength') in (None, 'N/A') else float(p['adept_ancestral_phase_strength'])),
             (self.adept_ancestral_enhanced_derivative, lambda p: str(p.get('adept_ancestral_enhanced_derivative', 'false')).lower() == 'true' if 'adept_ancestral_enhanced_derivative' in p else gr.update()),
             (self.adept_ancestral_adaptive_noise, lambda p: str(p.get('adept_ancestral_adaptive_noise', 'false')).lower() == 'true' if 'adept_ancestral_adaptive_noise' in p else gr.update()),
-            # Stochastic scheduler settings
-            (self.stochastic_noise_type, lambda p: p.get('stochastic_noise_type', 'brownian') if 'stochastic_noise_type' in p else gr.update()),
-            (self.stochastic_noise_scale, lambda p: gr.update() if p.get('stochastic_noise_scale') in (None, 'N/A') else float(p['stochastic_noise_scale'])),
-            (self.stochastic_base_schedule, lambda p: p.get('stochastic_base_schedule', 'karras') if 'stochastic_base_schedule' in p else gr.update()),
             # AkashicSolver settings
             (self.akashic_tau, lambda p: gr.update() if p.get('akashic_tau') in (None, 'N/A') else float(p['akashic_tau'])),
             (self.akashic_solver_order, lambda p: gr.update() if p.get('akashic_solver_order') in (None, 'N/A') else int(p['akashic_solver_order'])),
@@ -2696,8 +2692,6 @@ class AdeptSamplerForge(scripts.Script):
         custom_scheduler_type = "None"
         if scheduler_override in [
             "SNR-Optimized",
-            "Constant-Rate",
-            "Adaptive-Optimized",
             "Cosine-Annealed",
             "LogSNR-Uniform",
             "Tanh Mid-Boost",
@@ -2705,8 +2699,6 @@ class AdeptSamplerForge(scripts.Script):
             "Jittered-Karras",
             "Hybrid JYS-Karras",
             "AYS-SDXL",
-            "Stochastic",
-            "JYS (Dynamic)",
             "AOS-V (for v-prediction)",
             "AOS-ε (for ε-prediction)",
             "AkashicAOS",
@@ -2757,9 +2749,6 @@ class AdeptSamplerForge(scripts.Script):
             'debug_reproducibility': debug_reproducibility,
             'use_entropic_scheduler': use_entropic_scheduler,
             'entropic_scheduler_power': entropic_scheduler_power,
-            'stochastic_noise_type': stochastic_noise_type,
-            'stochastic_noise_scale': stochastic_noise_scale,
-            'stochastic_base_schedule': stochastic_base_schedule,
             'use_anime_schedule': use_anime_schedule,
             'use_anime_schedule_v': use_anime_schedule_v,
             'use_anime_schedule_e': use_anime_schedule_e,
@@ -2877,10 +2866,6 @@ class AdeptSamplerForge(scripts.Script):
                 'adept_ancestral_phase_strength': adept_ancestral_phase_strength if use_adept_ancestral_solver else 0.5,
                 'adept_ancestral_enhanced_derivative': adept_ancestral_enhanced_derivative if use_adept_ancestral_solver else False,
                 'adept_ancestral_adaptive_noise': adept_ancestral_adaptive_noise if use_adept_ancestral_solver else False,
-                # Stochastic scheduler settings
-                'stochastic_noise_type': stochastic_noise_type if custom_scheduler_type == 'Stochastic' else 'N/A',
-                'stochastic_noise_scale': stochastic_noise_scale if custom_scheduler_type == 'Stochastic' else 'N/A',
-                'stochastic_base_schedule': stochastic_base_schedule if custom_scheduler_type == 'Stochastic' else 'N/A',
                 # AkashicSolver settings
                 'akashic_tau': akashic_tau if use_akashic_solver else 'N/A',
                 'akashic_solver_order': int(akashic_solver_order) if use_akashic_solver else 'N/A',
@@ -4133,7 +4118,6 @@ def set_value(p, x: Any, xs: Any, *, field: str):
                        "detail_separation_radius", "pacing_coherence_sensitivity",
                        "adept_ancestral_eta", "adept_ancestral_s_noise", "adept_ancestral_phase_strength", 
                        "mirror_correction_euler_eta", "mirror_correction_euler_s_noise", "mirror_correction_euler_phase",
-                       "stochastic_noise_scale",
                        "akashic_tau", "akashic_base_eta", "akashic_s_noise", 
                        "akashic_phase_strength", "akashic_smea_strength", "akashic_ndb_strength"):
             # Float fields
@@ -4251,23 +4235,6 @@ def make_axis_on_xyz_grid():
             str,
             partial(set_value, field="exp_cfg_to_zero"),
             choices=lambda: ["True", "False"],
-        ),
-        xyz_grid.AxisOption(
-            "(Adept) Stochastic Noise Type",
-            str,
-            partial(set_value, field="stochastic_noise_type"),
-            choices=lambda: ["brownian", "uniform", "normal"],
-        ),
-        xyz_grid.AxisOption(
-            "(Adept) Stochastic Noise Scale",
-            float,
-            partial(set_value, field="stochastic_noise_scale"),
-        ),
-        xyz_grid.AxisOption(
-            "(Adept) Stochastic Base Schedule",
-            str,
-            partial(set_value, field="stochastic_base_schedule"),
-            choices=lambda: ["karras", "uniform", "cosine"],
         ),
         xyz_grid.AxisOption(
             "(Adept) Ancestral Eta",
