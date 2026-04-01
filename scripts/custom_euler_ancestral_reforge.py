@@ -2924,7 +2924,7 @@ class AdeptSamplerForge(scripts.Script):
                     final_sigmas = scheduler_map[custom_scheduler_type](*sigma_args)
         elif not skip_schedule_override and current_sampler_settings.get('use_entropic_scheduler', False) and not current_sampler_settings.get('debug_reproducibility', False):
             print("🔄 Overriding sigma schedule with Entropic Time Scheduler.")
-            power = current_sampler_settings.get('entropic_scheduler_power', 3.0)
+            power = current_sampler_settings.get('entropic_scheduler_power', 6.0)
             if len(sigmas) > 1:
                 final_sigmas = self.create_entropic_sigmas(
                     sigmas[0], sigmas[-2], len(sigmas) - 1, power, sigmas.device
@@ -3253,7 +3253,7 @@ class AdeptSamplerForge(scripts.Script):
         elif current_sampler_settings.get('use_akashic_aos'):
             return self.create_aos_akashic_sigmas(sigma_max, sigma_min, num_steps, device)
         elif current_sampler_settings.get('use_entropic_scheduler'):
-            power = current_sampler_settings.get('entropic_scheduler_power', 3.0)
+            power = current_sampler_settings.get('entropic_scheduler_power', 6.0)
             return self.create_entropic_sigmas(sigma_max, sigma_min, num_steps, power, device)
         elif current_sampler_settings.get('custom_scheduler_type') == 'SNR-Optimized':
             return self.create_snr_optimized_sigmas(sigma_max, sigma_min, num_steps, device)
