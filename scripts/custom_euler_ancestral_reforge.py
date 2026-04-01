@@ -2963,34 +2963,18 @@ class AdeptSamplerForge(scripts.Script):
             if len(sigmas) > 1:
                 sigma_args = (sigmas[0], sigmas[-2], len(sigmas) - 1, sigmas.device)
 
-                # Handle JYS scheduler with dynamic computation
-                if custom_scheduler_type == "JYS (Dynamic)":
-                    final_sigmas = self.create_jys_sigmas(sigmas[0], sigmas[-2], len(sigmas) - 1, sigmas.device)
-                else:
-                    scheduler_map = {
-                        "SNR-Optimized": self.create_snr_optimized_sigmas,
-                        "Constant-Rate": self.create_constant_rate_sigmas,
-                        "Adaptive-Optimized": self.create_adaptive_optimized_sigmas,
-                        "Cosine-Annealed": self.create_cosine_sigmas,
-                        "LogSNR-Uniform": self.create_logsnr_uniform_sigmas,
-                        "Tanh Mid-Boost": self.create_tanh_midboost_sigmas,
-                        "Exponential Tail": self.create_exponential_tail_sigmas,
-                        "Jittered-Karras": self.create_jittered_karras_sigmas,
-                        "Hybrid JYS-Karras": self.create_hybrid_jys_karras_sigmas,
-                        "AYS-SDXL": self.create_ays_sdxl_sigmas,
-                        "Stochastic": self.create_stochastic_sigmas,
-                    }
-                    if custom_scheduler_type in scheduler_map:
-                        if custom_scheduler_type == "Stochastic":
-                            # Pass stochastic parameters
-                            final_sigmas = self.create_stochastic_sigmas(
-                                sigma_args[0], sigma_args[1], sigma_args[2], sigma_args[3],
-                                current_sampler_settings.get('stochastic_noise_type', 'brownian'),
-                                current_sampler_settings.get('stochastic_noise_scale', 0.3),
-                                current_sampler_settings.get('stochastic_base_schedule', 'karras')
-                            )
-                        else:
-                            final_sigmas = scheduler_map[custom_scheduler_type](*sigma_args)
+                scheduler_map = {
+                    "SNR-Optimized": self.create_snr_optimized_sigmas,
+                    "Cosine-Annealed": self.create_cosine_sigmas,
+                    "LogSNR-Uniform": self.create_logsnr_uniform_sigmas,
+                    "Tanh Mid-Boost": self.create_tanh_midboost_sigmas,
+                    "Exponential Tail": self.create_exponential_tail_sigmas,
+                    "Jittered-Karras": self.create_jittered_karras_sigmas,
+                    "Hybrid JYS-Karras": self.create_hybrid_jys_karras_sigmas,
+                    "AYS-SDXL": self.create_ays_sdxl_sigmas,
+                }
+                if custom_scheduler_type in scheduler_map:
+                    final_sigmas = scheduler_map[custom_scheduler_type](*sigma_args)
         elif not skip_schedule_override and current_sampler_settings.get('use_entropic_scheduler', False) and not current_sampler_settings.get('debug_reproducibility', False):
             print("🔄 Overriding sigma schedule with Entropic Time Scheduler.")
             power = current_sampler_settings.get('entropic_scheduler_power', 3.0)
@@ -3326,10 +3310,6 @@ class AdeptSamplerForge(scripts.Script):
             return self.create_entropic_sigmas(sigma_max, sigma_min, num_steps, power, device)
         elif current_sampler_settings.get('custom_scheduler_type') == 'SNR-Optimized':
             return self.create_snr_optimized_sigmas(sigma_max, sigma_min, num_steps, device)
-        elif current_sampler_settings.get('custom_scheduler_type') == 'Constant-Rate':
-            return self.create_constant_rate_sigmas(sigma_max, sigma_min, num_steps, device)
-        elif current_sampler_settings.get('custom_scheduler_type') == 'Adaptive-Optimized':
-            return self.create_adaptive_optimized_sigmas(sigma_max, sigma_min, num_steps, device)
         elif current_sampler_settings.get('custom_scheduler_type') == 'Cosine-Annealed':
             return self.create_cosine_sigmas(sigma_max, sigma_min, num_steps, device)
         elif current_sampler_settings.get('custom_scheduler_type') == 'LogSNR-Uniform':
@@ -3344,10 +3324,6 @@ class AdeptSamplerForge(scripts.Script):
             return self.create_hybrid_jys_karras_sigmas(sigma_max, sigma_min, num_steps, device)
         elif current_sampler_settings.get('custom_scheduler_type') == 'AYS-SDXL':
             return self.create_ays_sdxl_sigmas(sigma_max, sigma_min, num_steps, device)
-        elif current_sampler_settings.get('custom_scheduler_type') == 'Stochastic':
-            return self.create_stochastic_sigmas(sigma_max, sigma_min, num_steps, device)
-        elif current_sampler_settings.get('custom_scheduler_type') == 'JYS (Dynamic)':
-            return self.create_jys_sigmas(sigma_max, sigma_min, num_steps, device)
         else:
             # Fallback to entropic with neutral power, as it's self-contained.
             return self.create_entropic_sigmas(sigma_max, sigma_min, num_steps, 1.0, device)
