@@ -36,9 +36,9 @@ Organized by category for easy selection:
 
 | Category | Schedulers |
 |----------|------------|
-| **Universal** | `None`, `Entropic`, `SNR-Optimized`, `Constant-Rate`, `Adaptive-Optimized`, `Cosine-Annealed`, `LogSNR-Uniform`, `Tanh Mid-Boost`, `Exponential Tail`, `Jittered-Karras`, `Hybrid JYS-Karras`, `AYS-SDXL`, `Stochastic`, `JYS (Dynamic)` |
-| **V-Prediction** | `AOS-V (for v-prediction)`, `SNR-Optimized` |
-| **ε-Prediction / EQ-VAE** | `AOS-ε (for ε-prediction)`, `AkashicAOS`, `AkashicAOS Alt`, `AkashicEQFlow` |
+| **Universal** | `None`, `Entropic`, `SNR-Optimized`, `Cosine-Annealed`, `LogSNR-Uniform`, `Tanh Mid-Boost`, `Exponential Tail`, `Jittered-Karras`, `Hybrid JYS-Karras`, `AYS-SDXL` |
+| **V-Prediction** | `AOS-V (for v-prediction)` *(deprecated — prefer AkashicAOS family)* |
+| **ε-Prediction / EQ-VAE** | `AOS-ε (for ε-prediction)` *(deprecated — prefer AkashicAOS family)*, `AkashicAOS`, `AkashicAOS Alt`, `AkashicEQFlow` |
 
 #### Akashic Scheduler Family (ε / EQ-VAE)
 
