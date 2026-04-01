@@ -3801,52 +3801,6 @@ class AdeptSamplerForge(scripts.Script):
         
         return torch.cat([sigmas, torch.zeros(1, device=device)])
 
-    def create_constant_rate_sigmas(self, sigma_max, sigma_min, num_steps, device='cpu'):
-        """
-        Ensures constant rate of distributional change throughout sampling.
-        Based on "Constant Rate Scheduling" (2024)
-        """
-        rho = 7.0
-        
-        t = torch.linspace(0, 1, num_steps, device=device)
-        
-        corrected_t = t + 0.3 * torch.sin(math.pi * t) * (1 - t)
-        
-        min_inv_rho = sigma_min ** (1 / rho)
-        max_inv_rho = sigma_max ** (1 / rho)
-        sigmas = (max_inv_rho + corrected_t * (min_inv_rho - max_inv_rho)) ** rho
-        
-        return torch.cat([sigmas, torch.zeros(1, device=device)])
-
-    def create_adaptive_optimized_sigmas(self, sigma_max, sigma_min, num_steps, device='cpu'):
-        """
-        Creates an adaptive schedule that optimizes itself based on the sampling progress.
-        Inspired by "Align Your Steps" methodology.
-        """
-        rho = 7.0
-        
-        base_t = torch.linspace(0, 1, num_steps, device=device)
-        
-        strategies = [
-            lambda t: t,
-            lambda t: t ** 0.8,
-            lambda t: t + 0.2 * torch.sin(2 * math.pi * t) * (1 - t),
-            lambda t: 1 / (1 + torch.exp(-3 * (t - 0.5))),
-        ]
-        
-        weights = [0.2, 0.3, 0.2, 0.3]
-        
-        combined_t = sum(w * s(base_t) for w, s in zip(weights, strategies))
-        
-        if (combined_t.max() - combined_t.min()) > 1e-6:
-            combined_t = (combined_t - combined_t.min()) / (combined_t.max() - combined_t.min())
-        
-        min_inv_rho = sigma_min ** (1 / rho)
-        max_inv_rho = sigma_max ** (1 / rho)
-        sigmas = (max_inv_rho + combined_t * (min_inv_rho - max_inv_rho)) ** rho
-        
-        return torch.cat([sigmas, torch.zeros(1, device=device)])
-
     def create_cosine_sigmas(self, sigma_max, sigma_min, num_steps, device='cpu'):
         """Cosine-annealed schedule: smooth start, strong early drop, gentle tail."""
         rho = 7.0
@@ -3908,62 +3862,6 @@ class AdeptSamplerForge(scripts.Script):
         sigmas = (max_inv_rho + u * (min_inv_rho - max_inv_rho)) ** rho
 
         sigmas, _ = torch.sort(sigmas, descending=True)
-        return torch.cat([sigmas, torch.zeros(1, device=device)])
-
-    def create_stochastic_sigmas(self, sigma_max, sigma_min, num_steps, device='cpu', noise_type: str = 'brownian', noise_scale: float = 0.3, base_schedule: str = 'karras'):
-        """
-        Stochastic scheduler with controlled randomness in timestep selection.
-        Reduces repetitive patterns and improves sample diversity through strategic noise injection.
-
-        Args:
-            sigma_max: Maximum sigma value
-            sigma_min: Minimum sigma value
-            num_steps: Number of steps
-            device: Device for tensors
-            noise_type: Type of noise ('brownian', 'uniform', 'normal')
-            noise_scale: Scale of the stochastic perturbation (0.0 = deterministic)
-            base_schedule: Base schedule to add noise to ('karras', 'uniform', 'cosine')
-        """
-        rho = 7.0
-
-        # Generate base timestep positions
-        if base_schedule == 'uniform':
-            # Uniform spacing in sigma space
-            u_base = torch.linspace(0, 1, num_steps, device=device)
-        elif base_schedule == 'cosine':
-            # Cosine-annealed spacing
-            u_base = (1 - torch.cos(torch.pi * torch.linspace(0, 1, num_steps, device=device))) / 2
-        else:  # 'karras' (default)
-            # Karras-style spacing (default)
-            u_base = torch.linspace(0, 1, num_steps, device=device)
-
-        # Add stochastic perturbation
-        if noise_type == 'brownian':
-            # Brownian motion: cumulative sum of random steps
-            noise = torch.randn(num_steps, device=device)
-            # Integrate to get brownian motion
-            brownian_noise = torch.cumsum(noise, dim=0)
-            # Normalize to [0,1] range and scale
-            brownian_noise = (brownian_noise - brownian_noise.min()) / (brownian_noise.max() - brownian_noise.min() + 1e-8)
-            perturbation = (brownian_noise - 0.5) * noise_scale
-        elif noise_type == 'normal':
-            # Gaussian noise
-            perturbation = torch.randn(num_steps, device=device) * noise_scale
-        else:  # 'uniform'
-            # Uniform noise
-            perturbation = (torch.rand(num_steps, device=device) - 0.5) * 2 * noise_scale
-
-        # Apply perturbation while keeping values in [0,1]
-        u_stochastic = torch.clamp(u_base + perturbation, 0.0, 1.0)
-
-        # Map to sigma space using karras formula
-        min_inv_rho = sigma_min ** (1 / rho)
-        max_inv_rho = sigma_max ** (1 / rho)
-        sigmas = (max_inv_rho + u_stochastic * (min_inv_rho - max_inv_rho)) ** rho
-
-        # Ensure descending order (important for k-diffusion samplers)
-        sigmas, _ = torch.sort(sigmas, descending=True)
-
         return torch.cat([sigmas, torch.zeros(1, device=device)])
 
     def create_jys_sigmas(self, sigma_max, sigma_min, num_steps, device='cpu', jys_steps=None):
