@@ -1,5 +1,4 @@
 import math
-import numpy as np
 import torch
 import json
 import sys
@@ -3596,29 +3595,26 @@ class AdeptSamplerForge(scripts.Script):
     def create_ays_sdxl_sigmas(self, sigma_max, sigma_min, num_steps, device='cpu'):
         """
         AYS (Align Your Steps) optimized sigma schedule for SDXL.
-        
-        Based on NVIDIA's paper: "Align Your Steps: Optimizing Sampling 
+
+        Based on NVIDIA's paper: "Align Your Steps: Optimizing Sampling
         Schedules in Diffusion Models" (CVPR 2024)
-        
+
         Uses pre-computed optimal schedules for specific step counts,
         with log-linear interpolation for other step counts.
-        
+
         Key insight: AYS allocates more steps to lower noise levels (detail phase)
         which maximizes benefit from EQ-VAE's smooth latent space.
-        
+
         Pre-computed schedules are normalized (0-1) and scaled to sigma range.
         """
-        import numpy as np
-        
         # Pre-computed AYS schedules for SDXL (normalized 0-1, descending)
         # Source: https://research.nvidia.com/labs/toronto-ai/AlignYourSteps/
-        # These represent optimal timestep positions based on KLUB minimization
         AYS_SCHEDULES = {
             10: [1.0000, 0.8751, 0.7502, 0.6254, 0.5004, 0.3755, 0.2506, 0.1253, 0.0502, 0.0000],
-            15: [1.0000, 0.9167, 0.8334, 0.7501, 0.6668, 0.5835, 0.5002, 0.4169, 0.3336, 
+            15: [1.0000, 0.9167, 0.8334, 0.7501, 0.6668, 0.5835, 0.5002, 0.4169, 0.3336,
                  0.2503, 0.1670, 0.0837, 0.0335, 0.0084, 0.0000],
             20: [1.0000, 0.9375, 0.8750, 0.8125, 0.7500, 0.6875, 0.6250, 0.5625, 0.5000,
-                 0.4375, 0.3750, 0.3125, 0.2500, 0.1875, 0.1250, 0.0625, 0.0313, 0.0156, 
+                 0.4375, 0.3750, 0.3125, 0.2500, 0.1875, 0.1250, 0.0625, 0.0313, 0.0156,
                  0.0039, 0.0000],
             25: [1.0000, 0.9500, 0.9000, 0.8500, 0.8000, 0.7500, 0.7000, 0.6500, 0.6000,
                  0.5500, 0.5000, 0.4500, 0.4000, 0.3500, 0.3000, 0.2500, 0.2000, 0.1500,
@@ -3628,55 +3624,47 @@ class AdeptSamplerForge(scripts.Script):
                  0.2500, 0.2083, 0.1667, 0.1250, 0.0833, 0.0521, 0.0326, 0.0163, 0.0081,
                  0.0041, 0.0010, 0.0000],
         }
-        
-        # Determine if we have a pre-computed schedule or need to interpolate
+
         if num_steps in AYS_SCHEDULES:
             normalized = torch.tensor(AYS_SCHEDULES[num_steps], device=device, dtype=torch.float32)
         else:
-            # Find nearest reference schedule for interpolation
+            # Find nearest reference schedule (prefer larger to avoid truncation)
             available_steps = sorted(AYS_SCHEDULES.keys())
-            
-            # Find closest schedule(s)
             if num_steps < available_steps[0]:
                 ref_steps = available_steps[0]
             elif num_steps > available_steps[-1]:
                 ref_steps = available_steps[-1]
             else:
-                # Find the two closest schedules and use the larger one
-                ref_steps = min([s for s in available_steps if s >= num_steps], default=available_steps[-1])
-            
-            ref_schedule = np.array(AYS_SCHEDULES[ref_steps])
-            
-            # Log-linear interpolation to target step count
-            # This preserves the exponential nature of sigma schedules
-            t_ref = np.linspace(0, 1, len(ref_schedule))
-            t_new = np.linspace(0, 1, num_steps + 1)  # +1 for terminal 0
-            
-            # Handle log of zeros by using small epsilon
-            log_ref = np.log(ref_schedule + 1e-8)
-            log_ref[-1] = log_ref[-2] - 3.0  # Extend for terminal
-            
-            # Interpolate in log space
-            log_interp = np.interp(t_new, t_ref, log_ref)
-            normalized_np = np.exp(log_interp)
-            normalized_np[-1] = 0.0  # Ensure exact zero terminal
-            
-            normalized = torch.tensor(normalized_np, device=device, dtype=torch.float32)
-        
-        # Scale from normalized [0, 1] to actual sigma range [sigma_min, sigma_max]
-        # AYS schedule is descending, so we scale appropriately
+                ref_steps = min(s for s in available_steps if s >= num_steps)
+
+            ref_schedule = torch.tensor(AYS_SCHEDULES[ref_steps], device=device, dtype=torch.float32)
+
+            # Log-linear interpolation in torch (same math as numpy version)
+            # log_ref[-1] extended so the terminal zero has a finite log value
+            log_ref = torch.log(ref_schedule.clamp(min=1e-8))
+            log_ref[-1] = log_ref[-2] - 3.0  # extend for terminal step
+
+            t_ref = torch.linspace(0, 1, len(ref_schedule), device=device)
+            t_new = torch.linspace(0, 1, num_steps + 1, device=device)
+
+            # searchsorted-based linear interp in log space
+            idx = torch.searchsorted(t_ref, t_new).clamp(1, len(t_ref) - 1)
+            lo, hi = idx - 1, idx
+            frac = (t_new - t_ref[lo]) / (t_ref[hi] - t_ref[lo]).clamp(min=1e-12)
+            log_interp = log_ref[lo] + frac * (log_ref[hi] - log_ref[lo])
+            normalized = torch.exp(log_interp)
+            normalized[-1] = 0.0  # exact zero terminal
+
         sigma_range = sigma_max - sigma_min
         sigmas = normalized * sigma_range + sigma_min
-        
-        # Ensure first value is sigma_max and last is 0
         sigmas[0] = sigma_max
         sigmas[-1] = 0.0
-        
-        # Ensure monotonically decreasing (numerical stability)
+
+        # Monotonicity guarantee
         for i in range(1, len(sigmas) - 1):
-            if sigmas[i] >= sigmas[i-1]:
-                sigmas[i] = sigmas[i-1] * 0.999
-        
+            if sigmas[i] >= sigmas[i - 1]:
+                sigmas[i] = sigmas[i - 1] * 0.999
+
         return sigmas
 
     def create_entropic_sigmas(self, sigma_max, sigma_min, num_steps, power=3.0, device='cpu'):
