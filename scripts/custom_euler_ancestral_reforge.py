@@ -2513,7 +2513,6 @@ class AdeptSamplerForge(scripts.Script):
             self.enable_custom,
             self.eta, self.s_noise, self.debug_reproducibility,
             self.scheduler_override, self.entropic_scheduler_power,
-            self.stochastic_noise_type, self.stochastic_noise_scale, self.stochastic_base_schedule,
             self.use_content_aware_pacing, self.pacing_coherence_sensitivity,
             self.manual_pacing_override,
             self.debug_stop_after_coherence,
@@ -2543,7 +2542,6 @@ class AdeptSamplerForge(scripts.Script):
             enable_custom,
             eta, s_noise, debug_reproducibility,
             scheduler_override, entropic_scheduler_power,
-            stochastic_noise_type, stochastic_noise_scale, stochastic_base_schedule,
             use_content_aware_pacing, pacing_coherence_sensitivity,
             manual_pacing_override,
             debug_stop_after_coherence,
@@ -2584,13 +2582,6 @@ class AdeptSamplerForge(scripts.Script):
             if "entropic_scheduler_power" in xyz:
                 try: entropic_scheduler_power = float(xyz["entropic_scheduler_power"]) 
                 except Exception: pass
-            if "stochastic_noise_type" in xyz:
-                stochastic_noise_type = str(xyz["stochastic_noise_type"]) or stochastic_noise_type
-            if "stochastic_noise_scale" in xyz:
-                try: stochastic_noise_scale = float(xyz["stochastic_noise_scale"]) 
-                except Exception: pass
-            if "stochastic_base_schedule" in xyz:
-                stochastic_base_schedule = str(xyz["stochastic_base_schedule"]) or stochastic_base_schedule
             if "use_content_aware_pacing" in xyz:
                 use_content_aware_pacing = str(xyz["use_content_aware_pacing"]) == "True"
             if "pacing_coherence_sensitivity" in xyz:
