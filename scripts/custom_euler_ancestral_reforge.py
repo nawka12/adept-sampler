@@ -2290,7 +2290,6 @@ class AdeptSamplerForge(scripts.Script):
                         universal_choices = [
                             "None (use WebUI sampler schedule)",
                             "Entropic",
-                            "SNR-Optimized",
                             "Cosine-Annealed",
                             "LogSNR-Uniform",
                             "Tanh Mid-Boost",
@@ -2301,6 +2300,7 @@ class AdeptSamplerForge(scripts.Script):
                         ]
                         vpred_choices = [
                             "AOS-V (for v-prediction)",
+                            "SNR-Optimized",
                         ]
                         eps_choices = [
                             "AOS-ε (for ε-prediction)",
