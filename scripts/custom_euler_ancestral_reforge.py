@@ -2834,8 +2834,8 @@ class AdeptSamplerForge(scripts.Script):
             else:
                 print(f"✅ Adept Sampler is now active!")
             
-            # Add parameters to generation info
-            p.extra_generation_params.update({
+            # Add parameters to generation info (skip N/A entries to keep metadata compact)
+            p.extra_generation_params.update({k: v for k, v in {
                 'adept_sampler_enabled': True,
                 'adept_sampler_type': 'Enhanced (AOS Focused)',
                 'custom_eta': eta,
@@ -2846,7 +2846,7 @@ class AdeptSamplerForge(scripts.Script):
                 'entropic_power': entropic_scheduler_power if use_entropic_scheduler and not use_anime_schedule else 'N/A',
                 'anime_optimized_schedule': 'V' if use_anime_schedule_v else ('Epsilon' if use_anime_schedule_e else 'N/A'),
                 'content_aware_pacing': use_content_aware_pacing and use_anime_schedule,
-                'coherence_sensitivity': pacing_coherence_sensitivity,
+                'coherence_sensitivity': pacing_coherence_sensitivity if use_content_aware_pacing and use_anime_schedule else 'N/A',
                 'manual_pacing_override': json.dumps(manual_pacing_schedule) if manual_pacing_schedule else 'N/A',
                 'debug_stop_after_coherence': debug_stop_after_coherence and use_content_aware_pacing and use_anime_schedule,
                 'enhanced_detail_phase': use_enhanced_detail_phase,
@@ -2860,11 +2860,11 @@ class AdeptSamplerForge(scripts.Script):
                 'adept_solver_corrector': adept_solver_use_corrector if use_adept_solver else 'N/A',
                 'adept_ancestral_eta': adept_ancestral_eta if use_adept_ancestral_solver else 'N/A',
                 'adept_ancestral_s_noise': adept_ancestral_s_noise if use_adept_ancestral_solver else 'N/A',
-                'adept_ancestral_adaptive_eta': adept_ancestral_adaptive_eta if use_adept_ancestral_solver else False,
-                'adept_ancestral_phase_noise': adept_ancestral_phase_noise if use_adept_ancestral_solver else False,
-                'adept_ancestral_phase_strength': adept_ancestral_phase_strength if use_adept_ancestral_solver else 0.5,
-                'adept_ancestral_enhanced_derivative': adept_ancestral_enhanced_derivative if use_adept_ancestral_solver else False,
-                'adept_ancestral_adaptive_noise': adept_ancestral_adaptive_noise if use_adept_ancestral_solver else False,
+                'adept_ancestral_adaptive_eta': adept_ancestral_adaptive_eta if use_adept_ancestral_solver else 'N/A',
+                'adept_ancestral_phase_noise': adept_ancestral_phase_noise if use_adept_ancestral_solver else 'N/A',
+                'adept_ancestral_phase_strength': adept_ancestral_phase_strength if use_adept_ancestral_solver else 'N/A',
+                'adept_ancestral_enhanced_derivative': adept_ancestral_enhanced_derivative if use_adept_ancestral_solver else 'N/A',
+                'adept_ancestral_adaptive_noise': adept_ancestral_adaptive_noise if use_adept_ancestral_solver else 'N/A',
                 # AkashicSolver settings
                 'akashic_tau': akashic_tau if use_akashic_solver else 'N/A',
                 'akashic_solver_order': int(akashic_solver_order) if use_akashic_solver else 'N/A',
@@ -2882,12 +2882,12 @@ class AdeptSamplerForge(scripts.Script):
                 'mirror_correction_euler_smooth_phase': mirror_correction_euler_smooth_phase if use_mirror_correction_euler else 'N/A',
                 'mirror_correction_adaptive_noise': mirror_correction_adaptive_noise if use_mirror_correction_euler else 'N/A',
                 # Additional CFG Fixes parameters
-                'akashic_spectral_mod': akashic_spectral_mod if use_akashic_solver else False,
-                'akashic_combat_cfg_drift': akashic_combat_cfg_drift if use_akashic_solver else False,
+                'akashic_spectral_mod': akashic_spectral_mod if use_akashic_solver else 'N/A',
+                'akashic_combat_cfg_drift': akashic_combat_cfg_drift if use_akashic_solver else 'N/A',
                 'akashic_combat_drift_intensity': akashic_combat_drift_intensity if use_akashic_solver and akashic_combat_cfg_drift else 'N/A',
-                'akashic_dynamic_threshold': akashic_dynamic_threshold,
+                'akashic_dynamic_threshold': akashic_dynamic_threshold if use_akashic_solver else 'N/A',
                 'vae_reflection': vae_reflection,
-            })
+            }.items() if v != 'N/A'})
         else:
             print("🔄 Using standard sampler")
             return
