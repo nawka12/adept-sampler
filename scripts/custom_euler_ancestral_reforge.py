@@ -1,4 +1,5 @@
 import math
+import inspect
 import torch
 import json
 import sys
@@ -49,9 +50,16 @@ except ImportError:
 
 # Store original sampling functions to restore later
 original_samplers = {}
+_ldm_patched_originals = {}
 
 # Track patching state
 _patching_enabled = False
+
+# Import ldm_patched sampling module for AlterSampler compatibility
+try:
+    from ldm_patched.k_diffusion import sampling as _ldm_patched_sampling
+except ImportError:
+    _ldm_patched_sampling = None
 
 # VAE Reflection: Track original Conv2d padding modes for restoration
 _vae_reflection_active = False
@@ -237,14 +245,92 @@ def create_detail_enhanced_model(model, x, sigmas):
     return DetailEnhancer()
 
 
+def _make_sampler_wrapper(name, original_fn):
+    """Create a wrapper for a k-diffusion sampler function.
+
+    The original function is captured via closure so this works for both
+    k_diff and ldm_patched modules without a shared dict lookup.
+    """
+    def smart_wrapper(model, x, sigmas, extra_args=None, callback=None, disable=None, generator=None, **kwargs):
+        """Smart wrapper: when enabled, override sigma schedule but preserve the original sampler's solver."""
+        if not current_sampler_settings['enabled']:
+            return original_fn(model, x, sigmas, extra_args, callback, disable, **kwargs)
+
+        # Compute replacement schedule based on current settings
+        try:
+            final_sigmas = compute_sigma_schedule_from_settings(sigmas, current_sampler_settings)
+        except Exception as e:
+            print(f"⚠️ Sigma override failed for {name}: {e}. Using original schedule.")
+            final_sigmas = sigmas
+
+        # Check for content-aware pacing and detail enhancement
+        use_pacing = current_sampler_settings.get('use_content_aware_pacing', False)
+        use_detail_enhancement = current_sampler_settings.get('use_enhanced_detail_phase', False)
+        use_adept_solver = current_sampler_settings.get('use_adept_solver', False)
+
+        # Warn if pacing is enabled but sampler is not Euler Ancestral
+        if use_pacing and name != 'sample_euler_ancestral':
+            print(f"⚠️ Content-Aware Pacing only works with Euler Ancestral sampler.")
+            print(f"   Current sampler: {name.replace('sample_', '')}. Pacing will be disabled.")
+            use_pacing = False  # Disable pacing for non-Euler samplers
+
+        # If pacing is enabled with Adept Solver, warn user and use pacing
+        if use_pacing and use_adept_solver and name == 'sample_euler_ancestral':
+            print("⚠️ Content-Aware Pacing enabled with Adept Solver - using Enhanced Euler Ancestral with pacing instead.")
+            print("   (Pacing is not yet implemented in Adept Solver)")
+
+        # Priority 1: Pacing (only for Euler Ancestral)
+        if use_pacing and name == 'sample_euler_ancestral':
+            # Get eta and s_noise from settings
+            eta = current_sampler_settings.get('eta', 1.0)
+            s_noise = current_sampler_settings.get('s_noise', 1.0)
+            # Create an instance to call the method
+            # Pass skip_schedule_override=True because we already processed the schedule above
+            forge = AdeptSamplerForge()
+            return forge.sample_enhanced_euler_ancestral(model, x, final_sigmas, extra_args, callback, disable, eta, s_noise, generator, skip_schedule_override=True)
+
+        # Apply detail enhancement wrapper if enabled (works with all samplers)
+        active_model = model
+        if use_detail_enhancement and TORCHVISION_AVAILABLE:
+            active_model = create_detail_enhanced_model(model, x, final_sigmas)
+            if use_adept_solver:
+                print(f"🎨 Detail Enhancement: Model wrapper active (will be used with Adept Solver)")
+            else:
+                print(f"🎨 Detail Enhancement: Model wrapper active (will be used with {name.replace('sample_', '')} sampler)")
+
+        # Priority 2: Adept Solver (if pacing is not active)
+        if use_adept_solver:
+            return sample_adept_solver(active_model, x, final_sigmas, extra_args, callback, disable, generator, **kwargs)
+
+        # Priority 3: Adept Ancestral Solver (if neither pacing nor regular solver is active)
+        use_adept_ancestral_solver = current_sampler_settings.get('use_adept_ancestral_solver', False)
+        if use_adept_ancestral_solver:
+            return sample_adept_ancestral_solver(active_model, x, final_sigmas, extra_args, callback, disable, generator, **kwargs)
+
+        # Priority 4: AkashicSolver (optimized for EQVAE models)
+        use_akashic_solver = current_sampler_settings.get('use_akashic_solver', False)
+        if use_akashic_solver:
+            return sample_akashic_solver(active_model, x, final_sigmas, extra_args, callback, disable, generator, **kwargs)
+
+        # Priority 5: Mirror Correction Euler (clean semantic reflection solver)
+        use_mirror_correction_euler = current_sampler_settings.get('use_mirror_correction_euler', False)
+        if use_mirror_correction_euler:
+            return sample_mirror_correction_euler(active_model, x, final_sigmas, extra_args, callback, disable, generator, **kwargs)
+
+        # Default: Call the original sampler with the (possibly) overridden schedule and enhanced model
+        return original_fn(active_model, x, final_sigmas, extra_args, callback, disable, **kwargs)
+
+    return smart_wrapper
+
+
 def patch_samplers_globally():
     """Patch all k-diffusion sampling functions with cleanup support."""
     global _patching_enabled
-    
+
     if _patching_enabled:
         print("🔧 Adept Sampler: Already patched, skipping.")
         return
-    
+
     patched_count = 0
 
     # Iterate over all functions named like sample_* in k_diff.k_diffusion.sampling
@@ -260,99 +346,65 @@ def patch_samplers_globally():
         if not callable(func):
             continue
 
+        # Only patch functions with standard (model, x, sigmas, ...) signature.
+        # Skip incompatible samplers like dpm_fast/dpm_adaptive that use
+        # (sigma_min, sigma_max, n) instead — wrapping them would break the
+        # parameter inspection in KDiffusionSampler.sample().
+        try:
+            if 'sigmas' not in inspect.signature(func).parameters:
+                continue
+        except (ValueError, TypeError):
+            continue
+
         # Store original
         original_samplers[attr_name] = func
 
-        def make_wrapper(name):
-            def smart_wrapper(model, x, sigmas, extra_args=None, callback=None, disable=None, generator=None, **kwargs):
-                """Smart wrapper: when enabled, override sigma schedule but preserve the original sampler's solver."""
-                if not current_sampler_settings['enabled']:
-                    return original_samplers[name](model, x, sigmas, extra_args, callback, disable, **kwargs)
-
-                # Compute replacement schedule based on current settings
-                try:
-                    final_sigmas = compute_sigma_schedule_from_settings(sigmas, current_sampler_settings)
-                except Exception as e:
-                    print(f"⚠️ Sigma override failed for {name}: {e}. Using original schedule.")
-                    final_sigmas = sigmas
-
-                # Check for content-aware pacing and detail enhancement
-                use_pacing = current_sampler_settings.get('use_content_aware_pacing', False)
-                use_detail_enhancement = current_sampler_settings.get('use_enhanced_detail_phase', False)
-                use_adept_solver = current_sampler_settings.get('use_adept_solver', False)
-                
-                # Warn if pacing is enabled but sampler is not Euler Ancestral
-                if use_pacing and name != 'sample_euler_ancestral':
-                    print(f"⚠️ Content-Aware Pacing only works with Euler Ancestral sampler.")
-                    print(f"   Current sampler: {name.replace('sample_', '')}. Pacing will be disabled.")
-                    use_pacing = False  # Disable pacing for non-Euler samplers
-                
-                # If pacing is enabled with Adept Solver, warn user and use pacing
-                if use_pacing and use_adept_solver and name == 'sample_euler_ancestral':
-                    print("⚠️ Content-Aware Pacing enabled with Adept Solver - using Enhanced Euler Ancestral with pacing instead.")
-                    print("   (Pacing is not yet implemented in Adept Solver)")
-                
-                # Priority 1: Pacing (only for Euler Ancestral)
-                if use_pacing and name == 'sample_euler_ancestral':
-                    # Get eta and s_noise from settings
-                    eta = current_sampler_settings.get('eta', 1.0)
-                    s_noise = current_sampler_settings.get('s_noise', 1.0)
-                    # Create an instance to call the method
-                    # Pass skip_schedule_override=True because we already processed the schedule above
-                    forge = AdeptSamplerForge()
-                    return forge.sample_enhanced_euler_ancestral(model, x, final_sigmas, extra_args, callback, disable, eta, s_noise, generator, skip_schedule_override=True)
-                
-                # Apply detail enhancement wrapper if enabled (works with all samplers)
-                active_model = model
-                if use_detail_enhancement and TORCHVISION_AVAILABLE:
-                    active_model = create_detail_enhanced_model(model, x, final_sigmas)
-                    if use_adept_solver:
-                        print(f"🎨 Detail Enhancement: Model wrapper active (will be used with Adept Solver)")
-                    else:
-                        print(f"🎨 Detail Enhancement: Model wrapper active (will be used with {name.replace('sample_', '')} sampler)")
-                
-                # Priority 2: Adept Solver (if pacing is not active)
-                if use_adept_solver:
-                    return sample_adept_solver(active_model, x, final_sigmas, extra_args, callback, disable, generator, **kwargs)
-                
-                # Priority 3: Adept Ancestral Solver (if neither pacing nor regular solver is active)
-                use_adept_ancestral_solver = current_sampler_settings.get('use_adept_ancestral_solver', False)
-                if use_adept_ancestral_solver:
-                    return sample_adept_ancestral_solver(active_model, x, final_sigmas, extra_args, callback, disable, generator, **kwargs)
-
-                # Priority 4: AkashicSolver (optimized for EQVAE models)
-                use_akashic_solver = current_sampler_settings.get('use_akashic_solver', False)
-                if use_akashic_solver:
-                    return sample_akashic_solver(active_model, x, final_sigmas, extra_args, callback, disable, generator, **kwargs)
-
-                # Priority 5: Mirror Correction Euler (clean semantic reflection solver)
-                use_mirror_correction_euler = current_sampler_settings.get('use_mirror_correction_euler', False)
-                if use_mirror_correction_euler:
-                    return sample_mirror_correction_euler(active_model, x, final_sigmas, extra_args, callback, disable, generator, **kwargs)
-
-                # Default: Call the original sampler with the (possibly) overridden schedule and enhanced model
-                return original_samplers[name](active_model, x, final_sigmas, extra_args, callback, disable, **kwargs)
-
-            return smart_wrapper
-
-        setattr(k_diff.k_diffusion.sampling, attr_name, make_wrapper(attr_name))
+        setattr(k_diff.k_diffusion.sampling, attr_name, _make_sampler_wrapper(attr_name, func))
         patched_count += 1
 
+    # Also patch ldm_patched.k_diffusion.sampling for AlterSampler compatibility.
+    # AlterSampler resolves function references from this module, not k_diff.
+    ldm_count = 0
+    if _ldm_patched_sampling is not None:
+        for attr_name in dir(_ldm_patched_sampling):
+            if not attr_name.startswith('sample_'):
+                continue
+            func = getattr(_ldm_patched_sampling, attr_name)
+            if not callable(func):
+                continue
+            if attr_name in _ldm_patched_originals:
+                continue
+            try:
+                if 'sigmas' not in inspect.signature(func).parameters:
+                    continue
+            except (ValueError, TypeError):
+                continue
+            _ldm_patched_originals[attr_name] = func
+            setattr(_ldm_patched_sampling, attr_name, _make_sampler_wrapper(attr_name, func))
+            ldm_count += 1
+
     _patching_enabled = True
-    print(f"🔧 Adept Sampler: patched {patched_count} samplers")
+    print(f"🔧 Adept Sampler: patched {patched_count} samplers" + (f" + {ldm_count} ldm_patched (AlterSampler compat)" if ldm_count else ""))
 
 def unpatch_samplers_globally():
     """Restore original k-diffusion samplers."""
     global _patching_enabled
-    
+
     if not _patching_enabled:
         return
-    
+
     restored_count = 0
     for attr_name, original_func in original_samplers.items():
         setattr(k_diff.k_diffusion.sampling, attr_name, original_func)
         restored_count += 1
-    
+
+    # Also restore ldm_patched module
+    if _ldm_patched_sampling is not None:
+        for attr_name, original_func in _ldm_patched_originals.items():
+            setattr(_ldm_patched_sampling, attr_name, original_func)
+            restored_count += 1
+        _ldm_patched_originals.clear()
+
     _patching_enabled = False
     print(f"🔄 Adept Sampler: restored {restored_count} original samplers")
 
