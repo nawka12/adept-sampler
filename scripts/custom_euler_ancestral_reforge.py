@@ -154,6 +154,7 @@ current_sampler_settings = {
     'enabled': False,
     'eta': 1.0,
     's_noise': 1.0,
+    'adaptive_noise_scale': False,
     'debug_reproducibility': False,
     'use_entropic_scheduler': False,
     'entropic_scheduler_power': 6.0,
@@ -175,7 +176,6 @@ current_sampler_settings = {
     'adept_ancestral_phase_noise': False,
     'adept_ancestral_phase_strength': 0.5,
     'adept_ancestral_enhanced_derivative': False,
-    'adept_ancestral_adaptive_noise': False,
     # AkashicSolver v2 settings - SA-Solver base with AYS schedules
     'use_akashic_solver': False,
     'akashic_base_eta': 1.0,
@@ -187,14 +187,12 @@ current_sampler_settings = {
     'akashic_use_ays': False,        # Use AYS sigma schedules
     'akashic_smea_strength': 0.0,    # SMEA high-res coherency (0=disabled)
     'akashic_ndb_strength': 0.0,     # Native Detail Boost (0=disabled)
-    'akashic_adaptive_noise': False,  # Adaptive noise scale (auto-adjusts s_noise per step)
     # Mirror Correction Euler solver settings
     'use_mirror_correction_euler': False,
     'mirror_correction_euler_eta': 1.0,
     'mirror_correction_euler_s_noise': 1.0,
     'mirror_correction_euler_phase': 0.5,
     'mirror_correction_euler_smooth_phase': False,
-    'mirror_correction_adaptive_noise': False,
     'vae_reflection': False,         # VAE reflection padding for EQ-VAE edge artifact fix
     # Additional CFG fixes (post-hoc techniques)
     'akashic_spectral_mod': False,   # Enable spectral modulation for frequency correction
@@ -300,6 +298,8 @@ def _make_sampler_wrapper(name, original_fn):
 
         # Priority 2: Adept Solver (if pacing is not active)
         if use_adept_solver:
+            if current_sampler_settings.get('adaptive_noise_scale', False):
+                print("   Adaptive Noise Scale: skipped (deterministic solver: Adept Solver)")
             return sample_adept_solver(active_model, x, final_sigmas, extra_args, callback, disable, generator, **kwargs)
 
         # Priority 3: Adept Ancestral Solver (if neither pacing nor regular solver is active)
@@ -638,7 +638,7 @@ def sample_mirror_correction_euler(model, x, sigmas, extra_args=None, callback=N
     s_noise = current_sampler_settings.get('mirror_correction_euler_s_noise', 1.0)
     correction_phase = current_sampler_settings.get('mirror_correction_euler_phase', 0.5)
     smooth_phase = current_sampler_settings.get('mirror_correction_euler_smooth_phase', False)
-    adaptive_noise_enabled = current_sampler_settings.get('mirror_correction_adaptive_noise', False)
+    adaptive_noise_enabled = current_sampler_settings.get('adaptive_noise_scale', False)
     _probe_norm_limit = 5.0  # guard against out-of-distribution probe derivatives
 
     noise_sampler = get_noise_sampler(x)
@@ -789,7 +789,7 @@ def sample_adept_ancestral_solver(model, x, sigmas, extra_args=None, callback=No
     enable_phase_noise = current_sampler_settings.get('adept_ancestral_phase_noise', False)
     phase_strength = current_sampler_settings.get('adept_ancestral_phase_strength', 0.5)
     enable_enhanced_derivative = current_sampler_settings.get('adept_ancestral_enhanced_derivative', False)
-    adaptive_noise_enabled = current_sampler_settings.get('adept_ancestral_adaptive_noise', False)
+    adaptive_noise_enabled = current_sampler_settings.get('adaptive_noise_scale', False)
 
     print(f"🚀 Enhanced Adept Ancestral Solver active (η: {base_eta:.2f}, s_noise: {base_s_noise:.2f})")
     print(f"   Adaptive Eta: {enable_adaptive_eta}, Phase Noise: {enable_phase_noise}, Phase Strength: {phase_strength:.2f}, Enhanced Derivative: {enable_enhanced_derivative}")
@@ -1018,7 +1018,7 @@ def sample_akashic_solver(model, x, sigmas, extra_args=None, callback=None,
     solver_order = current_sampler_settings.get('akashic_solver_order', 2)
     smea_strength = current_sampler_settings.get('akashic_smea_strength', 0.0)
     ndb_strength = current_sampler_settings.get('akashic_ndb_strength', 0.0)
-    adaptive_noise_enabled = current_sampler_settings.get('akashic_adaptive_noise', False)
+    adaptive_noise_enabled = current_sampler_settings.get('adaptive_noise_scale', False)
     adaptive_noise_binned = adaptive_noise_enabled  # Always use phase-binned correction
 
     # Get Additional CFG Fixes settings
