@@ -317,6 +317,18 @@ def _make_sampler_wrapper(name, original_fn):
         if use_mirror_correction_euler:
             return sample_mirror_correction_euler(active_model, x, final_sigmas, extra_args, callback, disable, generator, **kwargs)
 
+        # ANS for external solvers (two-pass calibration + corrected rerun)
+        if current_sampler_settings.get('adaptive_noise_scale', False):
+            sig = inspect.signature(original_fn)
+            if 's_noise' in sig.parameters or 'noise_sampler' in sig.parameters:
+                return run_ans_two_pass(
+                    original_fn, name, active_model, x, final_sigmas,
+                    extra_args, callback, disable, kwargs
+                )
+            else:
+                print(f"   Adaptive Noise Scale: skipped (deterministic solver: "
+                      f"{name.replace('sample_', '')})")
+
         # Default: Call the original sampler with the (possibly) overridden schedule and enhanced model
         return original_fn(active_model, x, final_sigmas, extra_args, callback, disable, **kwargs)
 
