@@ -1814,17 +1814,27 @@ def get_phase_correction(sigma_val, bin_corrections, global_correction):
         return bin_corrections.get('cleanup', global_correction)
 
 
+class _CalibrationComplete(Exception):
+    """Raised by CalibrationCallback when enough samples have been collected."""
+    pass
+
+
 class CalibrationCallback:
     """Wraps the user's callback to collect excess ratio samples on-the-fly.
 
     Records denoised outputs from each step and computes the sigma-relative
     excess ratio used by ANS calibration.  Only stores one previous denoised
     tensor at a time (no memory blowup).
+
+    Raises _CalibrationComplete once ``warmup`` texture-phase samples have
+    been collected, allowing the caller to abort the solver early instead of
+    running every remaining step.
     """
 
-    def __init__(self, original_callback, sigmas):
+    def __init__(self, original_callback, sigmas, warmup=5):
         self.original_callback = original_callback
         self.sigmas = sigmas
+        self.warmup = warmup
         self.prev_denoised = None
         self.prev_change_norm = None
         self.excess_samples = []
@@ -1865,6 +1875,8 @@ class CalibrationCallback:
                 # Texture-phase samples drive global calibration
                 if 0.5 < sigma_val < 5.0:
                     self.excess_samples.append(excess)
+                    if len(self.excess_samples) >= self.warmup:
+                        raise _CalibrationComplete()
 
             self.prev_change_norm = change_norm
 
@@ -1887,7 +1899,10 @@ def run_ans_two_pass(original_fn, name, model, x, sigmas, extra_args, callback, 
     # --- Pass 1: Calibration ---
     print(f"   Adaptive Noise Scale: calibration pass ({name.replace('sample_', '')})")
     cal_callback = CalibrationCallback(callback, sigmas)
-    original_fn(model, x.clone(), sigmas.clone(), dict(extra_args) if extra_args else {}, cal_callback, disable, **kwargs)
+    try:
+        original_fn(model, x.clone(), sigmas.clone(), dict(extra_args) if extra_args else {}, cal_callback, disable, **kwargs)
+    except _CalibrationComplete:
+        pass  # Expected: callback collected enough samples and aborted early
 
     # --- Compute correction ---
     if len(cal_callback.excess_samples) < 5:
