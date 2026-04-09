@@ -1802,6 +1802,130 @@ def get_phase_correction(sigma_val, bin_corrections, global_correction):
         return bin_corrections.get('cleanup', global_correction)
 
 
+class CalibrationCallback:
+    """Wraps the user's callback to collect excess ratio samples on-the-fly.
+
+    Records denoised outputs from each step and computes the sigma-relative
+    excess ratio used by ANS calibration.  Only stores one previous denoised
+    tensor at a time (no memory blowup).
+    """
+
+    def __init__(self, original_callback, sigmas):
+        self.original_callback = original_callback
+        self.sigmas = sigmas
+        self.prev_denoised = None
+        self.prev_change_norm = None
+        self.excess_samples = []
+        self.excess_bins = {'structural': [], 'texture': [], 'cleanup': []}
+
+    def __call__(self, info):
+        if self.original_callback is not None:
+            self.original_callback(info)
+
+        i = info['i']
+        denoised = info['denoised']
+        sigma = info['sigma']
+        sigma_val = sigma.item() if torch.is_tensor(sigma) else float(sigma)
+
+        if i + 1 >= len(self.sigmas):
+            return
+
+        sigma_next_val = self.sigmas[i + 1].item() if torch.is_tensor(self.sigmas[i + 1]) else float(self.sigmas[i + 1])
+
+        if self.prev_denoised is not None:
+            change_norm = torch.norm(
+                (denoised - self.prev_denoised).flatten(1), dim=1
+            ).mean().item()
+
+            if self.prev_change_norm is not None and sigma_next_val > 0:
+                change_ratio = change_norm / (self.prev_change_norm + 1e-8)
+                sigma_ratio = sigma_next_val / (sigma_val + 1e-8)
+                excess = change_ratio / (sigma_ratio + 1e-8)
+
+                # Bin by sigma phase
+                if sigma_val > 5.0:
+                    self.excess_bins['structural'].append(excess)
+                elif sigma_val > 0.5:
+                    self.excess_bins['texture'].append(excess)
+                else:
+                    self.excess_bins['cleanup'].append(excess)
+
+                # Texture-phase samples drive global calibration
+                if 0.5 < sigma_val < 5.0:
+                    self.excess_samples.append(excess)
+
+            self.prev_change_norm = change_norm
+
+        self.prev_denoised = denoised.detach().clone()
+
+
+def run_ans_two_pass(original_fn, name, model, x, sigmas, extra_args, callback, disable, kwargs):
+    """Run ANS calibration via two-pass: calibrate then rerun with correction.
+
+    Pass 1 (calibration): Run the solver with a CalibrationCallback that
+    collects excess ratio samples from the callback's denoised outputs.
+    Pass 2 (correction):  Rerun from x_initial with s_noise scaled by the
+    computed correction factor.
+
+    For solvers that accept ``noise_sampler``, a wrapper applies per-phase
+    binned corrections.  For others, global correction via scalar s_noise.
+    """
+    x_initial = x.clone()
+
+    # --- Pass 1: Calibration ---
+    print(f"   Adaptive Noise Scale: calibration pass ({name.replace('sample_', '')})")
+    cal_callback = CalibrationCallback(callback, sigmas)
+    original_fn(model, x.clone(), sigmas, extra_args, cal_callback, disable, **kwargs)
+
+    # --- Compute correction ---
+    if len(cal_callback.excess_samples) < 5:
+        print(f"   Adaptive Noise Scale: not enough texture-phase samples "
+              f"({len(cal_callback.excess_samples)}/5), skipping correction")
+        return original_fn(model, x_initial, sigmas, extra_args, callback, disable, **kwargs)
+
+    global_correction, median_excess = compute_adaptive_noise_scale(
+        cal_callback.excess_samples, 1.0
+    )
+    bin_corrections = compute_binned_corrections(
+        cal_callback.excess_bins, global_correction
+    )
+    bin_info = {k: f"{v:.3f}" for k, v in bin_corrections.items()}
+    print(f"   Adaptive Noise Scale calibrated: global={global_correction:.3f}, "
+          f"binned={bin_info}, median_excess={median_excess:.3f}")
+
+    if 0.99 < global_correction < 1.01:
+        print(f"   Adaptive Noise Scale: correction ~1.0, no rerun needed")
+        return original_fn(model, x_initial, sigmas, extra_args, callback, disable, **kwargs)
+
+    # --- Pass 2: Corrected rerun ---
+    print(f"   Adaptive Noise Scale: correction pass ({name.replace('sample_', '')})")
+    corrected_kwargs = dict(kwargs)
+
+    # Check if solver accepts noise_sampler for per-phase correction
+    sig = inspect.signature(original_fn)
+    if 'noise_sampler' in sig.parameters:
+        default_noise_sampler = k_diff.k_diffusion.sampling.default_noise_sampler
+
+        base_noise_sampler = kwargs.get('noise_sampler', None)
+        if base_noise_sampler is None:
+            base_noise_sampler = default_noise_sampler(x_initial)
+
+        def ans_noise_sampler(sigma, sigma_next):
+            noise = base_noise_sampler(sigma, sigma_next)
+            sigma_val = sigma.item() if torch.is_tensor(sigma) else float(sigma)
+            correction = get_phase_correction(
+                sigma_val, bin_corrections, global_correction
+            )
+            return noise * correction
+        corrected_kwargs['noise_sampler'] = ans_noise_sampler
+    else:
+        # Fallback: scale the scalar s_noise
+        base_s_noise = kwargs.get('s_noise', 1.0)
+        corrected_kwargs['s_noise'] = base_s_noise * global_correction
+
+    return original_fn(model, x_initial, sigmas, extra_args, callback, disable, **corrected_kwargs)
+
+
 def adaptive_noise_step(denoised_raw, prev_denoised_raw, prev_change_norm,
                         sigma, sigma_next, excess_samples, adaptive_correction,
                         base_s_noise, step_idx, total_steps, warmup=5,
