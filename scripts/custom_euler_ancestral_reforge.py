@@ -1887,7 +1887,7 @@ def run_ans_two_pass(original_fn, name, model, x, sigmas, extra_args, callback, 
     # --- Pass 1: Calibration ---
     print(f"   Adaptive Noise Scale: calibration pass ({name.replace('sample_', '')})")
     cal_callback = CalibrationCallback(callback, sigmas)
-    original_fn(model, x.clone(), sigmas, extra_args, cal_callback, disable, **kwargs)
+    original_fn(model, x.clone(), sigmas.clone(), dict(extra_args) if extra_args else {}, cal_callback, disable, **kwargs)
 
     # --- Compute correction ---
     if len(cal_callback.excess_samples) < 5:
@@ -1906,7 +1906,7 @@ def run_ans_two_pass(original_fn, name, model, x, sigmas, extra_args, callback, 
           f"binned={bin_info}, median_excess={median_excess:.3f}")
 
     if 0.99 < global_correction < 1.01:
-        print(f"   Adaptive Noise Scale: correction ~1.0, no rerun needed")
+        print(f"   Adaptive Noise Scale: correction ~1.0, rerunning with original parameters")
         return original_fn(model, x_initial, sigmas, extra_args, callback, disable, **kwargs)
 
     # --- Pass 2: Corrected rerun ---
