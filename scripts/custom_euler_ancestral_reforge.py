@@ -2250,7 +2250,12 @@ class AdeptSamplerForge(scripts.Script):
                             choices=['None', 'Adept Solver', 'Adept Ancestral Solver', 'AkashicSolver', 'Mirror Correction Euler'],
                             info="None = WebUI's native solver. Adept = multistep predictor-corrector. Adept Ancestral = adds noise injection. AkashicSolver = optimized for EQVAE models."
                         )
-                        
+                        self.adaptive_noise_scale = gr.Checkbox(
+                            label='Adaptive Noise Scale',
+                            value=False,
+                            info="Auto-calibrates noise injection strength. Runs a calibration pass then restarts with correction. Works with all stochastic solvers."
+                        )
+
                         with gr.Group(visible=False) as solver_options:
                             with gr.Row():
                                 self.adept_solver_order = gr.Slider(
@@ -2288,11 +2293,6 @@ class AdeptSamplerForge(scripts.Script):
                                     label='Phase-Aware Noise',
                                     value=False,
                                     info="Adjusts noise by phase."
-                                )
-                                self.adept_ancestral_adaptive_noise = gr.Checkbox(
-                                    label='Adaptive Noise Scale',
-                                    value=False,
-                                    info="Auto-adjusts s_noise based on model behavior"
                                 )
 
                             with gr.Group(visible=False) as phase_strength_group:
@@ -2352,11 +2352,6 @@ class AdeptSamplerForge(scripts.Script):
                                     label='AYS Schedule',
                                     value=False,
                                     info="Use Align Your Steps optimized schedule"
-                                )
-                                self.akashic_adaptive_noise = gr.Checkbox(
-                                    label='Adaptive Noise Scale',
-                                    value=False,
-                                    info="Auto-adjusts s_noise based on model behavior"
                                 )
 
                             with gr.Row():
@@ -2451,11 +2446,6 @@ class AdeptSamplerForge(scripts.Script):
                                     value=False,
                                     info="Use log-sigma decay instead of binary cutoff. Blends correction "
                                          "strength with gradient stability — best for EQ-VAE smooth latents."
-                                )
-                                self.mirror_correction_adaptive_noise = gr.Checkbox(
-                                    label='Adaptive Noise Scale',
-                                    value=False,
-                                    info="Auto-adjusts s_noise based on model behavior"
                                 )
 
                         def on_solver_type_change(solver_type):
@@ -2635,6 +2625,12 @@ class AdeptSamplerForge(scripts.Script):
             (self.disable_for_hr, lambda p: str(p.get('adept_disable_for_hr')).lower() == 'true' if 'adept_disable_for_hr' in p else gr.update()),
             (self.exp_cfg_to_zero, lambda p: str(p.get('exp_cfg_to_zero')).lower() == 'true' if 'exp_cfg_to_zero' in p else gr.update()),
             (self.solver_type, lambda p: p.get('solver_type', 'None')),
+            (self.adaptive_noise_scale, lambda p: (
+                str(p.get('adaptive_noise_scale', 'false')).lower() == 'true'
+                or str(p.get('akashic_adaptive_noise', 'false')).lower() == 'true'
+                or str(p.get('adept_ancestral_adaptive_noise', 'false')).lower() == 'true'
+                or str(p.get('mirror_correction_adaptive_noise', 'false')).lower() == 'true'
+            ) if any(k in p for k in ('adaptive_noise_scale', 'akashic_adaptive_noise', 'adept_ancestral_adaptive_noise', 'mirror_correction_adaptive_noise')) else gr.update()),
             (self.adept_solver_order, lambda p: gr.update() if p.get('adept_solver_order') in (None, 'N/A') else int(p['adept_solver_order'])),
             (self.adept_solver_use_corrector, lambda p: str(p.get('adept_solver_corrector')).lower() == 'true' if 'adept_solver_corrector' in p else gr.update()),
             (self.adept_ancestral_eta, lambda p: gr.update() if p.get('adept_ancestral_eta') in (None, 'N/A') else float(p['adept_ancestral_eta'])),
@@ -2643,14 +2639,12 @@ class AdeptSamplerForge(scripts.Script):
             (self.adept_ancestral_phase_noise, lambda p: str(p.get('adept_ancestral_phase_noise', 'false')).lower() == 'true' if 'adept_ancestral_phase_noise' in p else gr.update()),
             (self.adept_ancestral_phase_strength, lambda p: gr.update() if p.get('adept_ancestral_phase_strength') in (None, 'N/A') else float(p['adept_ancestral_phase_strength'])),
             (self.adept_ancestral_enhanced_derivative, lambda p: str(p.get('adept_ancestral_enhanced_derivative', 'false')).lower() == 'true' if 'adept_ancestral_enhanced_derivative' in p else gr.update()),
-            (self.adept_ancestral_adaptive_noise, lambda p: str(p.get('adept_ancestral_adaptive_noise', 'false')).lower() == 'true' if 'adept_ancestral_adaptive_noise' in p else gr.update()),
             # AkashicSolver settings
             (self.akashic_tau, lambda p: gr.update() if p.get('akashic_tau') in (None, 'N/A') else float(p['akashic_tau'])),
             (self.akashic_solver_order, lambda p: gr.update() if p.get('akashic_solver_order') in (None, 'N/A') else int(p['akashic_solver_order'])),
             (self.akashic_base_eta, lambda p: gr.update() if p.get('akashic_base_eta') in (None, 'N/A') else float(p['akashic_base_eta'])),
             (self.akashic_s_noise, lambda p: gr.update() if p.get('akashic_s_noise') in (None, 'N/A') else float(p['akashic_s_noise'])),
             (self.akashic_adaptive_eta, lambda p: str(p.get('akashic_adaptive_eta', 'true')).lower() == 'true' if 'akashic_adaptive_eta' in p else gr.update()),
-            (self.akashic_adaptive_noise, lambda p: str(p.get('akashic_adaptive_noise', 'false')).lower() == 'true' if 'akashic_adaptive_noise' in p else gr.update()),
             (self.akashic_use_ays, lambda p: str(p.get('akashic_use_ays', 'false')).lower() == 'true' if 'akashic_use_ays' in p else gr.update()),
             (self.akashic_phase_strength, lambda p: gr.update() if p.get('akashic_phase_strength') in (None, 'N/A') else float(p['akashic_phase_strength'])),
             (self.akashic_smea_strength, lambda p: gr.update() if p.get('akashic_smea_strength') in (None, 'N/A') else float(p['akashic_smea_strength'])),
@@ -2659,7 +2653,6 @@ class AdeptSamplerForge(scripts.Script):
             (self.mirror_correction_euler_s_noise, lambda p: gr.update() if p.get('mirror_correction_euler_s_noise') in (None, 'N/A') else float(p['mirror_correction_euler_s_noise'])),
             (self.mirror_correction_euler_phase, lambda p: gr.update() if p.get('mirror_correction_euler_phase') in (None, 'N/A') else float(p['mirror_correction_euler_phase'])),
             (self.mirror_correction_euler_smooth_phase, lambda p: str(p.get('mirror_correction_euler_smooth_phase', 'false')).lower() == 'true' if 'mirror_correction_euler_smooth_phase' in p else gr.update()),
-            (self.mirror_correction_adaptive_noise, lambda p: str(p.get('mirror_correction_adaptive_noise', 'false')).lower() == 'true' if 'mirror_correction_adaptive_noise' in p else gr.update()),
             # EQ-VAE Mode fallback: old metadata with Balanced → set Noise Scale to 0.9
             (self.akashic_s_noise, lambda p: 0.9 if p.get('akashic_eqvae_mode') == 'Balanced' else gr.update()),
             # Additional CFG Fixes settings
@@ -2703,13 +2696,13 @@ class AdeptSamplerForge(scripts.Script):
             self.detail_enhancement_strength, self.detail_separation_radius,
             self.disable_for_hr,
             self.exp_cfg_to_zero,
-            self.solver_type, self.adept_solver_order, self.adept_solver_use_corrector,
+            self.solver_type, self.adaptive_noise_scale, self.adept_solver_order, self.adept_solver_use_corrector,
             self.adept_ancestral_eta, self.adept_ancestral_s_noise,
-            self.adept_ancestral_adaptive_eta, self.adept_ancestral_phase_noise, self.adept_ancestral_phase_strength, self.adept_ancestral_enhanced_derivative, self.adept_ancestral_adaptive_noise,
+            self.adept_ancestral_adaptive_eta, self.adept_ancestral_phase_noise, self.adept_ancestral_phase_strength, self.adept_ancestral_enhanced_derivative,
             self.mirror_correction_euler_eta, self.mirror_correction_euler_s_noise, self.mirror_correction_euler_phase,
-            self.mirror_correction_euler_smooth_phase, self.mirror_correction_adaptive_noise,
+            self.mirror_correction_euler_smooth_phase,
             self.akashic_tau, self.akashic_solver_order, self.akashic_base_eta, self.akashic_s_noise,
-            self.akashic_adaptive_eta, self.akashic_adaptive_noise, self.akashic_use_ays, self.akashic_phase_strength, self.akashic_smea_strength,
+            self.akashic_adaptive_eta, self.akashic_use_ays, self.akashic_phase_strength, self.akashic_smea_strength,
             self.akashic_ndb_strength,
             # Additional CFG Fixes settings
             self.akashic_spectral_mod,
@@ -2732,13 +2725,13 @@ class AdeptSamplerForge(scripts.Script):
             detail_enhancement_strength, detail_separation_radius,
             disable_for_hr,
             exp_cfg_to_zero,
-            solver_type, adept_solver_order, adept_solver_use_corrector,
+            solver_type, adaptive_noise_scale, adept_solver_order, adept_solver_use_corrector,
             adept_ancestral_eta, adept_ancestral_s_noise,
-            adept_ancestral_adaptive_eta, adept_ancestral_phase_noise, adept_ancestral_phase_strength, adept_ancestral_enhanced_derivative, adept_ancestral_adaptive_noise,
+            adept_ancestral_adaptive_eta, adept_ancestral_phase_noise, adept_ancestral_phase_strength, adept_ancestral_enhanced_derivative,
             mirror_correction_euler_eta, mirror_correction_euler_s_noise, mirror_correction_euler_phase,
-            mirror_correction_euler_smooth_phase, mirror_correction_adaptive_noise,
+            mirror_correction_euler_smooth_phase,
             akashic_tau, akashic_solver_order, akashic_base_eta, akashic_s_noise,
-            akashic_adaptive_eta, akashic_adaptive_noise, akashic_use_ays, akashic_phase_strength, akashic_smea_strength,
+            akashic_adaptive_eta, akashic_use_ays, akashic_phase_strength, akashic_smea_strength,
             akashic_ndb_strength,
             # Additional CFG Fixes settings
             akashic_spectral_mod, akashic_spectral_percentile,
@@ -2788,6 +2781,8 @@ class AdeptSamplerForge(scripts.Script):
                 exp_cfg_to_zero = str(xyz["exp_cfg_to_zero"]) == "True"
             if "solver_type" in xyz:
                 solver_type = str(xyz["solver_type"]) or solver_type
+            if "adaptive_noise_scale" in xyz:
+                adaptive_noise_scale = str(xyz["adaptive_noise_scale"]) == "True"
             if "adept_solver_order" in xyz:
                 try: adept_solver_order = int(xyz["adept_solver_order"])
                 except Exception: pass
@@ -2810,8 +2805,6 @@ class AdeptSamplerForge(scripts.Script):
                     adept_ancestral_phase_strength = 0.5
             if "adept_ancestral_enhanced_derivative" in xyz:
                 adept_ancestral_enhanced_derivative = str(xyz["adept_ancestral_enhanced_derivative"]) == "True"
-            if "adept_ancestral_adaptive_noise" in xyz:
-                adept_ancestral_adaptive_noise = str(xyz["adept_ancestral_adaptive_noise"]) == "True"
             # AkashicSolver XYZ overrides
             if "akashic_tau" in xyz:
                 try: akashic_tau = float(xyz["akashic_tau"])
@@ -2827,8 +2820,6 @@ class AdeptSamplerForge(scripts.Script):
                 except Exception: pass
             if "akashic_adaptive_eta" in xyz:
                 akashic_adaptive_eta = str(xyz["akashic_adaptive_eta"]) == "True"
-            if "akashic_adaptive_noise" in xyz:
-                akashic_adaptive_noise = str(xyz["akashic_adaptive_noise"]) == "True"
             if "akashic_use_ays" in xyz:
                 akashic_use_ays = str(xyz["akashic_use_ays"]) == "True"
             if "akashic_phase_strength" in xyz:
@@ -2848,8 +2839,6 @@ class AdeptSamplerForge(scripts.Script):
                 mirror_correction_euler_phase = float(xyz["mirror_correction_euler_phase"])
             if "mirror_correction_euler_smooth_phase" in xyz:
                 mirror_correction_euler_smooth_phase = str(xyz["mirror_correction_euler_smooth_phase"]) == "True"
-            if "mirror_correction_adaptive_noise" in xyz:
-                mirror_correction_adaptive_noise = str(xyz["mirror_correction_adaptive_noise"]) == "True"
             # Additional CFG Fixes XYZ overrides
             if "akashic_spectral_mod" in xyz:
                 akashic_spectral_mod = str(xyz["akashic_spectral_mod"]) == "True"
@@ -2933,6 +2922,7 @@ class AdeptSamplerForge(scripts.Script):
             'enabled': should_be_enabled,
             'eta': eta,
             's_noise': s_noise,
+            'adaptive_noise_scale': adaptive_noise_scale,
             'debug_reproducibility': debug_reproducibility,
             'use_entropic_scheduler': use_entropic_scheduler,
             'entropic_scheduler_power': entropic_scheduler_power,
@@ -2958,14 +2948,12 @@ class AdeptSamplerForge(scripts.Script):
             'adept_ancestral_phase_noise': adept_ancestral_phase_noise,
             'adept_ancestral_phase_strength': adept_ancestral_phase_strength,
             'adept_ancestral_enhanced_derivative': adept_ancestral_enhanced_derivative,
-            'adept_ancestral_adaptive_noise': adept_ancestral_adaptive_noise,
             # Mirror Correction Euler settings
             'use_mirror_correction_euler': use_mirror_correction_euler and enable_custom,
             'mirror_correction_euler_eta': mirror_correction_euler_eta,
             'mirror_correction_euler_s_noise': mirror_correction_euler_s_noise,
             'mirror_correction_euler_phase': mirror_correction_euler_phase,
             'mirror_correction_euler_smooth_phase': mirror_correction_euler_smooth_phase,
-            'mirror_correction_adaptive_noise': mirror_correction_adaptive_noise,
             # AkashicSolver v2 settings
             'use_akashic_solver': use_akashic_solver and enable_custom,
             'use_akashic_aos': use_akashic_aos,
@@ -2974,7 +2962,6 @@ class AdeptSamplerForge(scripts.Script):
             'akashic_base_eta': akashic_base_eta,
             'akashic_s_noise': akashic_s_noise,
             'akashic_adaptive_eta': akashic_adaptive_eta,
-            'akashic_adaptive_noise': akashic_adaptive_noise,
             'akashic_use_ays': akashic_use_ays,
             'akashic_phase_strength': akashic_phase_strength,
             'akashic_smea_strength': akashic_smea_strength,
@@ -3028,6 +3015,7 @@ class AdeptSamplerForge(scripts.Script):
                 'adept_sampler_type': 'Enhanced (AOS Focused)',
                 'custom_eta': eta,
                 'custom_s_noise': s_noise,
+                'adaptive_noise_scale': adaptive_noise_scale,
                 'custom_sampler_deterministic': True,
                 'debug_reproducibility': debug_reproducibility,
                 'entropic_scheduler': use_entropic_scheduler and not debug_reproducibility,
@@ -3052,14 +3040,12 @@ class AdeptSamplerForge(scripts.Script):
                 'adept_ancestral_phase_noise': adept_ancestral_phase_noise if use_adept_ancestral_solver else 'N/A',
                 'adept_ancestral_phase_strength': adept_ancestral_phase_strength if use_adept_ancestral_solver else 'N/A',
                 'adept_ancestral_enhanced_derivative': adept_ancestral_enhanced_derivative if use_adept_ancestral_solver else 'N/A',
-                'adept_ancestral_adaptive_noise': adept_ancestral_adaptive_noise if use_adept_ancestral_solver else 'N/A',
                 # AkashicSolver settings
                 'akashic_tau': akashic_tau if use_akashic_solver else 'N/A',
                 'akashic_solver_order': int(akashic_solver_order) if use_akashic_solver else 'N/A',
                 'akashic_base_eta': akashic_base_eta if use_akashic_solver else 'N/A',
                 'akashic_s_noise': akashic_s_noise if use_akashic_solver else 'N/A',
                 'akashic_adaptive_eta': akashic_adaptive_eta if use_akashic_solver else 'N/A',
-                'akashic_adaptive_noise': akashic_adaptive_noise if use_akashic_solver else 'N/A',
                 'akashic_use_ays': akashic_use_ays if use_akashic_solver else 'N/A',
                 'akashic_phase_strength': akashic_phase_strength if use_akashic_solver else 'N/A',
                 'akashic_smea_strength': akashic_smea_strength if use_akashic_solver else 'N/A',
@@ -3068,7 +3054,6 @@ class AdeptSamplerForge(scripts.Script):
                 'mirror_correction_euler_s_noise': mirror_correction_euler_s_noise if use_mirror_correction_euler else 'N/A',
                 'mirror_correction_euler_phase': mirror_correction_euler_phase if use_mirror_correction_euler else 'N/A',
                 'mirror_correction_euler_smooth_phase': mirror_correction_euler_smooth_phase if use_mirror_correction_euler else 'N/A',
-                'mirror_correction_adaptive_noise': mirror_correction_adaptive_noise if use_mirror_correction_euler else 'N/A',
                 # Additional CFG Fixes parameters
                 'akashic_spectral_mod': akashic_spectral_mod if use_akashic_solver else 'N/A',
                 'akashic_combat_cfg_drift': akashic_combat_cfg_drift if use_akashic_solver else 'N/A',
@@ -4461,9 +4446,9 @@ def make_axis_on_xyz_grid():
             choices=lambda: ["True", "False"],
         ),
         xyz_grid.AxisOption(
-            "(Adept) Akashic Adaptive Noise",
+            "(Adept) Adaptive Noise Scale",
             str,
-            partial(set_value, field="akashic_adaptive_noise"),
+            partial(set_value, field="adaptive_noise_scale"),
             choices=lambda: ["True", "False"],
         ),
         xyz_grid.AxisOption(
